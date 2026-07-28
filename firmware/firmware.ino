@@ -452,9 +452,13 @@ bool initCamera() {
   config.pixel_format = PIXFORMAT_RGB565;
   config.frame_size = FRAMESIZE_QVGA;
   config.jpeg_quality = 0;
-  config.fb_count = 2;
+  // fb_count=1 + GRAB_WHEN_EMPTY: capture on demand only.
+  // With fb_count=2 + GRAB_LATEST the camera DMA streams 24/7 (30fps into
+  // PSRAM even when idle), causing sporadic crashes/reboots under periodic
+  // /camera polling (e.g. face tracking).
+  config.fb_count = 1;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.grab_mode = CAMERA_GRAB_LATEST;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.sccb_i2c_port = -1;
 
   esp_err_t err = esp_camera_init(&config);
@@ -551,6 +555,7 @@ void handleCamera() {
   }
   camera_fb_t* old = esp_camera_fb_get();
   if (old) esp_camera_fb_return(old);
+  delay(150);  // let the sensor capture a fresh frame after the flush
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
     server.send(500, "application/json", "{\"error\":\"capture failed\"}");
