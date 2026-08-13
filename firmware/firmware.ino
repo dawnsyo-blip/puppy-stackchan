@@ -27,6 +27,7 @@
 #include <esp_camera.h>
 #include <Avatar.h>
 #include <Face.h>
+#include "PuppyFace.h"
 #include <HTTPClient.h>
 
 #include "config.h"
@@ -323,9 +324,6 @@ Expression baseExpr = Expression::Neutral;
 unsigned long touchExprTime = 0;
 bool touchExprActive = false;
 
-unsigned long httpExprTime = 0;
-bool httpExprActive = false;
-
 // Double-tap detection
 unsigned long lastValidTap = 0;
 const unsigned long DOUBLE_TAP_WINDOW = 800;
@@ -512,10 +510,19 @@ void handleFace() {
   else if (expr == "angry") { avatar.setExpression(Expression::Angry); baseExpr = Expression::Angry; }
   else if (expr == "sleepy") { avatar.setExpression(Expression::Sleepy); baseExpr = Expression::Sleepy; }
   else if (expr == "doubt") { avatar.setExpression(Expression::Doubt); baseExpr = Expression::Doubt; }
-  else if (expr == "love" || expr == "eyeroll") {
+  else if (expr == "love" || expr == "eyeroll" ||
+           expr == "thinking" || expr == "excited" || expr == "privacy") {
     avatar.setExpression(Expression::Neutral);
     baseExpr = Expression::Neutral;
     g_customExpr = expr;
+  }
+  else if (expr == "curious") {
+    avatar.setExpression(Expression::Doubt);
+    baseExpr = Expression::Doubt;
+  }
+  else if (expr == "sorry") {
+    avatar.setExpression(Expression::Sad);
+    baseExpr = Expression::Sad;
   }
   else { valid = false; }
 
@@ -525,12 +532,6 @@ void handleFace() {
   }
   currentExprName = expr;
   touchExprActive = false;
-  if (expr != "neutral") {
-    httpExprActive = true;
-    httpExprTime = millis();
-  } else {
-    httpExprActive = false;
-  }
   server.send(200, "application/json", "{\"ok\":true,\"expr\":\"" + expr + "\"}");
 }
 
@@ -870,31 +871,43 @@ void handleSpeech() {
 }
 
 void handleVolume() {
+  // /volume is polled continuously for the device's entire uptime (wake-word
+  // listening), unlike every other handler which is only used occasionally
+  // during specific states. A per-request heap malloc() for the sample
+  // buffer plus Arduino String concatenation for the JSON reply — both fine
+  // for occasionally-called handlers — fragment the small internal heap
+  // badly under that kind of sustained, repeated call rate, and the device
+  // degrades (RMS readings go erratic) and then crashes after a few dozen
+  // calls. Use a static sample buffer and a fixed stack buffer + snprintf
+  // for the response so this handler makes zero heap allocations.
+  static int16_t volBuf[1600];
   const int sampleCount = 1600;
-  int16_t* buf = (int16_t*)malloc(sampleCount * sizeof(int16_t));
-  if (!buf) {
-    server.send(500, "application/json", "{\"error\":\"malloc failed\"}");
-    return;
-  }
 
   startMic();
-  M5.Mic.record(buf, sampleCount, RECORD_SAMPLE_RATE);
+  M5.Mic.record(volBuf, sampleCount, RECORD_SAMPLE_RATE);
+  // Unlike handleRecord()/handleStream(), this handler used to leave the mic
+  // running (never called M5.Mic.end()), which left the I2S mic driver
+  // streaming in the background indefinitely — same class of bug as the
+  // earlier camera-DMA reboot issue. Release it here just like the other
+  // mic-using handlers do.
+  M5.Mic.end();
+  micActive = false;
 
   int64_t sumSq = 0;
   int16_t peak = 0;
   for (int i = 0; i < sampleCount; i++) {
-    int16_t s = buf[i];
+    int16_t s = volBuf[i];
     sumSq += (int64_t)s * s;
     if (abs(s) > peak) peak = abs(s);
   }
-  free(buf);
 
   float rms = sqrt((float)sumSq / sampleCount);
 
-  server.send(200, "application/json",
-    "{\"rms\":" + String(rms, 1) +
-    ",\"peak\":" + String(peak) +
-    ",\"threshold_suggestion\":" + String((int)(rms * 2)) + "}");
+  char json[96];
+  snprintf(json, sizeof(json),
+    "{\"rms\":%.1f,\"peak\":%d,\"threshold_suggestion\":%d}",
+    rms, (int)peak, (int)(rms * 2));
+  server.send(200, "application/json", json);
 }
 
 // ============ Lip Sync ============
@@ -990,18 +1003,18 @@ void setup() {
   M5StackChan.Display().println("Server started!");
   delay(1500);
 
-  auto *mouth    = new CustomMouth();
-  auto *eyeR     = new CustomEye(false);
-  auto *eyeL     = new CustomEye(true);
-  auto *browR    = new CustomBrow(false);
-  auto *browL    = new CustomBrow(true);
-  auto *mouthPos = new BoundingRect(148, 163);
-  auto *eyeRPos  = new BoundingRect(93, 230);
-  auto *eyeLPos  = new BoundingRect(96, 103);
-  auto *browRPos = new BoundingRect(67, 230);
-  auto *browLPos = new BoundingRect(70, 103);
-  auto *face = new Face(mouth, mouthPos, eyeR, eyeRPos, eyeL, eyeLPos,
-                        browR, browRPos, browL, browLPos);
+  auto *nose     = new PuppyNose();
+  auto *eyeR     = new PuppyEye(false);
+  auto *eyeL     = new PuppyEye(true);
+  auto *earR     = new PuppyEar(false);
+  auto *earL     = new PuppyEar(true);
+  auto *nosePos  = new BoundingRect(140, 160);
+  auto *eyeRPos  = new BoundingRect(105, 185);
+  auto *eyeLPos  = new BoundingRect(105, 135);
+  auto *earRPos  = new BoundingRect(90, 225);
+  auto *earLPos  = new BoundingRect(90, 95);
+  auto *face = new Face(nose, nosePos, eyeR, eyeRPos, eyeL, eyeLPos,
+                        earR, earRPos, earL, earLPos);
   avatar.init();
   avatar.setFace(face);
   avatar.setExpression(Expression::Neutral);
@@ -1128,22 +1141,13 @@ void loop() {
   updateLipSync();
 
   // Reset touch expression after 3 seconds
-  if (touchExprActive && (millis() - touchExprTime > 3000)) {
+  if (touchExprActive && (millis() - touchExprTime > 3600000)) {
     touchExprActive = false;
     avatar.setExpression(baseExpr);
     avatar.setEyeOpenRatio(1.0);
     avatar.setLeftGaze(0, 0);
     avatar.setRightGaze(0, 0);
     avatar.setIsAutoBlink(true);
-  }
-
-  // Reset HTTP expression after 30 seconds
-  if (httpExprActive && (millis() - httpExprTime > 30000)) {
-    httpExprActive = false;
-    baseExpr = Expression::Neutral;
-    currentExprName = "neutral";
-    g_customExpr = "";
-    avatar.setExpression(Expression::Neutral);
   }
 
   delay(10);

@@ -127,7 +127,9 @@ SCAN_PAUSE = 1.0
 TOUCH_POLL_SEC = 0.5
 
 # --- 语音唤醒（方案A：音量触发 + Whisper 校验）---
-VOLUME_POLL_SEC = 2.0            # 轮询 /volume 的间隔（调大以减少对 StackChan 的请求压力）
+VOLUME_POLL_SEC = 3.0            # 轮询 /volume 的间隔。实测 /volume 每次调用都会启停一次
+                                  # 麦克风(I2S)，持续高频调用即使 2s 一次也偶尔会让设备重启，
+                                  # 所以留了更大的余量；如果还不稳定可以继续调大。
 VOLUME_RMS_THRESHOLD = 22000     # 音量触发阈值，需要根据实际环境噪音调（可以先手动
                                   # 轮询 /volume 看安静时 rms 大概多少，再定这个值）
 WAKE_RECORD_SECONDS = 3          # 音量触发后，先录这么久做唤醒词校验
@@ -230,11 +232,17 @@ SYSTEM_PROMPT = """你是一只可爱的电子小狗，名叫 StackChan。
 # ║              API 辅助函数                     ║
 # ╚══════════════════════════════════════════════╝
 
+# 复用一个 Session：StackChan 的 WebServer 没有主动发 "Connection: close"，
+# 支持 HTTP keep-alive。之前每次 requests.get() 都会新开一个 TCP 连接，
+# 对 ESP32 本来就紧张的 WiFi/LWIP 连接资源是额外压力；用同一个 Session 让
+# urllib3 复用连接，减少设备侧频繁建连/拆连的开销。
+_session = requests.Session()
+
 def api_get(endpoint, timeout=None, _retry=True):
     """GET 请求失败（连不上/超时）时不要立刻重试——先等 API_RETRY_DELAY_SEC，
     重试一次；再失败就放弃，返回 None。避免在设备已经吃紧时连续拍请求。"""
     try:
-        return requests.get(f"{BASE_URL}{endpoint}", timeout=timeout or TIMEOUT)
+        return _session.get(f"{BASE_URL}{endpoint}", timeout=timeout or TIMEOUT)
     except requests.exceptions.RequestException as e:
         print(f"  [请求失败] {endpoint}: {e}")
         if _retry:
