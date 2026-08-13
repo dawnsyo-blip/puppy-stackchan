@@ -682,6 +682,16 @@ void handleRecord() {
     }
   }
 
+  // The very last M5.Mic.record() chunk before M5.Mic.end() consistently comes
+  // back as a fixed garbage pattern (verified bit-identical across separate
+  // recordings/reflashes — not real noise, likely a DMA descriptor that never
+  // gets filled before the I2S peripheral is torn down). Record one extra
+  // throwaway chunk to absorb that artifact so the real requested audio
+  // (already fully captured in `recorded` samples above) stays intact.
+  {
+    static int16_t dummyChunk[chunkSize];
+    M5.Mic.record(dummyChunk, chunkSize, RECORD_SAMPLE_RATE);
+  }
   M5.Mic.end();
   micActive = false;
   if (showLed) M5StackChan.showRgbColor(0, 0, 0);
@@ -880,11 +890,28 @@ void handleVolume() {
   // degrades (RMS readings go erratic) and then crashes after a few dozen
   // calls. Use a static sample buffer and a fixed stack buffer + snprintf
   // for the response so this handler makes zero heap allocations.
-  static int16_t volBuf[1600];
-  const int sampleCount = 1600;
+  // Sample window is 1 full second (not the original 100ms) so a poll every
+  // few seconds actually has a real chance of overlapping with speech —
+  // 100ms out of every 3s (the host's poll interval) was only a ~3.3% duty
+  // cycle, meaning the device was "listening" for a sliver of each cycle and
+  // missed almost all real speech even after the RMS threshold was fixed.
+  // Still a static buffer (not malloc), so this doesn't reintroduce the heap
+  // fragmentation bug fixed above.
+  static int16_t volBuf[16000];
+  const int sampleCount = 16000;
 
   startMic();
+  delay(100);
   M5.Mic.record(volBuf, sampleCount, RECORD_SAMPLE_RATE);
+  // Same fixed-garbage-tail issue fixed in handleRecord(): the chunk
+  // immediately before M5.Mic.end() reads back a constant bogus pattern
+  // instead of real mic data (verified bit-identical across separate
+  // recordings), inflating rms/peak even in total silence. Absorb it with a
+  // throwaway read so it doesn't land in volBuf.
+  {
+    static int16_t dummyChunk[1600];
+    M5.Mic.record(dummyChunk, 1600, RECORD_SAMPLE_RATE);
+  }
   // Unlike handleRecord()/handleStream(), this handler used to leave the mic
   // running (never called M5.Mic.end()), which left the I2S mic driver
   // streaming in the background indefinitely — same class of bug as the
@@ -942,6 +969,18 @@ void updateLipSync() {
 void setup() {
   Serial.begin(115200);
   M5StackChan.begin();
+
+  // M5Unified's board profile for CoreS3 sets mic magnification down to 1-2
+  // (vs. the library default of 16), and the driver divides magnification by
+  // (over_sampling*2)=4 internally — so the effective gain was ~0.25-0.5x,
+  // i.e. actually attenuating the raw signal. That left real speech barely
+  // distinguishable from ambient noise even spoken loudly right next to the
+  // device. Boost it explicitly for usable wake-word/STT sensitivity.
+  {
+    auto mic_cfg = M5.Mic.config();
+    mic_cfg.magnification = 5;
+    M5.Mic.config(mic_cfg);
+  }
 
   M5StackChan.Display().setTextSize(2);
   M5StackChan.Display().setTextColor(TFT_WHITE, TFT_BLACK);

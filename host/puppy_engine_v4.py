@@ -38,6 +38,7 @@ import threading
 import http.server
 from pathlib import Path
 from enum import Enum
+from urllib.parse import quote
 
 import numpy as np
 import cv2
@@ -130,14 +131,30 @@ TOUCH_POLL_SEC = 0.5
 VOLUME_POLL_SEC = 3.0            # 轮询 /volume 的间隔。实测 /volume 每次调用都会启停一次
                                   # 麦克风(I2S)，持续高频调用即使 2s 一次也偶尔会让设备重启，
                                   # 所以留了更大的余量；如果还不稳定可以继续调大。
-VOLUME_RMS_THRESHOLD = 22000     # 音量触发阈值，需要根据实际环境噪音调（可以先手动
-                                  # 轮询 /volume 看安静时 rms 大概多少，再定这个值）
+VOLUME_RMS_THRESHOLD = 300       # 音量触发阈值。这个数值经过了几轮固件修复才最终校准：
+                                  # 1) /volume 原来只采样 100ms 就报数，每 3s 轮询一次相当于
+                                  #    只有 3.3% 的时间在"听"，几乎不可能刚好盖住说话的瞬间——
+                                  #    改成整整 1 秒的采样窗口。
+                                  # 2) 每次录音在调 M5.Mic.end() 前的最后一块缓冲区读到的是固定
+                                  #    的垃圾数据（不同时间录到的值完全一样，明显不是真实声音），
+                                  #    多录一小段扔掉来避开这块脏数据。
+                                  # 3) M5Unified 给 CoreS3 预设的麦克风增益（magnification）只有
+                                  #    1-2，配合库内部再除以 4 的换算，等于把原始信号衰减到约
+                                  #    0.5 倍而不是放大——在 setup() 里显式调到 5 才是效果比较
+                                  #    合理的档位（调到 48 会削波）。
+                                  # 修完以上三个问题后实测：安静环境下 rms 在 50-160 附近波动，
+                                  # 而清楚说话时的 rms 能冲到 1000-7000 量级，两者有一到两个数量级
+                                  # 的差距，300 留了足够的安全边际。
 WAKE_RECORD_SECONDS = 3          # 音量触发后，先录这么久做唤醒词校验
 WAKE_WORDS = ["小狗", "xiǎo gǒu", "xiao gou"]
 
 # --- 完整对话链路 ---
 CURIOUS_RECORD_SECONDS = 4       # 好奇状态下录真正问题的时长
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
+
+# --- 字幕（唯一使用场景：qa_complex 逐个播报关键词时，同步显示当前正在念的
+#     那个词。其它所有状态只切表情，不显示文字也不播语音提示。） ---
+KEYWORD_SUBTITLE_DUR_MS = 1500    # /speech 的 dur 参数：单个关键词字幕展示时长
 
 # --- 语音识别 (Whisper) ---
 WHISPER_MODEL_PATH = "C:/Users/89823/whisper-small"
@@ -253,6 +270,14 @@ def api_get(endpoint, timeout=None, _retry=True):
 def set_expression(key):
     api_get(f"/face?expr={EXPRESSION_MAP.get(key, 'neutral')}")
 
+def set_subtitle(text, dur_ms=None):
+    """调用固件的 /speech 显示底部字幕气泡（见 firmware.ino 的 handleSpeech()/
+    drawSubtitle()）。传空字符串等于清空字幕。"""
+    q = f"/speech?text={quote(text)}"
+    if dur_ms:
+        q += f"&dur={int(dur_ms)}"
+    api_get(q)
+
 def move_servo(yaw=None, pitch=None, speed=None):
     params = []
     if yaw is not None:   params.append(f"yaw={yaw}")
@@ -271,7 +296,10 @@ def get_touch():
     return None
 
 def get_volume():
-    r = api_get("/volume", timeout=3)
+    # /volume now captures a full 1s of audio on the device before replying
+    # (see firmware.ino handleVolume()), so give it more headroom than the
+    # old 100ms-capture version needed.
+    r = api_get("/volume", timeout=5)
     if r and r.status_code == 200:
         try:    return r.json()
         except: return None
@@ -695,10 +723,14 @@ class PuppyEngine:
         self.last_volume_poll = now
 
         vol = get_volume()
-        if vol is None or vol.get("rms", 0) < VOLUME_RMS_THRESHOLD:
+        if vol is None:
+            return False
+        rms = vol.get("rms", 0)
+        print(f"[唤醒] rms={rms:.0f} (阈值={VOLUME_RMS_THRESHOLD})")
+        if rms < VOLUME_RMS_THRESHOLD:
             return False
 
-        print(f"[唤醒] 音量突增 (rms={vol.get('rms', 0):.0f})，录音校验唤醒词...")
+        print(f"[唤醒] 音量突增 (rms={rms:.0f})，录音校验唤醒词...")
         wav_bytes = record_audio(WAKE_RECORD_SECONDS)
         if not wav_bytes:
             return True
@@ -768,12 +800,15 @@ class PuppyEngine:
             self.speak_keywords(keywords)
 
     def speak_keywords(self, keywords):
-        """依次合成并播放每个关键词，关键词之间间隔 KEYWORD_GAP_SEC。"""
+        """依次合成并播放每个关键词，关键词之间间隔 KEYWORD_GAP_SEC。播放的同时
+        用字幕同步显示当前正在念的那个词——这是全系统唯一用到字幕的场景。"""
         for i, kw in enumerate(keywords):
+            set_subtitle(kw, dur_ms=KEYWORD_SUBTITLE_DUR_MS)
             wav_path = tts_to_wav(kw, f"kw_{i}")
             if wav_path:
                 play_wav_file(wav_path)
             time.sleep(KEYWORD_GAP_SEC)
+        set_subtitle("")
 
     # ---------- 计时器 ----------
 
