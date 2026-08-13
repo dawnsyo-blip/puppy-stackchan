@@ -14,6 +14,10 @@ StackChan 小狗行为引擎 v4
 - EXPRESSION_MAP 改用固件实际支持的表情名（见 firmware.ino handleFace()）。
 - 人脸检测、触摸检测（短按扫描/长按兴奋）、空闲计时器、开心状态面部追踪，
   这些 v3 已有的功能全部原样保留。
+- 稳定性修复：主循环轮询太密集（触摸/音量/人脸每轮全部调用）会把 StackChan
+  的 HTTP 请求打崩导致反复重启。改成触摸/音量/人脸三者轮流、每轮只发起一种
+  轮询请求，并放宽了各自的轮询间隔；API 请求失败后等 2 秒重试一次而不是立刻
+  重试，避免在设备本来就吃紧的时候继续加压。
 
 依赖（此项目用的是 anaconda "stackchan" 环境，基础环境没装这些）：
     conda activate stackchan
@@ -52,8 +56,10 @@ AUDIO_SERVER_PORT = 8080
 TIMEOUT = 5                     # 普通请求（/face、/servo、/touch、/volume）超时
 RECORD_TIMEOUT_MARGIN = 8       # /record?seconds=N 的请求超时 = N + 这个余量
 PLAY_TIMEOUT = 30               # /play 是阻塞调用（播完才返回），要给够时间
+API_RETRY_DELAY_SEC = 2.0       # API 请求失败（连不上/超时）后，等这么久再重试一次，
+                                 # 不要立刻重试，避免在设备本来就吃紧时继续加压
 
-MAIN_LOOP_INTERVAL_SEC = 0.12   # 主循环 tick() 间隔
+MAIN_LOOP_INTERVAL_SEC = 0.5    # 主循环 tick() 间隔
 
 # --- 计时器（秒） ---
 IDLE_TO_SLEEPY_SEC = 180
@@ -63,7 +69,7 @@ EXCITED_DURATION_SEC = 6
 LONG_PRESS_THRESHOLD = 1.0      # 按住超过这个时间=长按
 
 # --- 面部追踪 ---
-FACE_CHECK_INTERVAL_SEC = 1.5
+FACE_CHECK_INTERVAL_SEC = 3.0
 FACE_RETRACK_INTERVAL_SEC = 5   # 开心状态下每N秒回正重检
 FACE_DETECTION_CONFIDENCE = 0.6
 FACE_CONFIRM_FRAMES = 2
@@ -118,10 +124,10 @@ SCAN_SPEED = 300
 SCAN_PAUSE = 1.0
 
 # --- 触摸检测 ---
-TOUCH_POLL_SEC = 0.12
+TOUCH_POLL_SEC = 0.5
 
 # --- 语音唤醒（方案A：音量触发 + Whisper 校验）---
-VOLUME_POLL_SEC = 1.0            # 轮询 /volume 的间隔（调大以减少对 StackChan 的请求压力）
+VOLUME_POLL_SEC = 2.0            # 轮询 /volume 的间隔（调大以减少对 StackChan 的请求压力）
 VOLUME_RMS_THRESHOLD = 22000     # 音量触发阈值，需要根据实际环境噪音调（可以先手动
                                   # 轮询 /volume 看安静时 rms 大概多少，再定这个值）
 WAKE_RECORD_SECONDS = 3          # 音量触发后，先录这么久做唤醒词校验
@@ -224,10 +230,16 @@ SYSTEM_PROMPT = """你是一只可爱的电子小狗，名叫 StackChan。
 # ║              API 辅助函数                     ║
 # ╚══════════════════════════════════════════════╝
 
-def api_get(endpoint, timeout=None):
+def api_get(endpoint, timeout=None, _retry=True):
+    """GET 请求失败（连不上/超时）时不要立刻重试——先等 API_RETRY_DELAY_SEC，
+    重试一次；再失败就放弃，返回 None。避免在设备已经吃紧时连续拍请求。"""
     try:
         return requests.get(f"{BASE_URL}{endpoint}", timeout=timeout or TIMEOUT)
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as e:
+        print(f"  [请求失败] {endpoint}: {e}")
+        if _retry:
+            time.sleep(API_RETRY_DELAY_SEC)
+            return api_get(endpoint, timeout=timeout, _retry=False)
         return None
 
 def set_expression(key):
@@ -496,6 +508,9 @@ class PuppyEngine:
         # 语音唤醒
         self.last_volume_poll = 0
 
+        # 主循环计数（用于轮流轮询 + 心跳打印）
+        self.tick_count = 0
+
         # 语音链路：启动时一次性预加载，避免每次对话都重新加载模型
         print("[引擎] 预加载 Whisper 模型...")
         from faster_whisper import WhisperModel
@@ -763,8 +778,15 @@ class PuppyEngine:
     # ---------- 主循环 ----------
 
     def tick(self):
+        self.tick_count += 1
+        print(f"[循环] tick #{self.tick_count}, 状态={self.state.value}")
+
+        # 触摸/音量(语音唤醒)/人脸 三者轮流，每一轮 tick 只发起其中一种会打
+        # HTTP 请求的轮询，避免同一轮里对 StackChan 连打三个请求。
+        poll_slot = self.tick_count % 3   # 0=触摸 1=音量 2=人脸
+
         # --- 触摸（最高优先级）---
-        touch = self.check_touch()
+        touch = self.check_touch() if poll_slot == 0 else None
 
         if touch == "long_press":
             print("[触发] 长按 → 兴奋！")
@@ -781,14 +803,18 @@ class PuppyEngine:
             return
 
         # --- 语音唤醒（好奇/思考期间已经在处理语音了，不重复轮询）---
-        if self.state not in (State.CURIOUS, State.THINKING):
+        if poll_slot == 1 and self.state not in (State.CURIOUS, State.THINKING):
             if self.check_voice_wake():
                 return
 
         # --- 状态内行为 ---
+        # 人脸检测（会发 /camera 请求）只在轮到 poll_slot==2 时真正执行；
+        # 计时器类判断（空闲/困倦/兴奋持续时间）不发请求，每轮都可以正常判断。
+        do_face_check = (poll_slot == 2)
 
         if self.state == State.IDLE:
-            self.check_face()
+            if do_face_check:
+                self.check_face()
             if self.face_detected:
                 print("[触发] 被动检测到人脸")
                 self.transition(State.HAPPY)
@@ -798,7 +824,8 @@ class PuppyEngine:
 
         elif self.state == State.HAPPY:
             # 持续追踪人脸
-            self.retrack_face()
+            if do_face_check:
+                self.retrack_face()
             if not self.face_detected:
                 print("[触发] 人脸确认离开")
                 self.transition(State.IDLE)
@@ -808,7 +835,8 @@ class PuppyEngine:
                 self.transition(State.HAPPY if self.face_detected else State.IDLE)
 
         elif self.state == State.SLEEPY:
-            self.check_face()
+            if do_face_check:
+                self.check_face()
             if self.face_detected:
                 print("[触发] 困倦中检测到人脸！")
                 self.transition(State.HAPPY)
@@ -817,7 +845,8 @@ class PuppyEngine:
                 self.transition(State.PRIVACY)
 
         elif self.state == State.PRIVACY:
-            self.check_face()
+            if do_face_check:
+                self.check_face()
             if self.face_detected:
                 print("[触发] 隐私中检测到人脸！")
                 self.transition(State.HAPPY)
@@ -825,7 +854,8 @@ class PuppyEngine:
         elif self.state == State.SORRY:
             # 表情映射v6.xlsx：抱歉状态只由新的语音唤醒打断（上面已经处理），
             # 单纯看到人脸不会自动跳出，所以这里只更新追踪状态，不触发转移。
-            self.check_face()
+            if do_face_check:
+                self.check_face()
 
         # CURIOUS / THINKING 是瞬时状态：run_conversation_turn() 会同步跑完
         # 录音→识别→LLM→分支应对的整个过程才返回，tick() 观察不到这两个状态。
