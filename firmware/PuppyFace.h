@@ -97,13 +97,13 @@ static const int DOUBT_PIVOT_Y = 140;
 // 之后眼睛开始眨眼、耳朵开始左右摇晃；EXCITED_PAW_START_MS 之后开始出现爪印：
 // 先左爪，再右爪，如此交替 EXCITED_PAW_CYCLES 轮，每次显示时长在
 // EXCITED_PAW_MIN_MS~EXCITED_PAW_MAX_MS 之间随机；交替结束后左右爪一起出现
-// 并常驻。每次爪印出现时位置会在基准位置上叠加一点微弱的随机抖动。
+// 并常驻。每次爪印出现时位置会在基准位置上叠加一点随机抖动。
 static const unsigned long EXCITED_BLINK_SWING_START_MS = 1000;
 static const unsigned long EXCITED_PAW_START_MS = 2000;
-static const unsigned long EXCITED_PAW_MIN_MS = 1000;
-static const unsigned long EXCITED_PAW_MAX_MS = 3000;
+static const unsigned long EXCITED_PAW_MIN_MS = 500;
+static const unsigned long EXCITED_PAW_MAX_MS = 1500;
 static const int EXCITED_PAW_CYCLES = 2;
-static const int EXCITED_PAW_JITTER_PX = 5;  // 爪印位置随机抖动的最大幅度（像素）
+static const int EXCITED_PAW_JITTER_PX = 15;  // 爪印位置随机抖动的最大幅度（像素）
 
 // 兴奋表情整体缩小比例：眼睛/鼻子/嘴巴/舌头/耳朵都按这个比例缩小。
 // 爪印在此基础上再额外缩小 20%（EXCITED_PAW_SCALE），同时爪印内部脚趾间距、
@@ -112,6 +112,7 @@ static const float EXCITED_SCALE = 0.7f;
 static const float EXCITED_PAW_SCALE = EXCITED_SCALE * 0.8f;
 static const float EXCITED_EYE_BOOST = 1.2f;       // 兴奋时眼睛在整体缩放基础上再放大一点
 static const float EXCITED_EAR_INWARD_PX = 12.0f;  // 兴奋时耳朵朝眼睛方向靠拢的像素数
+static const float EXCITED_NOSE_UP_PX = 10.0f;     // 兴奋时鼻子朝眼睛方向靠拢（往上贴）的像素数
 
 // 把局部偏移量 (ox,oy) 绕原点旋转 angle 弧度，用于让部件"自身"的朝向也跟着转
 // （而不只是把部件的位置搬到旋转后的地方）。angle=0 时精确还原原始偏移量。
@@ -362,12 +363,14 @@ class PuppyEye : public Drawable {
 //   附近位置），和嘴巴弧线一起围成一个封闭的空间；舌头宽度正好是嘴巴宽度的一半。
 //
 // 鼻子大小、位置偏移（隐私时）、嘴巴弧线宽度/深度都用 FloatTransition
-// 平滑过渡；好奇时鼻子和嘴巴自身也跟着顺时针转。
+// 平滑过渡；好奇时鼻子和嘴巴自身也跟着顺时针转；兴奋时鼻子连带嘴巴/舌头整体
+// 朝眼睛方向靠拢 EXCITED_NOSE_UP_PX 像素。
 
 class PuppyNose : public Drawable {
   FloatTransition rxAnim_, ryAnim_, offXAnim_, offYAnim_;
   FloatTransition cwAnim_, cdAnim_;
   FloatTransition doubtAngleAnim_;
+  FloatTransition noseUpAnim_;  // 兴奋：鼻子（连带嘴巴/舌头）整体朝眼睛方向靠拢
 
  public:
   void draw(M5Canvas *spi, BoundingRect rect, DrawContext *ctx) override {
@@ -416,6 +419,11 @@ class PuppyNose : public Drawable {
     // 好奇表情下鼻子/嘴巴自身也跟着转。枢轴就是鼻子自己的锚点，
     // 所以鼻子中心的位置不动，但形状（椭圆朝向、嘴巴弧线）会跟着转。
     applyRotationAroundPivot(rotAngle, DOUBT_PIVOT_X, DOUBT_PIVOT_Y, cx, cy);
+
+    // ---- 兴奋：鼻子连带嘴巴/舌头整体往上挪，贴近眼睛（眼睛的锚点 y 比鼻子小，
+    //      即在眼睛上方；这里统一改 cy，鼻子和嘴巴会一起挪动，不会跟嘴巴脱节）----
+    float noseUp = noseUpAnim_.update(isExcited ? EXCITED_NOSE_UP_PX : 0.0f);
+    cy -= (int)roundf(noseUp);
 
     // ---- 画鼻子 ----
     int noseCx = cx + (int)roundf(offXF);
@@ -488,7 +496,8 @@ class PuppyNose : public Drawable {
 //   1. 保持静态姿势到 EXCITED_PAW_START_MS，不显示任何爪印；
 //   2. 之后左爪出现、消失，右爪出现、消失，如此交替 EXCITED_PAW_CYCLES 轮，
 //      每一段显示的时长在 [EXCITED_PAW_MIN_MS, EXCITED_PAW_MAX_MS] 内随机；
-//      每只爪印每次开始显示时，位置都会在基准位置上叠加一点微弱的随机抖动；
+//      每只爪印每次开始显示时，位置都会在基准位置上叠加一点随机抖动
+//      （幅度 ±EXCITED_PAW_JITTER_PX 像素）；
 //   3. 最后左右爪一起出现并常驻，直到离开兴奋表情（此时也会重新抖动一次位置）。
 // 重新进入兴奋表情时，爪印状态机和缓动状态都会硬重置，不会播放上一次残留的
 // "消失动画"。爪印在 EXCITED_SCALE 的基础上再额外缩小 20%（EXCITED_PAW_SCALE），
@@ -766,7 +775,7 @@ class PuppyEar : public Drawable {
       float leftScale = leftPawAnim_.update(showLeft ? 1.0f : 0.0f) * EXCITED_PAW_SCALE;
       float rightScale = rightPawAnim_.update(showRight ? 1.0f : 0.0f) * EXCITED_PAW_SCALE;
 
-      int pawCy = DOUBT_PIVOT_Y + 75;   // 离五官更远
+      int pawCy = DOUBT_PIVOT_Y + 60;   // 比之前往上抬一点，给爪印更多活动空间
       drawPawPrint(spi, DOUBT_PIVOT_X - 35 + pawJitterX_[0], pawCy + pawJitterY_[0], leftScale, false, col);
       drawPawPrint(spi, DOUBT_PIVOT_X + 35 + pawJitterX_[1], pawCy + pawJitterY_[1], rightScale, true, col);
     }
