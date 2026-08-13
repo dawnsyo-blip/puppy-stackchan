@@ -549,16 +549,17 @@ class PuppyEar : public Drawable {
   void drawPawPrint(M5Canvas *spi, int cx, int cy, float scale, bool mirror, float rotRad, uint16_t col) {
     if (scale <= 0.02f) return;
     int m = mirror ? -1 : 1;
-    const float toeSpread = 1.35f;  // 脚趾彼此之间、脚趾与脚掌之间的间距放大系数（只放大位置，不放大半径）
+    const float toeSpread = 1.6f;  // 脚趾彼此之间的间距放大系数（只放大位置，不放大半径），以脚掌为中心向外放大
 
-    // ---- 大脚掌：保留三角形的基本轮廓，只在三个顶点各叠一个较小的实心圆把
+    // ---- 大脚掌：保留三角形的基本轮廓，只在三个顶点各叠一个更小的实心圆把
     //      尖角磨圆（近似"圆角三角形"，不是三个独立的圆瓣）。三角形本身比圆角
-    //      半径大得多，所以三条直边仍然清晰可见。三角形顶点先按 scale 缩放，
-    //      再整体绕爪印中心转 rotRad（跟脚趾一起转）。----
+    //      半径大得多，所以三条直边仍然清晰可见。三个顶点整体比之前往下（远离
+    //      脚趾一侧）挪了一点，跟脚趾之间留出更明显的间隙。三角形顶点先按
+    //      scale 缩放，再整体绕爪印中心转 rotRad（跟脚趾一起转）。----
     const float padLocal[3][2] = {
-        {0.0f, -7.0f},   // 顶点：朝向脚趾一侧
-        {-8.0f, 6.0f},   // 左下角
-        {8.0f, 6.0f},    // 右下角
+        {0.0f, -4.0f},   // 顶点：朝向脚趾一侧
+        {-8.0f, 9.0f},   // 左下角
+        {8.0f, 9.0f},    // 右下角
     };
     int padPx[3], padPy[3];
     for (int i = 0; i < 3; i++) {
@@ -568,17 +569,19 @@ class PuppyEar : public Drawable {
       padPy[i] = cy + ry;
     }
     spi->fillTriangle(padPx[0], padPy[0], padPx[1], padPy[1], padPx[2], padPy[2], col);
-    int padCornerR = max(1, (int)roundf(3.5f * scale));
+    int padCornerR = max(1, (int)roundf(2.5f * scale));
     for (int i = 0; i < 3; i++) {
       spi->fillCircle(padPx[i], padPy[i], padCornerR, col);
     }
 
-    // 4 个脚趾：{ 局部x偏移, 局部y偏移, 半径x, 半径y, 倾斜角度(度) }
+    // 4 个脚趾（比之前更小一圈）：{ 局部x偏移, 局部y偏移, 半径x, 半径y, 倾斜角度(度) }。
+    // 局部偏移和半径都以脚掌为中心衡量，放大 toeSpread 只放大偏移不放大半径，
+    // 所以脚趾始终围绕同一个中心（脚掌）分布，只是彼此之间挨得更远。
     const float toes[4][5] = {
-        {-11.0f, -6.0f,  4.0f, 6.0f, -25.0f},
-        { -4.0f, -12.0f, 4.2f, 6.5f, -8.0f},
-        {  4.0f, -12.0f, 4.2f, 6.5f,  8.0f},
-        { 11.0f, -6.0f,  4.0f, 6.0f,  25.0f},
+        {-11.0f, -6.0f,  3.0f, 4.5f, -25.0f},
+        { -4.0f, -12.0f, 3.2f, 4.8f, -8.0f},
+        {  4.0f, -12.0f, 3.2f, 4.8f,  8.0f},
+        { 11.0f, -6.0f,  3.0f, 4.5f,  25.0f},
     };
     for (int i = 0; i < 4; i++) {
       int rx, ry;
