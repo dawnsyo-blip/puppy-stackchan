@@ -47,7 +47,13 @@ namespace m5avatar {
 // 保证来回切换表情时不会跳变。
 class FloatTransition {
  public:
-  static const unsigned long DURATION_MS = 500;
+  static const unsigned long DURATION_MS = 500;  // 默认过渡时长，绝大多数用法用这个
+
+  FloatTransition() : durationMs_(DURATION_MS) {}
+  // 允许单个实例用比默认更短/更长的过渡时长（比如爪印这种切换节奏很快的
+  // 动画，需要比 DURATION_MS 更短的淡入淡出，否则上一次的淡出还没走完，
+  // 下一次出现就已经开始了，会看起来像突然跳了一下位置）。
+  explicit FloatTransition(unsigned long durationMs) : durationMs_(durationMs) {}
 
   float update(float target) {
     unsigned long now = millis();
@@ -62,7 +68,7 @@ class FloatTransition {
       to_ = target;
       startMs_ = now;
     }
-    float t = (float)(now - startMs_) / (float)DURATION_MS;
+    float t = (float)(now - startMs_) / (float)durationMs_;
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
     current_ = from_ + (to_ - from_) * t;
@@ -81,6 +87,7 @@ class FloatTransition {
   bool inited_ = false;
   float from_ = 0, to_ = 0, current_ = 0;
   unsigned long startMs_ = 0;
+  unsigned long durationMs_;
 };
 
 // Doubt（好奇）：五官整体围绕"鼻子锚点"顺时针旋转的最大角度。
@@ -92,14 +99,15 @@ static const int DOUBT_PIVOT_X = 160;
 static const int DOUBT_PIVOT_Y = 140;
 
 // ---- 兴奋(excited)表情的时间线 ----
-// 进入后先保持静态姿势（'><' 眼更大一圈、耳朵向眼睛方向靠拢）
-// EXCITED_BLINK_SWING_START_MS，期间眼睛不眨眼、耳朵不摇晃；
-// 之后眼睛开始眨眼、耳朵开始左右摇晃；EXCITED_PAW_START_MS 之后开始出现爪印：
-// 先左爪，再右爪，如此交替 EXCITED_PAW_CYCLES 轮，每次显示时长在
-// EXCITED_PAW_MIN_MS~EXCITED_PAW_MAX_MS 之间随机；交替结束后左右爪一起出现
-// 并常驻。每次爪印出现时位置会在基准位置上叠加一点随机抖动。
+// 进入后 EXCITED_PAW_START_MS 就开始出现爪印：先左爪，再右爪，如此交替
+// EXCITED_PAW_CYCLES 轮，每次显示时长在 EXCITED_PAW_MIN_MS~EXCITED_PAW_MAX_MS
+// 之间随机；交替结束后左右爪一起出现并常驻，常驻之后两只爪印会一起微微
+// 左右摇晃。眼睛/耳朵这边则是保持静态姿势（'><' 眼更大一圈、耳朵向眼睛方向
+// 靠拢）到 EXCITED_BLINK_SWING_START_MS，期间不眨眼、不摇晃，之后才开始眨眼
+// 和摇晃——这两条时间线是各自独立的，不需要互相等待。每只爪印出现时位置会
+// 在基准位置上叠加一点随机抖动。
 static const unsigned long EXCITED_BLINK_SWING_START_MS = 1000;
-static const unsigned long EXCITED_PAW_START_MS = 1000;
+static const unsigned long EXCITED_PAW_START_MS = 200;
 static const unsigned long EXCITED_PAW_MIN_MS = 300;
 static const unsigned long EXCITED_PAW_MAX_MS = 800;
 static const int EXCITED_PAW_CYCLES = 2;
@@ -512,7 +520,8 @@ class PuppyNose : public Drawable {
 //      每一段显示的时长在 [EXCITED_PAW_MIN_MS, EXCITED_PAW_MAX_MS] 内随机；
 //      每只爪印每次开始显示时，位置都会在基准位置上叠加一点随机抖动
 //      （幅度 ±EXCITED_PAW_JITTER_PX 像素）；
-//   3. 最后左右爪一起出现并常驻，直到离开兴奋表情（此时也会重新抖动一次位置）。
+//   3. 最后左右爪一起出现并常驻，直到离开兴奋表情（此时也会重新抖动一次位置），
+//      常驻之后两只爪印会一起微微左右摇晃。
 // 重新进入兴奋表情时，爪印状态机和缓动状态都会硬重置，不会播放上一次残留的
 // "消失动画"。爪印在 EXCITED_SCALE 的基础上再额外缩小 20%（EXCITED_PAW_SCALE），
 // 但爪印内部脚趾间距、两只爪印之间的间距、爪印与五官的距离都相应加大了，
@@ -529,13 +538,17 @@ class PuppyEar : public Drawable {
 
   bool wasExcited_ = false;
   unsigned long excitedStartMs_ = 0;
-  FloatTransition earInwardAnim_;               // 兴奋：耳朵朝眼睛方向靠拢
-  FloatTransition leftPawAnim_, rightPawAnim_;  // 兴奋：左右爪印各自的出现/消失缓动
+  FloatTransition earInwardAnim_;  // 兴奋：耳朵朝眼睛方向靠拢
+  // 兴奋：左右爪印各自的出现/消失缓动。用比默认 500ms 更短的 150ms，确保就算
+  // 交替节奏很快（最短 EXCITED_PAW_MIN_MS=300ms 一段）也能在下一次轮到它之前
+  // 完整淡出，不会出现"上一次淡出还没走完，新一轮又换了位置"的跳变。
+  FloatTransition leftPawAnim_{150}, rightPawAnim_{150};
 
   // 兴奋表情爪印的状态机（只在 !isLeft 的耳朵实例上使用）：
   //   -1 = 还没到 EXCITED_PAW_START_MS，都不显示
-  //   0..2*EXCITED_PAW_CYCLES-1 = 左右交替阶段，偶数=左爪，奇数=右爪
-  //   2*EXCITED_PAW_CYCLES = 最终左右都常驻的阶段
+  //   0..2*EXCITED_PAW_CYCLES = 左右交替阶段（偶数=左爪，奇数=右爪），最后一个
+  //     偶数下标固定停在左爪，让左爪先"转正"为常驻，避免最后一步同时改两只爪
+  //   totalSteps(=2*EXCITED_PAW_CYCLES+1) = 右爪也常驻出现，左右都稳定显示
   int pawPhaseIdx_ = -1;
   unsigned long pawPhaseStartMs_ = 0;     // 当前阶段起点（相对 excitedElapsed 的时间基准）
   unsigned long pawPhaseDurationMs_ = 0;  // 当前交替阶段随机出的持续时长
@@ -838,10 +851,12 @@ class PuppyEar : public Drawable {
       float rightScale = rightPawAnim_.update(showRight ? 1.0f : 0.0f) * EXCITED_PAW_SCALE;
 
       int pawCy = DOUBT_PIVOT_Y + 60;   // 比之前往上抬一点，给爪印更多活动空间
+      // 两只爪印都稳定常驻之后，一起微微左右摇晃（复用耳朵摆动同一条 sin 曲线）。
+      int pawSwing = (pawPhaseIdx_ >= totalSteps) ? earSwingOffset() : 0;
       float leftRot = pawRotDeg_[0] * PI / 180.0f;
       float rightRot = pawRotDeg_[1] * PI / 180.0f;
-      drawPawPrint(spi, DOUBT_PIVOT_X - 35 + pawJitterX_[0], pawCy + pawJitterY_[0], leftScale, false, leftRot, col);
-      drawPawPrint(spi, DOUBT_PIVOT_X + 35 + pawJitterX_[1], pawCy + pawJitterY_[1], rightScale, true, rightRot, col);
+      drawPawPrint(spi, DOUBT_PIVOT_X - 35 + pawJitterX_[0] + pawSwing, pawCy + pawJitterY_[0], leftScale, false, leftRot, col);
+      drawPawPrint(spi, DOUBT_PIVOT_X + 35 + pawJitterX_[1] + pawSwing, pawCy + pawJitterY_[1], rightScale, true, rightRot, col);
     }
   }
 };
