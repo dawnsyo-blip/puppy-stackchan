@@ -551,15 +551,15 @@ class PuppyEar : public Drawable {
     int m = mirror ? -1 : 1;
     const float toeSpread = 1.6f;  // 脚趾彼此之间的间距放大系数（只放大位置，不放大半径），以脚掌为中心向外放大
 
-    // ---- 大脚掌：保留三角形的基本轮廓，只在三个顶点各叠一个更小的实心圆把
-    //      尖角磨圆（近似"圆角三角形"，不是三个独立的圆瓣）。三角形本身比圆角
-    //      半径大得多，所以三条直边仍然清晰可见。三个顶点整体比之前往下（远离
-    //      脚趾一侧）挪了一点，跟脚趾之间留出更明显的间隙。三角形顶点先按
-    //      scale 缩放，再整体绕爪印中心转 rotRad（跟脚趾一起转）。----
+    // ---- 大脚掌：三角形的基本轮廓 + 三个顶点叠小圆磨圆尖角 + 三条边各自中点
+    //      叠一个更大一点的圆，让每条边都有参考图里那种微微向外膨出的弧线感
+    //      （而不是纯直线边）。整体比之前又大了一圈，顶点整体保持在远离脚趾
+    //      一侧挪了一点的位置，跟脚趾之间留出间隙。所有顶点/中点先按 scale
+    //      缩放，再整体绕爪印中心转 rotRad（跟脚趾一起转）。----
     const float padLocal[3][2] = {
         {0.0f, -4.0f},   // 顶点：朝向脚趾一侧
-        {-8.0f, 9.0f},   // 左下角
-        {8.0f, 9.0f},    // 右下角
+        {-9.0f, 10.0f},  // 左下角
+        {9.0f, 10.0f},   // 右下角
     };
     int padPx[3], padPy[3];
     for (int i = 0; i < 3; i++) {
@@ -569,9 +569,18 @@ class PuppyEar : public Drawable {
       padPy[i] = cy + ry;
     }
     spi->fillTriangle(padPx[0], padPy[0], padPx[1], padPy[1], padPx[2], padPy[2], col);
-    int padCornerR = max(1, (int)roundf(2.5f * scale));
+    int padCornerR = max(1, (int)roundf(3.0f * scale));
     for (int i = 0; i < 3; i++) {
       spi->fillCircle(padPx[i], padPy[i], padCornerR, col);
+    }
+    // 边中点叠圆：圆心正好落在直线边上，圆的一半会鼓到边外面，形成向外膨出
+    // 的弧线；同一种颜色跟三角形叠着填充，视觉上融合成一个圆润的整体轮廓。
+    int padBulgeR = max(1, (int)roundf(5.0f * scale));
+    for (int i = 0; i < 3; i++) {
+      int j = (i + 1) % 3;
+      int mx = (padPx[i] + padPx[j]) / 2;
+      int my = (padPy[i] + padPy[j]) / 2;
+      spi->fillCircle(mx, my, padBulgeR, col);
     }
 
     // 4 个脚趾（比之前更小一圈）：{ 局部x偏移, 局部y偏移, 半径x, 半径y, 倾斜角度(度) }。
