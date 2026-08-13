@@ -121,8 +121,8 @@ SCAN_PAUSE = 1.0
 TOUCH_POLL_SEC = 0.12
 
 # --- 语音唤醒（方案A：音量触发 + Whisper 校验）---
-VOLUME_POLL_SEC = 0.5            # 轮询 /volume 的间隔
-VOLUME_RMS_THRESHOLD = 600       # 音量触发阈值，需要根据实际环境噪音调（可以先手动
+VOLUME_POLL_SEC = 1.0            # 轮询 /volume 的间隔（调大以减少对 StackChan 的请求压力）
+VOLUME_RMS_THRESHOLD = 22000     # 音量触发阈值，需要根据实际环境噪音调（可以先手动
                                   # 轮询 /volume 看安静时 rms 大概多少，再定这个值）
 WAKE_RECORD_SECONDS = 3          # 音量触发后，先录这么久做唤醒词校验
 WAKE_WORDS = ["小狗", "xiǎo gǒu", "xiao gou"]
