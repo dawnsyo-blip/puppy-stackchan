@@ -104,6 +104,8 @@ static const unsigned long EXCITED_PAW_MIN_MS = 500;
 static const unsigned long EXCITED_PAW_MAX_MS = 1500;
 static const int EXCITED_PAW_CYCLES = 2;
 static const int EXCITED_PAW_JITTER_PX = 15;  // 爪印位置随机抖动的最大幅度（像素）
+static const float EXCITED_PAW_ROT_BASE_DEG = 12.0f;   // 爪印整体旋转的基准角度：左爪逆时针、右爪顺时针
+static const float EXCITED_PAW_ROT_JITTER_DEG = 5.0f;  // 每次出现时在基准角度上叠加的随机浮动幅度（度）
 
 // 兴奋表情整体缩小比例：眼睛/鼻子/嘴巴/舌头/耳朵都按这个比例缩小。
 // 爪印在此基础上再额外缩小 20%（EXCITED_PAW_SCALE），同时爪印内部脚趾间距、
@@ -527,6 +529,7 @@ class PuppyEar : public Drawable {
   unsigned long pawPhaseDurationMs_ = 0;  // 当前交替阶段随机出的持续时长
   int pawJitterX_[2] = {0, 0};            // 每只爪印当前这次出现时的位置随机抖动 [0]=左 [1]=右
   int pawJitterY_[2] = {0, 0};
+  float pawRotDeg_[2] = {0, 0};           // 每只爪印当前这次出现时的整体旋转角度（度），[0]=左 [1]=右
 
  public:
   PuppyEar(bool isLeft) : isLeft(isLeft) {}
@@ -539,18 +542,36 @@ class PuppyEar : public Drawable {
     }
   }
 
-  // 画一个写实一点的爪印：一个大脚掌（椭圆）+ 4 个小脚趾（用旋转椭圆近似，
-  // 从内到外逐渐往外翘）。mirror=true 时脚趾左右镜像（用于右爪）。scale
-  // 控制从 0 长到 1 / 从 1 缩到 0 的出现与消失动画。
-  void drawPawPrint(M5Canvas *spi, int cx, int cy, float scale, bool mirror, uint16_t col) {
+  // 画一个写实一点的爪印：一个大脚掌 + 4 个小脚趾（用旋转椭圆近似，从内到外
+  // 逐渐往外翘）。mirror=true 时脚趾左右镜像（用于右爪）。scale 控制从 0 长到
+  // 1 / 从 1 缩到 0 的出现与消失动画。rotRad 让整只爪印（脚掌+脚趾）绕爪印
+  // 中心整体转一点（左爪逆时针、右爪顺时针，每次出现时角度略有不同）。
+  void drawPawPrint(M5Canvas *spi, int cx, int cy, float scale, bool mirror, float rotRad, uint16_t col) {
     if (scale <= 0.02f) return;
     int m = mirror ? -1 : 1;
     const float toeSpread = 1.35f;  // 脚趾彼此之间、脚趾与脚掌之间的间距放大系数（只放大位置，不放大半径）
 
-    // 大脚掌（往下方多挪一点，跟脚趾拉开距离）
-    int padRx = (int)roundf(8 * scale);
-    int padRy = (int)roundf(9 * scale);
-    spi->fillEllipse(cx, cy + (int)roundf(8 * scale), padRx, padRy, col);
+    // ---- 大脚掌：参考图里那种圆润的三瓣掌垫——先画一个实心三角形，再在三个
+    //      顶点各画一个实心圆盖住尖角，两种图形用同一种颜色叠着填充，在位图上
+    //      近似出"布尔并集"之后圆润的轮廓。三角形顶点先按 scale 缩放，再整体
+    //      绕爪印中心转 rotRad（跟脚趾一起转）。----
+    const float padLocal[3][2] = {
+        {0.0f, -6.0f},   // 顶点：朝向脚趾一侧
+        {-7.0f, 6.0f},   // 左下角
+        {7.0f, 6.0f},    // 右下角
+    };
+    int padPx[3], padPy[3];
+    for (int i = 0; i < 3; i++) {
+      int rx, ry;
+      rotateLocalOffset(rotRad, padLocal[i][0] * scale, padLocal[i][1] * scale, rx, ry);
+      padPx[i] = cx + rx;
+      padPy[i] = cy + ry;
+    }
+    spi->fillTriangle(padPx[0], padPy[0], padPx[1], padPy[1], padPx[2], padPy[2], col);
+    int padCornerR = max(1, (int)roundf(6.0f * scale));
+    for (int i = 0; i < 3; i++) {
+      spi->fillCircle(padPx[i], padPy[i], padCornerR, col);
+    }
 
     // 4 个脚趾：{ 局部x偏移, 局部y偏移, 半径x, 半径y, 倾斜角度(度) }
     const float toes[4][5] = {
@@ -560,19 +581,27 @@ class PuppyEar : public Drawable {
         { 11.0f, -6.0f,  4.0f, 6.0f,  25.0f},
     };
     for (int i = 0; i < 4; i++) {
-      int tx = cx + (int)roundf(m * toes[i][0] * toeSpread * scale);
-      int ty = cy + (int)roundf(toes[i][1] * toeSpread * scale);
+      int rx, ry;
+      rotateLocalOffset(rotRad, m * toes[i][0] * toeSpread * scale, toes[i][1] * toeSpread * scale, rx, ry);
+      int tx = cx + rx;
+      int ty = cy + ry;
       int trx = (int)roundf(toes[i][2] * scale);
       int try_ = (int)roundf(toes[i][3] * scale);
-      float ang = m * toes[i][4] * PI / 180.0f;
+      float ang = m * toes[i][4] * PI / 180.0f + rotRad;
       fillRotatedEllipse(spi, tx, ty, trx, try_, ang, col);
     }
   }
 
-  // 给某只爪印重新抽一次微弱的位置随机抖动（±EXCITED_PAW_JITTER_PX 像素）。
-  void randomizePawJitter(int which) {
+  // 给某只爪印（which: 0=左 1=右）重新抽一次这次出现要用的位置随机抖动
+  // （±EXCITED_PAW_JITTER_PX 像素）和整体旋转角度（左爪基准逆时针、右爪基准
+  // 顺时针，在基准角度上再叠加 ±EXCITED_PAW_ROT_JITTER_DEG 度的随机浮动）。
+  void randomizePawAppearance(int which) {
     pawJitterX_[which] = random(-EXCITED_PAW_JITTER_PX, EXCITED_PAW_JITTER_PX + 1);
     pawJitterY_[which] = random(-EXCITED_PAW_JITTER_PX, EXCITED_PAW_JITTER_PX + 1);
+    float base = (which == 0) ? -EXCITED_PAW_ROT_BASE_DEG : EXCITED_PAW_ROT_BASE_DEG;
+    const int jitterTenths = (int)roundf(EXCITED_PAW_ROT_JITTER_DEG * 10.0f);
+    float jitter = random(-jitterTenths, jitterTenths + 1) / 10.0f;
+    pawRotDeg_[which] = base + jitter;
   }
 
   void draw(M5Canvas *spi, BoundingRect rect, DrawContext *ctx) override {
@@ -735,7 +764,7 @@ class PuppyEar : public Drawable {
     // 状态机：EXCITED_PAW_START_MS 之前不显示；之后先左爪、再右爪交替
     // EXCITED_PAW_CYCLES 轮，每一段的持续时长在 [EXCITED_PAW_MIN_MS,
     // EXCITED_PAW_MAX_MS] 内随机；交替结束后左右爪一起出现并常驻。每次某只
-    // 爪印开始显示时，都会给它的位置重新抽一次微弱的随机抖动。
+    // 爪印开始显示时，都会给它的位置和整体旋转角度重新随机一次。
     if (isExcited && !isLeft) {
       const int totalSteps = 2 * EXCITED_PAW_CYCLES;
       if (excitedElapsed < EXCITED_PAW_START_MS) {
@@ -745,7 +774,7 @@ class PuppyEar : public Drawable {
           pawPhaseIdx_ = 0;
           pawPhaseStartMs_ = excitedElapsed;
           pawPhaseDurationMs_ = random(EXCITED_PAW_MIN_MS, EXCITED_PAW_MAX_MS + 1);
-          randomizePawJitter(0);  // 先出现左爪
+          randomizePawAppearance(0);  // 先出现左爪
         }
         while (pawPhaseIdx_ >= 0 && pawPhaseIdx_ < totalSteps &&
                excitedElapsed - pawPhaseStartMs_ >= pawPhaseDurationMs_) {
@@ -753,11 +782,11 @@ class PuppyEar : public Drawable {
           pawPhaseIdx_++;
           if (pawPhaseIdx_ < totalSteps) {
             pawPhaseDurationMs_ = random(EXCITED_PAW_MIN_MS, EXCITED_PAW_MAX_MS + 1);
-            randomizePawJitter(pawPhaseIdx_ % 2 == 0 ? 0 : 1);
+            randomizePawAppearance(pawPhaseIdx_ % 2 == 0 ? 0 : 1);
           } else {
-            // 交替结束，进入左右都常驻的最终阶段，两只爪印各自再抖动一次位置
-            randomizePawJitter(0);
-            randomizePawJitter(1);
+            // 交替结束，进入左右都常驻的最终阶段，两只爪印各自再随机一次
+            randomizePawAppearance(0);
+            randomizePawAppearance(1);
           }
         }
       }
@@ -776,8 +805,10 @@ class PuppyEar : public Drawable {
       float rightScale = rightPawAnim_.update(showRight ? 1.0f : 0.0f) * EXCITED_PAW_SCALE;
 
       int pawCy = DOUBT_PIVOT_Y + 60;   // 比之前往上抬一点，给爪印更多活动空间
-      drawPawPrint(spi, DOUBT_PIVOT_X - 35 + pawJitterX_[0], pawCy + pawJitterY_[0], leftScale, false, col);
-      drawPawPrint(spi, DOUBT_PIVOT_X + 35 + pawJitterX_[1], pawCy + pawJitterY_[1], rightScale, true, col);
+      float leftRot = pawRotDeg_[0] * PI / 180.0f;
+      float rightRot = pawRotDeg_[1] * PI / 180.0f;
+      drawPawPrint(spi, DOUBT_PIVOT_X - 35 + pawJitterX_[0], pawCy + pawJitterY_[0], leftScale, false, leftRot, col);
+      drawPawPrint(spi, DOUBT_PIVOT_X + 35 + pawJitterX_[1], pawCy + pawJitterY_[1], rightScale, true, rightRot, col);
     }
   }
 };
