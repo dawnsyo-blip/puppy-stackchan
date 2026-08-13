@@ -69,6 +69,14 @@ class FloatTransition {
     return current_;
   }
 
+  // 硬重置：立刻把当前值/起点/终点都设成 value，不做任何插值过渡。
+  // 用于"重新进入某个表情时不应该看到上一次残留状态往回过渡"的场景。
+  void reset(float value) {
+    inited_ = true;
+    from_ = to_ = current_ = value;
+    startMs_ = millis();
+  }
+
  private:
   bool inited_ = false;
   float from_ = 0, to_ = 0, current_ = 0;
@@ -83,19 +91,27 @@ static const float DOUBT_ROTATE_RAD = 15.0f * PI / 180.0f;
 static const int DOUBT_PIVOT_X = 160;
 static const int DOUBT_PIVOT_Y = 140;
 
-// ---- 兴奋(excited)表情的爪印动画时间线 ----
-// 静态姿势（'><' 眼 + 舌头）保持 EXCITED_PAW_START_MS 之后：
-//   左爪出现 EXCITED_PAW_BLINK_MS，消失；右爪出现 EXCITED_PAW_BLINK_MS，消失；
-//   如此左右交替 EXCITED_PAW_CYCLES 轮，之后左右爪一起出现并常驻。
+// ---- 兴奋(excited)表情的时间线 ----
+// 进入后先保持静态姿势（'><' 眼更大一圈、耳朵向眼睛方向靠拢）
+// EXCITED_BLINK_SWING_START_MS，期间眼睛不眨眼、耳朵不摇晃；
+// 之后眼睛开始眨眼、耳朵开始左右摇晃；EXCITED_PAW_START_MS 之后开始出现爪印：
+// 先左爪，再右爪，如此交替 EXCITED_PAW_CYCLES 轮，每次显示时长在
+// EXCITED_PAW_MIN_MS~EXCITED_PAW_MAX_MS 之间随机；交替结束后左右爪一起出现
+// 并常驻。每次爪印出现时位置会在基准位置上叠加一点微弱的随机抖动。
+static const unsigned long EXCITED_BLINK_SWING_START_MS = 1000;
 static const unsigned long EXCITED_PAW_START_MS = 2000;
-static const unsigned long EXCITED_PAW_BLINK_MS = 1000;
+static const unsigned long EXCITED_PAW_MIN_MS = 1000;
+static const unsigned long EXCITED_PAW_MAX_MS = 3000;
 static const int EXCITED_PAW_CYCLES = 2;
+static const int EXCITED_PAW_JITTER_PX = 5;  // 爪印位置随机抖动的最大幅度（像素）
 
 // 兴奋表情整体缩小比例：眼睛/鼻子/嘴巴/舌头/耳朵都按这个比例缩小。
 // 爪印在此基础上再额外缩小 20%（EXCITED_PAW_SCALE），同时爪印内部脚趾间距、
 // 两只爪印之间的间距、爪印与五官的距离都相应加大，避免整体缩小后挤在一起。
 static const float EXCITED_SCALE = 0.7f;
 static const float EXCITED_PAW_SCALE = EXCITED_SCALE * 0.8f;
+static const float EXCITED_EYE_BOOST = 1.2f;       // 兴奋时眼睛在整体缩放基础上再放大一点
+static const float EXCITED_EAR_INWARD_PX = 12.0f;  // 兴奋时耳朵朝眼睛方向靠拢的像素数
 
 // 把局部偏移量 (ox,oy) 绕原点旋转 angle 弧度，用于让部件"自身"的朝向也跟着转
 // （而不只是把部件的位置搬到旋转后的地方）。angle=0 时精确还原原始偏移量。
@@ -162,18 +178,6 @@ static unsigned long elapsedSinceTrue(bool isActive, bool &wasActive, unsigned l
   return millis() - startMs;
 }
 
-// 兴奋表情的爪印动画阶段：0=都不显示 1=只显示左爪 2=只显示右爪 3=左右都显示（最终常驻状态）。
-static int excitedPawPhase(unsigned long elapsed) {
-  if (elapsed < EXCITED_PAW_START_MS) return 0;
-  unsigned long t = elapsed - EXCITED_PAW_START_MS;
-  const unsigned long cycleLen = 2 * EXCITED_PAW_BLINK_MS;
-  const unsigned long blinkPhaseLen = (unsigned long)EXCITED_PAW_CYCLES * cycleLen;
-  if (t < blinkPhaseLen) {
-    unsigned long posInCycle = t % cycleLen;
-    return (posInCycle < EXCITED_PAW_BLINK_MS) ? 1 : 2;
-  }
-  return 3;
-}
 
 // ╔══════════════════════════════════════════════╗
 // ║              PuppyEye 小狗眼睛               ║
@@ -199,6 +203,9 @@ class PuppyEye : public Drawable {
   unsigned long styleStartMs_ = 0;
   FloatTransition doubtAngleAnim_;
 
+  bool wasExcited_ = false;
+  unsigned long excitedStartMs_ = 0;
+
  public:
   PuppyEye(bool isLeft) : isLeft(isLeft) {}
 
@@ -208,6 +215,7 @@ class PuppyEye : public Drawable {
     Expression exp = ctx->getExpression();
     bool custom = (exp == Expression::Neutral) && g_customExpr.length() > 0;
     bool isExcited = custom && g_customExpr == "excited";
+    unsigned long excitedElapsed = elapsedSinceTrue(isExcited, wasExcited_, excitedStartMs_);
 
     float doubtAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD : 0.0f);
     applyRotationAroundPivot(doubtAngle, DOUBT_PIVOT_X, DOUBT_PIVOT_Y, cx, cy);
@@ -251,10 +259,17 @@ class PuppyEye : public Drawable {
       return;
     }
 
-    // ---- 兴奋：'><' 眉眼形——左眼是 '>'，右眼是 '<'，静态不转，整体按 EXCITED_SCALE 缩小 ----
+    // ---- 兴奋：'><' 眉眼形——左眼是 '>'，右眼是 '<'，静态不转，整体按
+    //      EXCITED_SCALE 缩小后再按 EXCITED_EYE_BOOST 放大一点；进入兴奋
+    //      EXCITED_BLINK_SWING_START_MS 之前眼睛保持全开，之后才开始跟随
+    //      正常的自动眨眼节奏（闭眼时纵向压扁成一条横线）----
     if (style == 1) {
-      int a = (int)roundf(7 * EXCITED_SCALE * s);
-      int b = (int)roundf(4 * EXCITED_SCALE * s);
+      float openRatio = 1.0f;
+      if (excitedElapsed >= EXCITED_BLINK_SWING_START_MS) {
+        openRatio = isLeft ? ctx->getLeftEyeOpenRatio() : ctx->getRightEyeOpenRatio();
+      }
+      int a = (int)roundf(7 * EXCITED_SCALE * EXCITED_EYE_BOOST * s * openRatio);
+      int b = (int)roundf(4 * EXCITED_SCALE * EXCITED_EYE_BOOST * s);
       int armX = isLeft ? -a : a;   // 张开的两条边朝向的一侧
       int tipX = isLeft ? b : -b;   // 尖角（顶点）朝向的一侧
       for (int t = -1; t <= 1; t++) {
@@ -467,14 +482,18 @@ class PuppyNose : public Drawable {
 // 好奇：整体绕鼻子锚点顺时针转 15°；主体转完 500ms 后，右耳再单独绕自己顶部
 // 端点缓入逆时针转 15°。
 //
-// 兴奋：耳朵是静态的（在"开心"短耳基础上再按 EXCITED_SCALE 缩小），不转不额外
-// 缩放。爪印动画的时间线——
-//   1. 保持静态姿势 2s；
-//   2. 之后左爪出现 1s、消失，右爪出现 1s、消失，如此交替 2 轮；
-//   3. 最后左右爪一起出现并常驻，直到离开兴奋表情。
-// 爪印在 EXCITED_SCALE 的基础上再额外缩小 20%（EXCITED_PAW_SCALE），但爪印内部
-// 脚趾间距、两只爪印之间的间距、爪印与五官的距离都相应加大了，避免整体缩小后
-// 挤在一起看不清。
+// 兴奋：耳朵在"开心"短耳基础上再按 EXCITED_SCALE 缩小，并朝眼睛方向靠拢
+// EXCITED_EAR_INWARD_PX 像素，不转。EXCITED_BLINK_SWING_START_MS 之前静止不动，
+// 之后开始左右轻轻摆动（跟眼睛的眨眼动画同时开始）。爪印动画的时间线——
+//   1. 保持静态姿势到 EXCITED_PAW_START_MS，不显示任何爪印；
+//   2. 之后左爪出现、消失，右爪出现、消失，如此交替 EXCITED_PAW_CYCLES 轮，
+//      每一段显示的时长在 [EXCITED_PAW_MIN_MS, EXCITED_PAW_MAX_MS] 内随机；
+//      每只爪印每次开始显示时，位置都会在基准位置上叠加一点微弱的随机抖动；
+//   3. 最后左右爪一起出现并常驻，直到离开兴奋表情（此时也会重新抖动一次位置）。
+// 重新进入兴奋表情时，爪印状态机和缓动状态都会硬重置，不会播放上一次残留的
+// "消失动画"。爪印在 EXCITED_SCALE 的基础上再额外缩小 20%（EXCITED_PAW_SCALE），
+// 但爪印内部脚趾间距、两只爪印之间的间距、爪印与五官的距离都相应加大了，
+// 避免整体缩小后挤在一起看不清。
 
 class PuppyEar : public Drawable {
   bool isLeft;  // true=屏幕左侧耳朵, false=屏幕右侧
@@ -487,7 +506,18 @@ class PuppyEar : public Drawable {
 
   bool wasExcited_ = false;
   unsigned long excitedStartMs_ = 0;
+  FloatTransition earInwardAnim_;               // 兴奋：耳朵朝眼睛方向靠拢
   FloatTransition leftPawAnim_, rightPawAnim_;  // 兴奋：左右爪印各自的出现/消失缓动
+
+  // 兴奋表情爪印的状态机（只在 !isLeft 的耳朵实例上使用）：
+  //   -1 = 还没到 EXCITED_PAW_START_MS，都不显示
+  //   0..2*EXCITED_PAW_CYCLES-1 = 左右交替阶段，偶数=左爪，奇数=右爪
+  //   2*EXCITED_PAW_CYCLES = 最终左右都常驻的阶段
+  int pawPhaseIdx_ = -1;
+  unsigned long pawPhaseStartMs_ = 0;     // 当前阶段起点（相对 excitedElapsed 的时间基准）
+  unsigned long pawPhaseDurationMs_ = 0;  // 当前交替阶段随机出的持续时长
+  int pawJitterX_[2] = {0, 0};            // 每只爪印当前这次出现时的位置随机抖动 [0]=左 [1]=右
+  int pawJitterY_[2] = {0, 0};
 
  public:
   PuppyEar(bool isLeft) : isLeft(isLeft) {}
@@ -530,13 +560,28 @@ class PuppyEar : public Drawable {
     }
   }
 
+  // 给某只爪印重新抽一次微弱的位置随机抖动（±EXCITED_PAW_JITTER_PX 像素）。
+  void randomizePawJitter(int which) {
+    pawJitterX_[which] = random(-EXCITED_PAW_JITTER_PX, EXCITED_PAW_JITTER_PX + 1);
+    pawJitterY_[which] = random(-EXCITED_PAW_JITTER_PX, EXCITED_PAW_JITTER_PX + 1);
+  }
+
   void draw(M5Canvas *spi, BoundingRect rect, DrawContext *ctx) override {
     int cx = rect.getCenterX();
     int cy = rect.getCenterY();
     Expression exp = ctx->getExpression();
     bool custom = (exp == Expression::Neutral) && g_customExpr.length() > 0;
     bool isExcited = custom && g_customExpr == "excited";
+    bool wasExcitedBefore = wasExcited_;
     unsigned long excitedElapsed = elapsedSinceTrue(isExcited, wasExcited_, excitedStartMs_);
+    if (isExcited && !wasExcitedBefore) {
+      // 刚重新进入兴奋表情：硬重置爪印状态，不要把上一次残留的爪印缓动
+      // 状态当成"消失动画"播放一遍。
+      leftPawAnim_.reset(0.0f);
+      rightPawAnim_.reset(0.0f);
+      pawPhaseIdx_ = -1;
+      pawPhaseStartMs_ = 0;
+    }
 
     float doubtAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD : 0.0f);
     applyRotationAroundPivot(doubtAngle, DOUBT_PIVOT_X, DOUBT_PIVOT_Y, cx, cy);
@@ -608,9 +653,15 @@ class PuppyEar : public Drawable {
     int earW = (int)roundf(wAnim_.update((float)earWTarget));
     int topY = (int)roundf(topYAnim_.update((float)topYTarget));
 
-    // ---- 摆动动画：开心 / 好奇 / 思考时耳朵左右轻轻摆动（水平平移）----
+    // ---- 兴奋：耳朵整体朝眼睛方向靠拢一点（水平方向），静态常驻，不随时间变化 ----
+    int earInward = (int)roundf(earInwardAnim_.update(isExcited ? EXCITED_EAR_INWARD_PX : 0.0f));
+    cx -= dir * earInward;
+
+    // ---- 摆动动画：开心 / 好奇 / 思考时耳朵左右轻轻摆动（水平平移）；
+    //      兴奋时要等静态姿势保持 EXCITED_BLINK_SWING_START_MS 之后才开始摆 ----
+    bool excitedSwingReady = isExcited && excitedElapsed >= EXCITED_BLINK_SWING_START_MS;
     bool swinging = (exp == Expression::Happy) || (exp == Expression::Doubt) ||
-                    (custom && g_customExpr == "thinking");
+                    (custom && g_customExpr == "thinking") || excitedSwingReady;
     int swing = swinging ? earSwingOffset() : 0;
 
     // ---- 好奇：主体旋转（500ms）结束以后，右耳再额外绕自己的"耳根顶点"
@@ -672,16 +723,52 @@ class PuppyEar : public Drawable {
     }
 
     // ===== 兴奋表情：从右耳组件画爪印动画（五官下方，左右各一个）=====
+    // 状态机：EXCITED_PAW_START_MS 之前不显示；之后先左爪、再右爪交替
+    // EXCITED_PAW_CYCLES 轮，每一段的持续时长在 [EXCITED_PAW_MIN_MS,
+    // EXCITED_PAW_MAX_MS] 内随机；交替结束后左右爪一起出现并常驻。每次某只
+    // 爪印开始显示时，都会给它的位置重新抽一次微弱的随机抖动。
     if (isExcited && !isLeft) {
-      int phase = excitedPawPhase(excitedElapsed);
-      float leftTarget = (phase == 1 || phase == 3) ? 1.0f : 0.0f;
-      float rightTarget = (phase == 2 || phase == 3) ? 1.0f : 0.0f;
-      float leftScale = leftPawAnim_.update(leftTarget) * EXCITED_PAW_SCALE;
-      float rightScale = rightPawAnim_.update(rightTarget) * EXCITED_PAW_SCALE;
+      const int totalSteps = 2 * EXCITED_PAW_CYCLES;
+      if (excitedElapsed < EXCITED_PAW_START_MS) {
+        pawPhaseIdx_ = -1;
+      } else {
+        if (pawPhaseIdx_ == -1) {
+          pawPhaseIdx_ = 0;
+          pawPhaseStartMs_ = excitedElapsed;
+          pawPhaseDurationMs_ = random(EXCITED_PAW_MIN_MS, EXCITED_PAW_MAX_MS + 1);
+          randomizePawJitter(0);  // 先出现左爪
+        }
+        while (pawPhaseIdx_ >= 0 && pawPhaseIdx_ < totalSteps &&
+               excitedElapsed - pawPhaseStartMs_ >= pawPhaseDurationMs_) {
+          pawPhaseStartMs_ += pawPhaseDurationMs_;
+          pawPhaseIdx_++;
+          if (pawPhaseIdx_ < totalSteps) {
+            pawPhaseDurationMs_ = random(EXCITED_PAW_MIN_MS, EXCITED_PAW_MAX_MS + 1);
+            randomizePawJitter(pawPhaseIdx_ % 2 == 0 ? 0 : 1);
+          } else {
+            // 交替结束，进入左右都常驻的最终阶段，两只爪印各自再抖动一次位置
+            randomizePawJitter(0);
+            randomizePawJitter(1);
+          }
+        }
+      }
+
+      bool showLeft, showRight;
+      if (pawPhaseIdx_ < 0) {
+        showLeft = showRight = false;
+      } else if (pawPhaseIdx_ >= totalSteps) {
+        showLeft = showRight = true;
+      } else {
+        showLeft = (pawPhaseIdx_ % 2 == 0);
+        showRight = !showLeft;
+      }
+
+      float leftScale = leftPawAnim_.update(showLeft ? 1.0f : 0.0f) * EXCITED_PAW_SCALE;
+      float rightScale = rightPawAnim_.update(showRight ? 1.0f : 0.0f) * EXCITED_PAW_SCALE;
 
       int pawCy = DOUBT_PIVOT_Y + 75;   // 离五官更远
-      drawPawPrint(spi, DOUBT_PIVOT_X - 35, pawCy, leftScale, false, col);   // 两爪间距更大
-      drawPawPrint(spi, DOUBT_PIVOT_X + 35, pawCy, rightScale, true, col);
+      drawPawPrint(spi, DOUBT_PIVOT_X - 35 + pawJitterX_[0], pawCy + pawJitterY_[0], leftScale, false, col);
+      drawPawPrint(spi, DOUBT_PIVOT_X + 35 + pawJitterX_[1], pawCy + pawJitterY_[1], rightScale, true, col);
     }
   }
 };
