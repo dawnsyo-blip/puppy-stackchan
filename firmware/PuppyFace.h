@@ -99,7 +99,7 @@ static const int DOUBT_PIVOT_Y = 140;
 // EXCITED_PAW_MIN_MS~EXCITED_PAW_MAX_MS 之间随机；交替结束后左右爪一起出现
 // 并常驻。每次爪印出现时位置会在基准位置上叠加一点随机抖动。
 static const unsigned long EXCITED_BLINK_SWING_START_MS = 1000;
-static const unsigned long EXCITED_PAW_START_MS = 2000;
+static const unsigned long EXCITED_PAW_START_MS = 1000;
 static const unsigned long EXCITED_PAW_MIN_MS = 300;
 static const unsigned long EXCITED_PAW_MAX_MS = 800;
 static const int EXCITED_PAW_CYCLES = 2;
@@ -265,16 +265,20 @@ class PuppyEye : public Drawable {
     // ---- 兴奋：'><' 眉眼形——左眼是 '>'，右眼是 '<'，静态不转，整体按
     //      EXCITED_SCALE 缩小后再按 EXCITED_EYE_BOOST 放大一点；进入兴奋
     //      EXCITED_BLINK_SWING_START_MS 之前眼睛保持全开，之后才开始跟随
-    //      正常的自动眨眼节奏（闭眼时纵向压扁成一条横线）----
+    //      正常的自动眨眼节奏。张开的两条边的横向位置（armX）用固定宽度，不随
+    //      眨眼变化，只有纵向张开幅度（a）随 openRatio 收窄；这样闭眼时是一条
+    //      横线（armX 到 tipX 之间的一段），不会因为 armX 也跟着缩到 0 而变成
+    //      一个点。----
     if (style == 1) {
       float openRatio = 1.0f;
       if (excitedElapsed >= EXCITED_BLINK_SWING_START_MS) {
         openRatio = isLeft ? ctx->getLeftEyeOpenRatio() : ctx->getRightEyeOpenRatio();
       }
-      int a = (int)roundf(7 * EXCITED_SCALE * EXCITED_EYE_BOOST * s * openRatio);
+      int width = (int)roundf(7 * EXCITED_SCALE * EXCITED_EYE_BOOST * s);
+      int a = (int)roundf(width * openRatio);
       int b = (int)roundf(4 * EXCITED_SCALE * EXCITED_EYE_BOOST * s);
-      int armX = isLeft ? -a : a;   // 张开的两条边朝向的一侧
-      int tipX = isLeft ? b : -b;   // 尖角（顶点）朝向的一侧
+      int armX = isLeft ? -width : width;   // 张开的两条边朝向的一侧（固定，不随眨眼变化）
+      int tipX = isLeft ? b : -b;           // 尖角（顶点）朝向的一侧
       for (int t = -1; t <= 1; t++) {
         spi->drawLine(cx + armX, cy - a + t, cx + tipX, cy + t, col);
         spi->drawLine(cx + tipX, cy + t, cx + armX, cy + a + t, col);
@@ -551,36 +555,40 @@ class PuppyEar : public Drawable {
     int m = mirror ? -1 : 1;
     const float toeSpread = 1.6f;  // 脚趾彼此之间的间距放大系数（只放大位置，不放大半径），以脚掌为中心向外放大
 
-    // ---- 大脚掌：三角形的基本轮廓 + 三个顶点叠小圆磨圆尖角 + 三条边各自中点
-    //      叠一个更大一点的圆，让每条边都有参考图里那种微微向外膨出的弧线感
-    //      （而不是纯直线边）。整体比之前又大了一圈，顶点整体保持在远离脚趾
-    //      一侧挪了一点的位置，跟脚趾之间留出间隙。所有顶点/中点先按 scale
-    //      缩放，再整体绕爪印中心转 rotRad（跟脚趾一起转）。----
+    // ---- 大脚掌：三角形的基本轮廓，边缘用沿着每条边连续叠圆的方式磨光滑——
+    //      半径从顶点处的 padCornerR 平滑过渡到边中点的 padBulgeR 再过渡回
+    //      padCornerR（sin 曲线，没有突变），这样整条边看起来是一条连续膨出的
+    //      弧线，不会在顶点圆和中点圆之间露出直线的"腰身"。整体面积比上一版
+    //      缩小约 5%（PAD_SIZE_SCALE = sqrt(0.95)，长度方向缩小约 2.5%）。
+    //      顶点整体保持在远离脚趾一侧挪了一点的位置，跟脚趾之间留出间隙。
+    //      所有坐标先按 scale 缩放，再整体绕爪印中心转 rotRad（跟脚趾一起转）。----
+    const float PAD_SIZE_SCALE = 0.9747f;  // sqrt(0.95)：让三角形面积整体缩小 5%
     const float padLocal[3][2] = {
         {0.0f, -4.0f},   // 顶点：朝向脚趾一侧
         {-9.0f, 10.0f},  // 左下角
         {9.0f, 10.0f},   // 右下角
     };
+    float padScale = scale * PAD_SIZE_SCALE;
     int padPx[3], padPy[3];
     for (int i = 0; i < 3; i++) {
       int rx, ry;
-      rotateLocalOffset(rotRad, padLocal[i][0] * scale, padLocal[i][1] * scale, rx, ry);
+      rotateLocalOffset(rotRad, padLocal[i][0] * padScale, padLocal[i][1] * padScale, rx, ry);
       padPx[i] = cx + rx;
       padPy[i] = cy + ry;
     }
     spi->fillTriangle(padPx[0], padPy[0], padPx[1], padPy[1], padPx[2], padPy[2], col);
-    int padCornerR = max(1, (int)roundf(3.0f * scale));
-    for (int i = 0; i < 3; i++) {
-      spi->fillCircle(padPx[i], padPy[i], padCornerR, col);
-    }
-    // 边中点叠圆：圆心正好落在直线边上，圆的一半会鼓到边外面，形成向外膨出
-    // 的弧线；同一种颜色跟三角形叠着填充，视觉上融合成一个圆润的整体轮廓。
-    int padBulgeR = max(1, (int)roundf(5.0f * scale));
+    int padCornerR = max(1, (int)roundf(3.0f * padScale));
+    int padBulgeR = max(1, (int)roundf(5.0f * padScale));
+    const int EDGE_STEPS = 4;  // 每条边采样点数（含两端），越多边缘越光滑
     for (int i = 0; i < 3; i++) {
       int j = (i + 1) % 3;
-      int mx = (padPx[i] + padPx[j]) / 2;
-      int my = (padPy[i] + padPy[j]) / 2;
-      spi->fillCircle(mx, my, padBulgeR, col);
+      for (int k = 0; k <= EDGE_STEPS; k++) {
+        float t = (float)k / EDGE_STEPS;
+        int px = padPx[i] + (int)roundf((padPx[j] - padPx[i]) * t);
+        int py = padPy[i] + (int)roundf((padPy[j] - padPy[i]) * t);
+        float r = padCornerR + (padBulgeR - padCornerR) * sinf(t * PI);
+        spi->fillCircle(px, py, max(1, (int)roundf(r)), col);
+      }
     }
 
     // 4 个脚趾（比之前更小一圈）：{ 局部x偏移, 局部y偏移, 半径x, 半径y, 倾斜角度(度) }。
