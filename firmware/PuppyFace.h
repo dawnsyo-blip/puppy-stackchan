@@ -264,15 +264,23 @@ class PuppyEye : public Drawable {
 
     // ---- 兴奋：'><' 眉眼形——左眼是 '>'，右眼是 '<'，静态不转，整体按
     //      EXCITED_SCALE 缩小后再按 EXCITED_EYE_BOOST 放大一点；进入兴奋
-    //      EXCITED_BLINK_SWING_START_MS 之前眼睛保持全开，之后才开始跟随
-    //      正常的自动眨眼节奏。张开的两条边的横向位置（armX）用固定宽度，不随
-    //      眨眼变化，只有纵向张开幅度（a）随 openRatio 收窄；这样闭眼时是一条
-    //      横线（armX 到 tipX 之间的一段），不会因为 armX 也跟着缩到 0 而变成
-    //      一个点。----
+    //      EXCITED_BLINK_SWING_START_MS 之前眼睛保持全开，之后才开始跟随正常
+    //      的自动眨眼节奏。openRatio>=0.5 时画平时的'><'折线（随 openRatio 连续
+    //      收窄）；openRatio<0.5（快闭眼/闭眼）时改画一条微微鼓出的竖向弧线，
+    //      左右眼各自往相反方向鼓，类似"）（"，而不是收成一条横线或者一个点。----
     if (style == 1) {
       float openRatio = 1.0f;
       if (excitedElapsed >= EXCITED_BLINK_SWING_START_MS) {
         openRatio = isLeft ? ctx->getLeftEyeOpenRatio() : ctx->getRightEyeOpenRatio();
+      }
+      if (openRatio < 0.5f) {
+        int hh = (int)roundf(6 * EXCITED_SCALE * EXCITED_EYE_BOOST * s);   // 弧线竖直方向的半高
+        int bow = (int)roundf(2 * EXCITED_SCALE * EXCITED_EYE_BOOST * s);  // 弧线中间鼓出的幅度
+        int bowX = isLeft ? bow : -bow;  // 左右眼往相反方向鼓，类似"）（"
+        for (int t = -1; t <= 1; t++) {
+          spi->drawBezier(cx + t, cy - hh, cx + bowX + t, cy, cx + t, cy + hh, col);
+        }
+        return;
       }
       int width = (int)roundf(7 * EXCITED_SCALE * EXCITED_EYE_BOOST * s);
       int a = (int)roundf(width * openRatio);
@@ -558,11 +566,12 @@ class PuppyEar : public Drawable {
     // ---- 大脚掌：三角形的基本轮廓，边缘用沿着每条边连续叠圆的方式磨光滑——
     //      半径从顶点处的 padCornerR 平滑过渡到边中点的 padBulgeR 再过渡回
     //      padCornerR（sin 曲线，没有突变），这样整条边看起来是一条连续膨出的
-    //      弧线，不会在顶点圆和中点圆之间露出直线的"腰身"。整体面积比上一版
-    //      缩小约 5%（PAD_SIZE_SCALE = sqrt(0.95)，长度方向缩小约 2.5%）。
+    //      弧线，不会在顶点圆和中点圆之间露出直线的"腰身"；采样点数比上一版更
+    //      多，边缘更光滑。整体面积比最初版本累计缩小约 10%（两次各 5%，
+    //      PAD_SIZE_SCALE = sqrt(0.95)*sqrt(0.95) = 0.95，长度方向缩小 5%）。
     //      顶点整体保持在远离脚趾一侧挪了一点的位置，跟脚趾之间留出间隙。
     //      所有坐标先按 scale 缩放，再整体绕爪印中心转 rotRad（跟脚趾一起转）。----
-    const float PAD_SIZE_SCALE = 0.9747f;  // sqrt(0.95)：让三角形面积整体缩小 5%
+    const float PAD_SIZE_SCALE = 0.95f;  // 两轮各 5% 面积缩小的累计线性比例
     const float padLocal[3][2] = {
         {0.0f, -4.0f},   // 顶点：朝向脚趾一侧
         {-9.0f, 10.0f},  // 左下角
@@ -579,7 +588,7 @@ class PuppyEar : public Drawable {
     spi->fillTriangle(padPx[0], padPy[0], padPx[1], padPy[1], padPx[2], padPy[2], col);
     int padCornerR = max(1, (int)roundf(3.0f * padScale));
     int padBulgeR = max(1, (int)roundf(5.0f * padScale));
-    const int EDGE_STEPS = 4;  // 每条边采样点数（含两端），越多边缘越光滑
+    const int EDGE_STEPS = 8;  // 每条边采样点数（含两端），越多边缘越光滑
     for (int i = 0; i < 3; i++) {
       int j = (i + 1) % 3;
       for (int k = 0; k <= EDGE_STEPS; k++) {
@@ -781,12 +790,16 @@ class PuppyEar : public Drawable {
     }
 
     // ===== 兴奋表情：从右耳组件画爪印动画（五官下方，左右各一个）=====
-    // 状态机：EXCITED_PAW_START_MS 之前不显示；之后先左爪、再右爪交替
-    // EXCITED_PAW_CYCLES 轮，每一段的持续时长在 [EXCITED_PAW_MIN_MS,
-    // EXCITED_PAW_MAX_MS] 内随机；交替结束后左右爪一起出现并常驻。每次某只
-    // 爪印开始显示时，都会给它的位置和整体旋转角度重新随机一次。
+    // 状态机：EXCITED_PAW_START_MS 之前不显示；之后左右交替 EXCITED_PAW_CYCLES
+    // 轮（左,右,左,右,...），每一段的持续时长在 [EXCITED_PAW_MIN_MS,
+    // EXCITED_PAW_MAX_MS] 内随机；交替结束后左爪再出现一次并常驻，然后右爪也
+    // 出现并常驻——即"左,右,左,右,左(常驻),右(常驻)"。这样每只爪印在"常驻"之前
+    // 都是从隐藏状态重新淡入的，不会出现"已经在显示的爪印突然被重新随机位置/
+    // 角度导致画面跳一下"的问题（旧版本左右一起进入常驻时，其中一只爪印其实
+    // 已经在显示中，重新随机位置会让它瞬间跳一下）。每只爪印开始显示时，都会
+    // 给它的位置和整体旋转角度重新随机一次。
     if (isExcited && !isLeft) {
-      const int totalSteps = 2 * EXCITED_PAW_CYCLES;
+      const int totalSteps = 2 * EXCITED_PAW_CYCLES + 1;  // 交替段数，最后一段固定停在左爪
       if (excitedElapsed < EXCITED_PAW_START_MS) {
         pawPhaseIdx_ = -1;
       } else {
@@ -804,8 +817,8 @@ class PuppyEar : public Drawable {
             pawPhaseDurationMs_ = random(EXCITED_PAW_MIN_MS, EXCITED_PAW_MAX_MS + 1);
             randomizePawAppearance(pawPhaseIdx_ % 2 == 0 ? 0 : 1);
           } else {
-            // 交替结束，进入左右都常驻的最终阶段，两只爪印各自再随机一次
-            randomizePawAppearance(0);
+            // 交替结束（停在左爪，左爪已经在显示中，不重新随机它），现在轮到
+            // 右爪也出现并常驻——右爪在上一段是隐藏的，这里是一次干净的淡入。
             randomizePawAppearance(1);
           }
         }
