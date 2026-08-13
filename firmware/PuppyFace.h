@@ -100,8 +100,8 @@ static const int DOUBT_PIVOT_Y = 140;
 // 并常驻。每次爪印出现时位置会在基准位置上叠加一点随机抖动。
 static const unsigned long EXCITED_BLINK_SWING_START_MS = 1000;
 static const unsigned long EXCITED_PAW_START_MS = 2000;
-static const unsigned long EXCITED_PAW_MIN_MS = 500;
-static const unsigned long EXCITED_PAW_MAX_MS = 1500;
+static const unsigned long EXCITED_PAW_MIN_MS = 300;
+static const unsigned long EXCITED_PAW_MAX_MS = 800;
 static const int EXCITED_PAW_CYCLES = 2;
 static const int EXCITED_PAW_JITTER_PX = 15;  // 爪印位置随机抖动的最大幅度（像素）
 static const float EXCITED_PAW_ROT_BASE_DEG = 12.0f;   // 爪印整体旋转的基准角度：左爪逆时针、右爪顺时针
@@ -551,14 +551,14 @@ class PuppyEar : public Drawable {
     int m = mirror ? -1 : 1;
     const float toeSpread = 1.35f;  // 脚趾彼此之间、脚趾与脚掌之间的间距放大系数（只放大位置，不放大半径）
 
-    // ---- 大脚掌：参考图里那种圆润的三瓣掌垫——先画一个实心三角形，再在三个
-    //      顶点各画一个实心圆盖住尖角，两种图形用同一种颜色叠着填充，在位图上
-    //      近似出"布尔并集"之后圆润的轮廓。三角形顶点先按 scale 缩放，再整体
-    //      绕爪印中心转 rotRad（跟脚趾一起转）。----
+    // ---- 大脚掌：保留三角形的基本轮廓，只在三个顶点各叠一个较小的实心圆把
+    //      尖角磨圆（近似"圆角三角形"，不是三个独立的圆瓣）。三角形本身比圆角
+    //      半径大得多，所以三条直边仍然清晰可见。三角形顶点先按 scale 缩放，
+    //      再整体绕爪印中心转 rotRad（跟脚趾一起转）。----
     const float padLocal[3][2] = {
-        {0.0f, -6.0f},   // 顶点：朝向脚趾一侧
-        {-7.0f, 6.0f},   // 左下角
-        {7.0f, 6.0f},    // 右下角
+        {0.0f, -7.0f},   // 顶点：朝向脚趾一侧
+        {-8.0f, 6.0f},   // 左下角
+        {8.0f, 6.0f},    // 右下角
     };
     int padPx[3], padPy[3];
     for (int i = 0; i < 3; i++) {
@@ -568,7 +568,7 @@ class PuppyEar : public Drawable {
       padPy[i] = cy + ry;
     }
     spi->fillTriangle(padPx[0], padPy[0], padPx[1], padPy[1], padPx[2], padPy[2], col);
-    int padCornerR = max(1, (int)roundf(6.0f * scale));
+    int padCornerR = max(1, (int)roundf(3.5f * scale));
     for (int i = 0; i < 3; i++) {
       spi->fillCircle(padPx[i], padPy[i], padCornerR, col);
     }
