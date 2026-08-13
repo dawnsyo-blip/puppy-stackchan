@@ -145,9 +145,6 @@ VOLUME_RMS_THRESHOLD = 300       # 音量触发阈值。这个数值经过了几
                                   # 修完以上三个问题后实测：安静环境下 rms 在 50-160 附近波动，
                                   # 而清楚说话时的 rms 能冲到 1000-7000 量级，两者有一到两个数量级
                                   # 的差距，300 留了足够的安全边际。
-WAKE_RECORD_SECONDS = 3          # 音量触发后，先录这么久做唤醒词校验
-WAKE_WORDS = ["小狗", "xiǎo gǒu", "xiao gou"]
-
 # --- 完整对话链路 ---
 CURIOUS_RECORD_SECONDS = 4       # 好奇状态下录真正问题的时长
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
@@ -567,7 +564,7 @@ class PuppyEngine:
         print(f"[引擎] 当前状态: {self.state.value}")
         print("[引擎] 轻点头顶 → 扫描找人")
         print("[引擎] 长按头顶(1秒) → 兴奋")
-        print(f"[引擎] 说出唤醒词 {WAKE_WORDS} → 好奇聆听 → 思考 → 回应")
+        print(f"[引擎] 音量突增 (rms >= {VOLUME_RMS_THRESHOLD}) → 扫描找人 → 好奇聆听 → 思考 → 回应")
         print("[引擎] Ctrl+C 退出\n")
 
     # ---------- 状态转移 ----------
@@ -715,8 +712,9 @@ class PuppyEngine:
         return "".join(seg.text for seg in segments).strip()
 
     def check_voice_wake(self):
-        """轮询 /volume；音量超过阈值时录音校验唤醒词，命中后扫描找人→开心→
-        进入好奇开始真正的问题录音。返回 True 表示这次 tick 已经被这套流程占用。"""
+        """轮询 /volume；音量超过阈值直接扫描找人→开心→进入好奇开始问题录音
+        （不再做单独的唤醒词校验录音——是不是噪音由 run_conversation_turn()
+        里的识别结果是否为空来判断）。返回 True 表示这次 tick 已经被这套流程占用。"""
         now = time.time()
         if now - self.last_volume_poll < VOLUME_POLL_SEC:
             return False
@@ -730,18 +728,7 @@ class PuppyEngine:
         if rms < VOLUME_RMS_THRESHOLD:
             return False
 
-        print(f"[唤醒] 音量突增 (rms={rms:.0f})，录音校验唤醒词...")
-        wav_bytes = record_audio(WAKE_RECORD_SECONDS)
-        if not wav_bytes:
-            return True
-
-        text = self.transcribe(wav_bytes, "wake_check.wav")
-        print(f"[唤醒] 校验录音识别: 「{text}」")
-        if not any(w in text for w in WAKE_WORDS):
-            print("[唤醒] 未包含唤醒词，忽略")
-            return True
-
-        print("[唤醒] 唤醒词命中！扫描找人...")
+        print(f"[唤醒] 音量突增 (rms={rms:.0f})，扫描找人...")
         self.record_interaction()
         if self.scan_for_face():
             self.transition(State.HAPPY)
