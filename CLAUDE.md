@@ -81,3 +81,11 @@ arduino-cli upload --fqbn m5stack:esp32:m5stack_cores3 --port COM3 firmware
   在 git 仓库之外，重装 Arduino 库时改动会丢失，需要重新手动禁用。
 - 每次成功编译 `firmware/PuppyFace.h` 之后应主动 `git add` + `git commit`，
   方便回滚到任何一个历史版本。
+- **任何会被 host 端持续高频轮询的 HTTP 接口（比如 `/volume`），handler 里禁止用
+  `malloc()`/`heap_caps_malloc()` 或 Arduino `String` 拼接。** 这两者对偶尔调用
+  一次的接口（`/camera`、`/record`）没问题，但对方持续每隔几秒调用一次、可能
+  连续运行几小时的接口，会慢慢碎片化本就很小的内部堆，表现为：先是偶尔响应
+  变慢/超时，然后连不上，最后设备直接重启。`handleVolume()` 就踩过这个坑（详见
+  git log 里 "Fix root cause of StackChan reboots" 那次提交）——修法是用
+  `static` 缓冲区 + `snprintf` 到栈上的定长 char 数组，全程零堆分配。以后新增
+  类似"host 端常驻轮询"的接口，从一开始就按这个模式写。
