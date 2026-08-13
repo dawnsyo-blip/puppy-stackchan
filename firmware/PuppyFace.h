@@ -120,7 +120,8 @@ static const float EXCITED_PAW_ROT_JITTER_DEG = 5.0f;  // 每次出现时在基�
 // 两只爪印之间的间距、爪印与五官的距离都相应加大，避免整体缩小后挤在一起。
 static const float EXCITED_SCALE = 0.7f;
 static const float EXCITED_PAW_SCALE = EXCITED_SCALE * 0.8f;
-static const float EXCITED_EYE_BOOST = 1.2f;       // 兴奋时眼睛在整体缩放基础上再放大一点
+static const float EXCITED_EYE_BOOST = 1.4f;       // 兴奋时眼睛在整体缩放基础上再放大一点
+static const float EXCITED_EYE_INWARD_PX = 8.0f;   // 兴奋时两只眼睛互相靠拢的像素数
 static const float EXCITED_EAR_INWARD_PX = 12.0f;  // 兴奋时耳朵朝眼睛方向靠拢的像素数
 static const float EXCITED_NOSE_UP_PX = 10.0f;     // 兴奋时鼻子朝眼睛方向靠拢（往上贴）的像素数
 
@@ -216,6 +217,7 @@ class PuppyEye : public Drawable {
 
   bool wasExcited_ = false;
   unsigned long excitedStartMs_ = 0;
+  FloatTransition eyeInwardAnim_;  // 兴奋：两只眼睛互相靠拢
 
  public:
   PuppyEye(bool isLeft) : isLeft(isLeft) {}
@@ -231,6 +233,10 @@ class PuppyEye : public Drawable {
     float doubtAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD : 0.0f);
     applyRotationAroundPivot(doubtAngle, DOUBT_PIVOT_X, DOUBT_PIVOT_Y, cx, cy);
     float rotTotal = doubtAngle;
+
+    // 兴奋：两只眼睛各自朝对方靠拢一点（左眼往右挪，右眼往左挪）。
+    int eyeInward = (int)roundf(eyeInwardAnim_.update(isExcited ? EXCITED_EYE_INWARD_PX : 0.0f));
+    cx += isLeft ? eyeInward : -eyeInward;
 
     uint16_t col = ctx->getColorDepth() == 1
                        ? 1
