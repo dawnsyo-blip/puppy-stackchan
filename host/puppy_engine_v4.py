@@ -127,11 +127,11 @@ SCAN_PAUSE = 1.0
 # --- 触摸检测 ---
 TOUCH_POLL_SEC = 0.5
 
-# --- 语音唤醒（方案A：音量触发 + Whisper 校验）---
+# --- 语音唤醒（方案A：音量触发）---
 VOLUME_POLL_SEC = 3.0            # 轮询 /volume 的间隔。实测 /volume 每次调用都会启停一次
                                   # 麦克风(I2S)，持续高频调用即使 2s 一次也偶尔会让设备重启，
                                   # 所以留了更大的余量；如果还不稳定可以继续调大。
-VOLUME_RMS_THRESHOLD = 300       # 音量触发阈值。这个数值经过了几轮固件修复才最终校准：
+VOLUME_RMS_THRESHOLD = 600       # 音量触发阈值。这个数值经过了几轮固件修复才最终校准：
                                   # 1) /volume 原来只采样 100ms 就报数，每 3s 轮询一次相当于
                                   #    只有 3.3% 的时间在"听"，几乎不可能刚好盖住说话的瞬间——
                                   #    改成整整 1 秒的采样窗口。
@@ -144,7 +144,7 @@ VOLUME_RMS_THRESHOLD = 300       # 音量触发阈值。这个数值经过了几
                                   #    合理的档位（调到 48 会削波）。
                                   # 修完以上三个问题后实测：安静环境下 rms 在 50-160 附近波动，
                                   # 而清楚说话时的 rms 能冲到 1000-7000 量级，两者有一到两个数量级
-                                  # 的差距，300 留了足够的安全边际。
+                                  # 的差距，600 留了足够的安全边际。
 # --- 完整对话链路 ---
 CURIOUS_RECORD_SECONDS = 4       # 好奇状态下录真正问题的时长
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
@@ -705,10 +705,18 @@ class PuppyEngine:
     # ---------- 语音唤醒 + 完整对话链路 ----------
 
     def transcribe(self, wav_bytes, filename):
-        """把一段 WAV 字节数据识别成文字（复用预加载好的 Whisper 模型）。"""
+        """把一段 WAV 字节数据识别成文字（复用预加载好的 Whisper 模型）。
+        vad_filter=True 会先用一个独立的语音活动检测模型判断音频里有没有真实
+        人声，只把检测到人声的片段交给 Whisper 转写——不加这个的话，Whisper
+        在纯噪音/静音输入上不会老实返回空结果，而是会"幻听"出训练数据里记住
+        的固定短语（实测这个模型在安静环境噪音下稳定幻听出"字幕by索兰娅"这类
+        视频字幕组/平台水印文案），把这段幻觉文本当成正常识别结果返回，混进
+        真实对话流程。"""
         wav_path = AUDIO_DIR / filename
         wav_path.write_bytes(wav_bytes)
-        segments, _ = self.whisper_model.transcribe(str(wav_path), language=WHISPER_LANGUAGE)
+        segments, _ = self.whisper_model.transcribe(
+            str(wav_path), language=WHISPER_LANGUAGE, vad_filter=True
+        )
         return "".join(seg.text for seg in segments).strip()
 
     def check_voice_wake(self):
