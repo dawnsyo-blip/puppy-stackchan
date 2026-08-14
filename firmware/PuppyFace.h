@@ -131,26 +131,32 @@ static const float EXCITED_EAR_INWARD_PX = 12.0f;  // 兴奋时耳朵朝眼睛�
 static const float EXCITED_NOSE_UP_PX = 10.0f;     // 兴奋时鼻子朝眼睛方向靠拢（往上贴）的像素数
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
-// "碗身"都只画白色描边（不填充），碗口正中间画一个白色实心爪印。固定画在
-// 屏幕右下角。BODY_TOP/BOTTOM 是碗身顶/底边相对 BUTTON_CY（碗口椭圆圆心）的
-// 偏移：BODY_TOP 是负数、绝对值比碗口竖直半径 BUTTON_RY 小，让碗身顶边落在
-// 碗口范围内；BODY_BOTTOM 比 BUTTON_RY 大，让碗身底边露出在碗口下方一截。
-// 碗身宽度 BUTTON_BODY_W 直接等于 2*BUTTON_RX，让圆角矩形的左右两边跟椭圆
-// 最宽处（左右两个端点）严格对齐在同一条竖直线上——down/up 缩放时两者用
-// 同一个 buttonScale 系数，所以任意缩放比例下都还是对齐的，不只是静止状态。
-// down 态整体再按 BUTTON_DOWN_SCALE 缩小，靠 buttonScaleAnim_ 过渡出"按一下"
-// 的动画。----
+// "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
+// 布尔运算，具体做法见下面 draw() 里的实现注释），碗口正中间画一个白色实心
+// 爪印。固定画在屏幕右下角。BODY_TOP/BOTTOM 是碗身顶/底边相对 BUTTON_CY（碗口
+// 椭圆圆心）的偏移：BODY_TOP 是负数、绝对值比碗口竖直半径 BUTTON_RY 小，让
+// 碗身顶边落在碗口范围内（会被擦掉）；BODY_BOTTOM 比 BUTTON_RY 大，让碗身
+// 底边露出在碗口下方一截。碗身宽度 BUTTON_BODY_W 直接等于 2*BUTTON_RX，让
+// 圆角矩形的左右两边跟椭圆最宽处（左右两个端点）严格对齐在同一条竖直线上——
+// down/up 缩放时两者用同一个 buttonScale 系数，所以任意缩放比例下都还是对齐
+// 的，不只是静止状态。down 态整体再按 BUTTON_DOWN_SCALE 缩小，靠
+// buttonScaleAnim_ 过渡出"按一下"的动画。----
 static const int BUTTON_CX = 270;
 static const int BUTTON_CY = 205;
 static const int BUTTON_RX = 23;              // 碗口（椭圆）横向半径（比上一版整体放大20%）
-static const int BUTTON_RY = 13;              // 碗口（椭圆）竖向半径（比上一版整体放大20%）
+static const int BUTTON_RY = 11;              // 碗口（椭圆）竖向半径（在放大20%的基础上再压扁，横竖半径比从1.77升到2.09）
 static const int BUTTON_BODY_W = 2 * BUTTON_RX;  // 碗身宽度=2*BUTTON_RX，两侧与碗口对齐
 static const int BUTTON_BODY_TOP = -1;        // 碗身顶边相对 BUTTON_CY 的偏移
 static const int BUTTON_BODY_BOTTOM = 16;     // 碗身底边相对 BUTTON_CY 的偏移（比上一版整体放大20%）
 static const int BUTTON_BODY_RADIUS = 5;      // 碗身圆角半径（比上一版整体放大20%）
 static const float BUTTON_DOWN_SCALE = 0.75f; // 按下瞬间整体缩小的比例
-static const float BUTTON_PAW_SCALE = 0.50f;  // 爪印相对 drawPawPrint 原始大小的缩放（随按钮一起放大20%）
-static const float BUTTON_PAW_TOE_SPREAD_MUL = 1.8f;  // 爪印内部脚趾相对脚掌/彼此的间距放大系数（进一步拉开）
+// 下面两个爪印参数是按 BUTTON_RX/RY 算过的：保证爪印整体（脚掌三角+四个脚趾，
+// 含边缘磨圆半径）的外包络完全落在碗口椭圆内部，同时脚趾与脚趾、脚趾与脚掌
+// 之间留有几像素不重叠的间隙（碗口是扁椭圆，比爪印天然的长宽比更"矮"，所以
+// 缩放系数比脚趾动画用的默认值小很多）。改这两个值之前建议先算一遍外包络，
+// 不要直接凭感觉调大，否则爪印会露出碗口或者脚趾互相粘在一起。
+static const float BUTTON_PAW_SCALE = 0.38f;           // 爪印相对 drawPawPrint 原始大小的缩放（比上一版再缩小10%）
+static const float BUTTON_PAW_TOE_SPREAD_MUL = 1.15f;  // 爪印内部脚趾相对脚掌/彼此的间距放大系数（椭圆压扁后收窄一点，维持外包络留有余量）
 
 // 把局部偏移量 (ox,oy) 绕原点旋转 angle 弧度，用于让部件"自身"的朝向也跟着转
 // （而不只是把部件的位置搬到旋转后的地方）。angle=0 时精确还原原始偏移量。
@@ -904,7 +910,12 @@ class PuppyEar : public Drawable {
     // 碗口正中间画一个白色实心爪印，固定画在屏幕右下角（不随表情移动），
     // 只在右耳组件里画一次。buttonScaleAnim_ 每帧都朝目标缩放过渡（即使按钮
     // 当前隐藏也照常更新，保证下次出现时动画状态是对的），目标由
-    // g_buttonState 决定：0/1=正常大小(1.0)，2=按下(BUTTON_DOWN_SCALE)。=====
+    // g_buttonState 决定：0/1=正常大小(1.0)，2=按下(BUTTON_DOWN_SCALE)。
+    // M5Canvas 没有真正的布尔运算/裁剪 API，碗口盖住碗身顶边这个效果靠
+    // "先画碗身描边→用背景色实心椭圆把落在碗口范围内的部分擦掉→再补画一次
+    // 碗口描边"这三步模拟：擦除让碗身顶边在碗口内的一截连同碗口自己被擦掉的
+    // 半圈描边一起消失，随后补画的碗口描边把自己的圆周重新画完整，最终效果
+    // 就是碗口的边始终连续不断，碗身只在碗口下方露出的部分能看见边。=====
     if (!isLeft) {
       float buttonScale = buttonScaleAnim_.update(g_buttonState == 2 ? BUTTON_DOWN_SCALE : 1.0f);
       if (g_buttonState != 0) {
@@ -914,12 +925,19 @@ class PuppyEar : public Drawable {
         int bodyTopY = BUTTON_CY + (int)roundf(BUTTON_BODY_TOP * buttonScale);
         int bodyBottomY = BUTTON_CY + (int)roundf(BUTTON_BODY_BOTTOM * buttonScale);
         int bodyR = max(1, (int)roundf(BUTTON_BODY_RADIUS * buttonScale));
+        uint16_t bgCol = ctx->getColorDepth() == 1
+                             ? ERACER_COLOR
+                             : ctx->getColorPalette()->get(COLOR_BACKGROUND);
         // 碗身：圆角矩形描边
         spi->drawRoundRect(BUTTON_CX - bodyHalfW, bodyTopY, bodyHalfW * 2,
                             bodyBottomY - bodyTopY, bodyR, col);
-        // 碗口：椭圆描边
+        // 用背景色实心椭圆擦掉碗身与碗口重叠的部分（布尔差集），再补画一次
+        // 碗口描边，让碗口的圆周保持完整、不被碗身的顶边打断。
+        spi->fillEllipse(BUTTON_CX, BUTTON_CY, rx, ry, bgCol);
         spi->drawEllipse(BUTTON_CX, BUTTON_CY, rx, ry, col);
-        // 爪印：白色实心，画在碗口正中间，脚趾间距按 BUTTON_PAW_TOE_SPREAD_MUL 拉开
+        // 爪印：白色实心，画在碗口正中间；BUTTON_PAW_SCALE/BUTTON_PAW_TOE_SPREAD_MUL
+        // 两个常量是照实际半径算过的——保证爪印整体（脚掌+四趾）落在碗口椭圆
+        // 内部，同时脚趾彼此、脚趾与脚掌之间留有不重叠的间隙。
         drawPawPrint(spi, BUTTON_CX, BUTTON_CY, BUTTON_PAW_SCALE * buttonScale, false, 0.0f, col,
                      BUTTON_PAW_TOE_SPREAD_MUL);
       }
