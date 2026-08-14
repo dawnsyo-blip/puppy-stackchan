@@ -2,13 +2,13 @@
 StackChan 小狗行为引擎 v4
 ========================
 新增内容 (v3 → v4)：
-- 整合 voice_test.py 的语音链路：Whisper STT（启动时预加载一次）、DeepSeek LLM
-  （API key 从项目根目录 .env 手动解析，不读环境变量）、edge-tts 语音合成、
-  HTTP 音频服务器播放。
+- 整合 voice_test.py 的语音链路：FunASR SenseVoice STT（启动时预加载一次）、
+  DeepSeek LLM（API key 从项目根目录 .env 手动解析，不读环境变量）、edge-tts
+  语音合成、HTTP 音频服务器播放。
 - 新增 CURIOUS（好奇/录音中）、THINKING（思考/LLM处理中）、SORRY（抱歉）三个状态。
-- 关键词唤醒（方案A）：主循环持续轮询 /volume，音量突增时录 3 秒做唤醒词校验，
-  Whisper 识别到"小狗"后扫描找人 → HAPPY → 进入 CURIOUS 开始真正的问题录音。
-- 完整对话链路：CURIOUS(录音4s) → THINKING(STT+LLM，四路意图分支) →
+- 音量唤醒（方案A）：主循环持续轮询 /volume，音量突增直接扫描找人 → HAPPY →
+  进入 CURIOUS 开始真正的问题录音（不再单独录一段做唤醒词校验）。
+- 完整对话链路：CURIOUS(录音5s) → THINKING(STT+LLM，四路意图分支) →
   qa_simple(点头/摇头) / qa_complex(逐个念关键词) → HAPPY；
   praise → EXCITED；scold → SORRY。
 - EXPRESSION_MAP 改用固件实际支持的表情名（见 firmware.ino handleFace()）。
@@ -21,8 +21,10 @@ StackChan 小狗行为引擎 v4
 
 依赖（此项目用的是 anaconda "stackchan" 环境，基础环境没装这些）：
     conda activate stackchan
-    pip install faster-whisper edge-tts pydub
+    pip install funasr torch torchaudio edge-tts pydub
 ffmpeg 需要在系统 PATH 里（pydub 转 WAV 要用）。
+SenseVoiceSmall / fsmn-vad 模型首次运行会自动从 ModelScope 下载并缓存，
+如果下载失败/很慢，可以先设 HF_ENDPOINT=https://hf-mirror.com 再运行。
 
 用法: python host/puppy_engine_v4.py
 退出: Ctrl+C
@@ -173,29 +175,24 @@ KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键�
 #     那个词。其它所有状态只切表情，不显示文字也不播语音提示。） ---
 KEYWORD_SUBTITLE_DUR_MS = 1500    # /speech 的 dur 参数：单个关键词字幕展示时长
 
-# --- 语音识别 (Whisper) ---
-WHISPER_MODEL_PATH = "C:/Users/89823/whisper-small"
-WHISPER_DEVICE = "cpu"
-WHISPER_COMPUTE_TYPE = "int8"
-WHISPER_LANGUAGE = "zh"
+# --- 语音识别 (FunASR SenseVoice) ---
+# 从 faster-whisper 切换过来的原因：不再需要本地维护一份模型文件路径，
+# SenseVoiceSmall 用模型名从 ModelScope 按需下载并缓存；效果和幻听表现留待
+# 实际使用观察，之前针对 whisper-small 训练数据幻听出的"字幕by索兰娅"这类
+# 固定短语是那个模型特有的，SenseVoice 是完全不同的模型/训练数据，没有理由
+# 复用同一份黑名单，所以没有搬过来。
+SENSEVOICE_MODEL = "iic/SenseVoiceSmall"
+SENSEVOICE_DEVICE = "cpu"
+SENSEVOICE_LANGUAGE = "zh"
 
-# vad_filter 默认 min_speech_duration_ms=0，意味着哪怕只有几十毫秒的"像人声"
-# 的信号（比如一次敲击声、咳嗽、椅子响）也能通过 VAD 这道关，送进 Whisper 之
-# 后 Whisper 仍然可能在这种极短/低质量片段上幻听。调高到 250ms 要求必须是
-# 一段有一定长度的连续人声才放行，实测对着真实短语音（"小狗小狗小狗"）没有
-# 影响，但纯噪音/静音测试样本都能被更干净地过滤掉。
-WHISPER_VAD_MIN_SPEECH_MS = 250
-WHISPER_VAD_SPEECH_PAD_MS = 200
-
-# vad_filter 不是 100% 保险——已经实测遇到过噪音/静音在加了 vad_filter 之后
-# 仍然被识别成这几个固定短语（Whisper 训练数据里记住的视频字幕组/平台水印
-# 文案，和本项目调用的 DeepSeek/edge-tts 完全无关，纯粹是这个本地 Whisper
-# 模型文件自带的幻听内容）。作为最后一道保险，命中这个名单就直接当噪音
-# 处理，不管前面的 VAD/置信度判断是否放行了它。
-WHISPER_HALLUCINATION_BLACKLIST = [
-    "字幕by索兰娅",
-    "优优独播剧场",
-]
+# 用 fsmn-vad 做噪音过滤，等价于之前 faster-whisper 里 vad_filter=True 的
+# 作用：先判断音频里有没有真实人声、按语音活动切分，只把真正检测到人声的
+# 片段送进 SenseVoice 转写，而不是不管三七二十一把整段静音/噪音也丢给模型
+# 识别（那样才会出现"什么都没说也识别出一段话"的幻听问题）。
+# max_single_segment_time 是 fsmn-vad 单段最长时长，本项目录音最多几秒钟，
+# 默认 30000ms（30秒）绰绰有余，不需要跟着单独调。
+SENSEVOICE_VAD_MODEL = "fsmn-vad"
+SENSEVOICE_VAD_MAX_SEGMENT_MS = 30000
 
 # --- LLM (DeepSeek) ---
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
@@ -596,13 +593,21 @@ class PuppyEngine:
         # 主循环计数（用于轮流轮询 + 心跳打印）
         self.tick_count = 0
 
-        # 语音链路：启动时一次性预加载，避免每次对话都重新加载模型
-        print("[引擎] 预加载 Whisper 模型...")
-        from faster_whisper import WhisperModel
-        self.whisper_model = WhisperModel(
-            WHISPER_MODEL_PATH, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE
+        # 语音链路：启动时一次性预加载，避免每次对话都重新加载模型。
+        # 模型首次运行会自动从 ModelScope 下载并缓存到本地，之后启动就是直接
+        # 加载缓存，不会重复下载。
+        print("[引擎] 预加载 SenseVoice 模型...")
+        from funasr import AutoModel
+        from funasr.utils.postprocess_utils import rich_transcription_postprocess
+        self._rich_transcription_postprocess = rich_transcription_postprocess
+        self.asr_model = AutoModel(
+            model=SENSEVOICE_MODEL,
+            vad_model=SENSEVOICE_VAD_MODEL,
+            vad_kwargs={"max_single_segment_time": SENSEVOICE_VAD_MAX_SEGMENT_MS},
+            device=SENSEVOICE_DEVICE,
+            disable_update=True,
         )
-        print("[引擎] Whisper 就绪")
+        print("[引擎] SenseVoice 就绪")
 
         self.deepseek_api_key = load_deepseek_api_key()
         if self.deepseek_api_key:
@@ -792,32 +797,19 @@ class PuppyEngine:
     # ---------- 语音唤醒 + 完整对话链路 ----------
 
     def transcribe(self, wav_bytes, filename):
-        """把一段 WAV 字节数据识别成文字（复用预加载好的 Whisper 模型）。
-        vad_filter=True 会先用一个独立的语音活动检测模型判断音频里有没有真实
-        人声，只把检测到人声的片段交给 Whisper 转写——不加这个的话，Whisper
-        在纯噪音/静音输入上不会老实返回空结果，而是会"幻听"出训练数据里记住
-        的固定短语（实测这个模型在安静环境噪音下稳定幻听出"字幕by索兰娅"这类
-        视频字幕组/平台水印文案），把这段幻觉文本当成正常识别结果返回，混进
-        真实对话流程。这和调用的 DeepSeek/edge-tts 没有关系，纯粹是本地这个
-        Whisper 模型文件自带的幻听内容。
-        但 vad_filter 不是 100% 保险——已经实测有过加了 vad_filter 之后同样
-        的幻听仍然偶发的情况，猜测是极短的噪音/敲击声也能通过默认过于宽松的
-        VAD 参数，所以额外做了两层加固：调紧 VAD 的最短人声时长，以及命中
-        已知幻听短语名单就直接当噪音丢弃。"""
+        """把一段 WAV 字节数据识别成文字（复用预加载好的 SenseVoice 模型）。
+        AutoModel 初始化时挂了 fsmn-vad（见 __init__），会先做语音活动检测，
+        只把真正检测到人声的片段送进 SenseVoice——没有人声时 generate() 直接
+        不返回文本，不会像纯靠主模型自己判断"有没有在说话"那样，在纯噪音/
+        静音输入上瞎编一段结果出来。"""
         wav_path = AUDIO_DIR / filename
         wav_path.write_bytes(wav_bytes)
-        segments, _ = self.whisper_model.transcribe(
-            str(wav_path), language=WHISPER_LANGUAGE, vad_filter=True,
-            vad_parameters=dict(
-                min_speech_duration_ms=WHISPER_VAD_MIN_SPEECH_MS,
-                speech_pad_ms=WHISPER_VAD_SPEECH_PAD_MS,
-            ),
+        res = self.asr_model.generate(
+            input=str(wav_path), language=SENSEVOICE_LANGUAGE, use_itn=True,
         )
-        text = "".join(seg.text for seg in segments).strip()
-        if any(p in text for p in WHISPER_HALLUCINATION_BLACKLIST):
-            print(f"  [识别] 命中已知幻听短语名单，当噪音丢弃: 「{text}」")
+        if not res or not res[0].get("text"):
             return ""
-        return text
+        return self._rich_transcription_postprocess(res[0]["text"]).strip()
 
     def check_voice_wake(self):
         """轮询 /volume；音量超过阈值直接扫描找人→开心→进入好奇开始问题录音
