@@ -166,13 +166,20 @@ VOLUME_RMS_THRESHOLD = 450       # 音量触发阈值。这个数值经过了几
 CURIOUS_RECORD_SECONDS = 5       # 好奇状态下录真正问题的时长。原来 3-4 秒
                                   # 经常在用户反应过来、开口说完整句话之前就
                                   # 结束了，只录到半句话，延长到 5 秒。
-CURIOUS_PRE_RECORD_DELAY_SEC = 0.5   # 进 CURIOUS、切好奇表情之后到真正开始
+CURIOUS_PRE_RECORD_DELAY_SEC = 1.0   # 进 CURIOUS、切好奇表情之后到真正开始
                                   # 录音之间的固定等待，给用户一个"小狗注意到
-                                  # 我了，可以开始说了"的反应缓冲
+                                  # 我了，可以开始说了"的反应缓冲（原来 0.5 秒
+                                  # 太短，用户经常还没反应过来表情已经切换完，
+                                  # 加长到 1 秒）
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
 
-# --- 字幕（唯一使用场景：qa_complex 逐个播报关键词时，同步显示当前正在念的
-#     那个词。其它所有状态只切表情，不显示文字也不播语音提示。） ---
+# --- 字幕：用户看不到设备侧的录音指示灯，只能靠屏幕判断小狗现在在做什么。
+#     三个使用场景：①录音期间显示麦克风图标，②等 LLM 回复期间显示思考图标，
+#     ③qa_complex 逐个播报关键词时同步显示当前正在念的那个词。其它状态只切
+#     表情，不显示文字也不播语音提示。 ---
+THINKING_SUBTITLE_DUR_MS = 10000  # /speech 的 dur 参数：思考图标展示上限。正常
+                                   # 情况下 LLM 一回复完就会主动清空字幕，这个只是
+                                   # 兜底上限，避免异常分支下图标卡住不消失
 KEYWORD_SUBTITLE_DUR_MS = 1500    # /speech 的 dur 参数：单个关键词字幕展示时长
 
 # --- 语音识别 (FunASR SenseVoice) ---
@@ -894,10 +901,14 @@ class PuppyEngine:
         # 进 CURIOUS 后立刻开录（中间还夹了一次人脸追踪的网络往返，耗时不固定），
         # 经常在用户反应过来、开口说完整句话之前就把开头吃掉了，只录到半句话。
         # 这里不在开录前做人脸追踪，就是为了让"表情切换→开始录音"之间的等待
-        # 是固定可预期的 0.5 秒，不被追踪请求的耗时拖长；追踪挪到录音结束后
-        # （不影响开录时机）做一次，具体在下面。
+        # 是固定可预期的 CURIOUS_PRE_RECORD_DELAY_SEC 秒，不被追踪请求的耗时
+        # 拖长；追踪挪到录音结束后（不影响开录时机）做一次，具体在下面。
         time.sleep(CURIOUS_PRE_RECORD_DELAY_SEC)
-        print("[对话] 请说话...")
+
+        # 用户看不到设备在录音，屏幕上显示麦克风图标提示——dur 直接和
+        # CURIOUS_RECORD_SECONDS 对齐，录音结束时字幕正好自然过期。
+        set_subtitle("🎤", dur_ms=CURIOUS_RECORD_SECONDS * 1000)
+        print("[对话] 录音中...")
         wav_bytes = record_audio(CURIOUS_RECORD_SECONDS)
         if not wav_bytes:
             print("[对话] 录音失败")
@@ -911,10 +922,12 @@ class PuppyEngine:
             track_ok = False
 
         self.transition(State.THINKING)
+        set_subtitle("💭", dur_ms=THINKING_SUBTITLE_DUR_MS)
         user_text = self.transcribe(wav_bytes, "question.wav")
         print(f"[对话] 识别结果: 「{user_text}」")
         if not user_text:
             print("[对话] 没识别到内容")
+            set_subtitle("")
             self._settle_happy(track_ok)
             return
 
@@ -934,6 +947,7 @@ class PuppyEngine:
             time.sleep(0.2)
         llm_thread.join()
         reply_text, intent, data = llm_result.get("value", (None, "other", {}))
+        set_subtitle("")  # LLM 回应完成，思考图标下线
 
         if reply_text is None:
             print("[对话] LLM 调用失败")
