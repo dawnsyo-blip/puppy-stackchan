@@ -495,7 +495,11 @@ def ask_llm(user_text, api_key):
         print(f"  [LLM] API 返回 {r.status_code}: {r.text[:200]}")
         return None, "other", {}
 
-    full_reply = r.json()["choices"][0]["message"]["content"].strip()
+    try:
+        full_reply = r.json()["choices"][0]["message"]["content"].strip()
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        print(f"  [LLM] 响应格式不对，解析失败: {e!r}  body={r.text[:200]}")
+        return None, "other", {}
     reply_text = full_reply
     intent = "other"
     data = {}
@@ -745,6 +749,24 @@ class PuppyEngine:
         return True
 
     def run_conversation_turn(self):
+        """run_conversation_turn() 内部涉及好几层网络调用（DeepSeek、edge-tts、
+        StackChan 的 HTTP 接口），任何一层偶尔抛出的未预料异常（比如 DeepSeek
+        返回了不含 choices 字段的响应体）以前都不会被 run() 主循环之外的任何
+        地方接住——while True 主循环只 catch KeyboardInterrupt，一旦这里抛出
+        异常整个引擎进程就直接崩溃退出，之后不管是语音、触摸还是人脸检测全部
+        失灵，表现出来就是"只有第一次对话能成功，后续再也不触发"。这里包一层
+        try/except 确保对话链路里出的任何问题都只是这一轮对话失败、退回安全
+        状态，不会打死整个引擎；finally 里按用户要求打印一行确认状态机确实
+        恢复了、下一轮 tick 会继续轮询 /volume。"""
+        try:
+            self._run_conversation_turn_body()
+        except Exception as e:
+            print(f"[对话] [异常] run_conversation_turn 出错，回退到安全状态: {e!r}")
+            self.transition(State.HAPPY if self.face_detected else State.IDLE)
+        finally:
+            print(f"[对话] 对话结束，回到状态={self.state.value}，恢复音量监听")
+
+    def _run_conversation_turn_body(self):
         """完整的一次语音交互：好奇录音 → 思考(STT+LLM) → 按意图四路分支应对。"""
         self.transition(State.CURIOUS)
         wav_bytes = record_audio(CURIOUS_RECORD_SECONDS)
