@@ -130,24 +130,27 @@ static const float EXCITED_EYE_INWARD_PX = 8.0f;   // 兴奋时两只眼睛互�
 static const float EXCITED_EAR_INWARD_PX = 12.0f;  // 兴奋时耳朵朝眼睛方向靠拢的像素数
 static const float EXCITED_NOSE_UP_PX = 10.0f;     // 兴奋时鼻子朝眼睛方向靠拢（往上贴）的像素数
 
-// ---- 关键词播报按钮：像一个从侧面看的狗粮碗——椭圆形"碗口"盖住圆角矩形
-// "碗身"的顶边，碗口里画一个爪印。固定画在屏幕右下角（字幕已经不会同时
-// 出现在这块区域，不用像圆形按钮那版一样特意避让字幕框）。BODY_TOP/BOTTOM
-// 是碗身顶/底边相对 BUTTON_CY（碗口椭圆圆心）的偏移：BODY_TOP 是负数、比碗口
-// 竖直半径 BUTTON_RY 小很多，确保碗身顶边落在碗口内部会被盖住；BODY_BOTTOM
-// 比 BUTTON_RY 大，让碗身底边露出在碗口下方一截，形成"碗身比碗口窄一圈、
-// 只露出下半部分"的剪影。down 态整体按 BUTTON_DOWN_SCALE 缩小，靠
-// buttonScaleAnim_ 过渡出"按一下"的动画。----
+// ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
+// "碗身"都只画白色描边（不填充），碗口正中间画一个白色实心爪印。固定画在
+// 屏幕右下角。BODY_TOP/BOTTOM 是碗身顶/底边相对 BUTTON_CY（碗口椭圆圆心）的
+// 偏移：BODY_TOP 是负数、绝对值比碗口竖直半径 BUTTON_RY 小，让碗身顶边落在
+// 碗口范围内；BODY_BOTTOM 比 BUTTON_RY 大，让碗身底边露出在碗口下方一截。
+// 碗身宽度 BUTTON_BODY_W 直接等于 2*BUTTON_RX，让圆角矩形的左右两边跟椭圆
+// 最宽处（左右两个端点）严格对齐在同一条竖直线上——down/up 缩放时两者用
+// 同一个 buttonScale 系数，所以任意缩放比例下都还是对齐的，不只是静止状态。
+// down 态整体再按 BUTTON_DOWN_SCALE 缩小，靠 buttonScaleAnim_ 过渡出"按一下"
+// 的动画。----
 static const int BUTTON_CX = 270;
 static const int BUTTON_CY = 205;
-static const int BUTTON_RX = 32;              // 碗口（椭圆）横向半径
-static const int BUTTON_RY = 18;              // 碗口（椭圆）竖向半径
-static const int BUTTON_BODY_W = 48;          // 碗身（圆角矩形）宽度
-static const int BUTTON_BODY_TOP = -2;        // 碗身顶边相对 BUTTON_CY 的偏移
-static const int BUTTON_BODY_BOTTOM = 22;     // 碗身底边相对 BUTTON_CY 的偏移
-static const int BUTTON_BODY_RADIUS = 7;      // 碗身圆角半径
+static const int BUTTON_RX = 23;              // 碗口（椭圆）横向半径（比上一版整体放大20%）
+static const int BUTTON_RY = 13;              // 碗口（椭圆）竖向半径（比上一版整体放大20%）
+static const int BUTTON_BODY_W = 2 * BUTTON_RX;  // 碗身宽度=2*BUTTON_RX，两侧与碗口对齐
+static const int BUTTON_BODY_TOP = -1;        // 碗身顶边相对 BUTTON_CY 的偏移
+static const int BUTTON_BODY_BOTTOM = 16;     // 碗身底边相对 BUTTON_CY 的偏移（比上一版整体放大20%）
+static const int BUTTON_BODY_RADIUS = 5;      // 碗身圆角半径（比上一版整体放大20%）
 static const float BUTTON_DOWN_SCALE = 0.75f; // 按下瞬间整体缩小的比例
-static const float BUTTON_PAW_SCALE = 0.7f;   // 爪印相对 drawPawPrint 原始大小的缩放
+static const float BUTTON_PAW_SCALE = 0.50f;  // 爪印相对 drawPawPrint 原始大小的缩放（随按钮一起放大20%）
+static const float BUTTON_PAW_TOE_SPREAD_MUL = 1.8f;  // 爪印内部脚趾相对脚掌/彼此的间距放大系数（进一步拉开）
 
 // 把局部偏移量 (ox,oy) 绕原点旋转 angle 弧度，用于让部件"自身"的朝向也跟着转
 // （而不只是把部件的位置搬到旋转后的地方）。angle=0 时精确还原原始偏移量。
@@ -606,10 +609,13 @@ class PuppyEar : public Drawable {
   // 逐渐往外翘）。mirror=true 时脚趾左右镜像（用于右爪）。scale 控制从 0 长到
   // 1 / 从 1 缩到 0 的出现与消失动画。rotRad 让整只爪印（脚掌+脚趾）绕爪印
   // 中心整体转一点（左爪逆时针、右爪顺时针，每次出现时角度略有不同）。
-  void drawPawPrint(M5Canvas *spi, int cx, int cy, float scale, bool mirror, float rotRad, uint16_t col) {
+  // toeSpreadMul 在基础间距系数上再乘一个倍数，默认 1.0（不影响原有的兴奋
+  // 表情爪印），关键词播报按钮传更大的值让爪印内部脚趾与脚掌的间距更松散。
+  void drawPawPrint(M5Canvas *spi, int cx, int cy, float scale, bool mirror, float rotRad, uint16_t col,
+                     float toeSpreadMul = 1.0f) {
     if (scale <= 0.02f) return;
     int m = mirror ? -1 : 1;
-    const float toeSpread = 1.6f;  // 脚趾彼此之间的间距放大系数（只放大位置，不放大半径），以脚掌为中心向外放大
+    const float toeSpread = 1.6f * toeSpreadMul;  // 脚趾彼此之间的间距放大系数（只放大位置，不放大半径），以脚掌为中心向外放大
 
     // ---- 大脚掌：三角形的基本轮廓，边缘用沿着每条边连续叠圆的方式磨光滑——
     //      半径从顶点处的 padCornerR 平滑过渡到边中点的 padBulgeR 再过渡回
@@ -894,11 +900,11 @@ class PuppyEar : public Drawable {
       drawPawPrint(spi, DOUBT_PIVOT_X + 35 + pawJitterX_[1] + pawSwing, pawCy + pawJitterY_[1], rightScale, true, rightRot, col);
     }
 
-    // ===== 关键词播报按钮：椭圆碗口盖住圆角矩形碗身的顶边，碗口里画一个
-    // 爪印，固定画在屏幕右下角（不随表情移动），只在右耳组件里画一次。
-    // buttonScaleAnim_ 每帧都朝目标缩放过渡（即使按钮当前隐藏也照常更新，
-    // 保证下次出现时动画状态是对的），目标由 g_buttonState 决定：
-    // 0/1=正常大小(1.0)，2=按下(BUTTON_DOWN_SCALE)。=====
+    // ===== 关键词播报按钮：椭圆碗口 + 圆角矩形碗身都只画白色描边（线框），
+    // 碗口正中间画一个白色实心爪印，固定画在屏幕右下角（不随表情移动），
+    // 只在右耳组件里画一次。buttonScaleAnim_ 每帧都朝目标缩放过渡（即使按钮
+    // 当前隐藏也照常更新，保证下次出现时动画状态是对的），目标由
+    // g_buttonState 决定：0/1=正常大小(1.0)，2=按下(BUTTON_DOWN_SCALE)。=====
     if (!isLeft) {
       float buttonScale = buttonScaleAnim_.update(g_buttonState == 2 ? BUTTON_DOWN_SCALE : 1.0f);
       if (g_buttonState != 0) {
@@ -908,13 +914,14 @@ class PuppyEar : public Drawable {
         int bodyTopY = BUTTON_CY + (int)roundf(BUTTON_BODY_TOP * buttonScale);
         int bodyBottomY = BUTTON_CY + (int)roundf(BUTTON_BODY_BOTTOM * buttonScale);
         int bodyR = max(1, (int)roundf(BUTTON_BODY_RADIUS * buttonScale));
-        // 碗身：圆角矩形描边，先画——顶边随后会被碗口盖住一部分
+        // 碗身：圆角矩形描边
         spi->drawRoundRect(BUTTON_CX - bodyHalfW, bodyTopY, bodyHalfW * 2,
                             bodyBottomY - bodyTopY, bodyR, col);
-        // 碗口：实心椭圆，盖住碗身顶边
-        spi->fillEllipse(BUTTON_CX, BUTTON_CY, rx, ry, col);
-        // 爪印：黑色，画在白色碗口上才看得清
-        drawPawPrint(spi, BUTTON_CX, BUTTON_CY, BUTTON_PAW_SCALE * buttonScale, false, 0.0f, TFT_BLACK);
+        // 碗口：椭圆描边
+        spi->drawEllipse(BUTTON_CX, BUTTON_CY, rx, ry, col);
+        // 爪印：白色实心，画在碗口正中间，脚趾间距按 BUTTON_PAW_TOE_SPREAD_MUL 拉开
+        drawPawPrint(spi, BUTTON_CX, BUTTON_CY, BUTTON_PAW_SCALE * buttonScale, false, 0.0f, col,
+                     BUTTON_PAW_TOE_SPREAD_MUL);
       }
     }
 
