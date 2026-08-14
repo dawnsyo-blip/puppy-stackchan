@@ -175,13 +175,12 @@ KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键�
 BUTTON_PRESS_MS = 200            # 每个关键词播放前，按钮"按下"状态维持的时长
 
 # --- 字幕：用户看不到设备侧的录音指示灯，只能靠屏幕判断小狗现在在做什么。
-#     三个使用场景：①录音期间显示麦克风图标，②等 LLM 回复期间显示思考图标，
-#     ③qa_complex 逐个播报关键词时同步显示当前正在念的那个词。其它状态只切
-#     表情，不显示文字也不播语音提示。 ---
+#     两个使用场景：①录音期间显示麦克风图标，②等 LLM 回复期间显示思考图标。
+#     qa_complex 播报关键词期间不再用字幕（改成一直显示爪印按钮，见
+#     speak_keywords()），其它状态只切表情，不显示文字也不播语音提示。 ---
 THINKING_SUBTITLE_DUR_MS = 10000  # /speech 的 dur 参数：思考图标展示上限。正常
                                    # 情况下 LLM 一回复完就会主动清空字幕，这个只是
                                    # 兜底上限，避免异常分支下图标卡住不消失
-KEYWORD_SUBTITLE_DUR_MS = 1500    # /speech 的 dur 参数：单个关键词字幕展示时长
 
 # --- 语音识别 (FunASR SenseVoice) ---
 # 从 faster-whisper 切换过来的原因：不再需要本地维护一份模型文件路径，
@@ -1027,20 +1026,20 @@ class PuppyEngine:
                 self.transition(State.IDLE)
 
     def speak_keywords(self, keywords):
-        """依次合成并播放每个关键词，关键词之间间隔 KEYWORD_GAP_SEC。每个关键词
-        播放前先让屏幕右侧的爪印按钮"按一下"（down 保持 BUTTON_PRESS_MS 后
-        弹回 up），配合字幕同步显示当前正在念的那个词——这是全系统唯一用到
-        字幕和按钮的场景，最后一个关键词播完后把两者都清掉。"""
+        """依次合成并播放每个关键词，关键词之间间隔 KEYWORD_GAP_SEC。不再用字幕
+        提示——思考一结束就让屏幕右下角的爪印按钮出现，之后每念一个关键词前
+        按钮先"按一下"（down 保持 BUTTON_PRESS_MS 后弹回 up，固件那边会把这
+        一段渲染成缩小再放大的动画），在按钮弹回 up 的瞬间开始播放该关键词的
+        音频；全部念完后按钮消失。这是全系统唯一用到按钮的场景。"""
+        set_button("up")
         for i, kw in enumerate(keywords):
             set_button("down")
             time.sleep(BUTTON_PRESS_MS / 1000)
             set_button("up")
-            set_subtitle(kw, dur_ms=KEYWORD_SUBTITLE_DUR_MS)
             wav_path = tts_to_wav(kw, f"kw_{i}")
             if wav_path:
                 play_wav_file(wav_path)
             time.sleep(KEYWORD_GAP_SEC)
-        set_subtitle("")
         set_button("off")
 
     # ---------- 计时器 ----------

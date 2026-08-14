@@ -130,15 +130,24 @@ static const float EXCITED_EYE_INWARD_PX = 8.0f;   // 兴奋时两只眼睛互�
 static const float EXCITED_EAR_INWARD_PX = 12.0f;  // 兴奋时耳朵朝眼睛方向靠拢的像素数
 static const float EXCITED_NOSE_UP_PX = 10.0f;     // 兴奋时鼻子朝眼睛方向靠拢（往上贴）的像素数
 
-// ---- 关键词播报按钮（圆形外圈 + 爪印），画在屏幕右侧空白区，避开五官
-// （右耳最宽时大约延伸到 x≈272）和底部字幕框（y=168 起）。up/down 两态共用
-// 同一个圆心，down 态整体缩小、颜色变亮，模拟"按下"的视觉反馈。----
-static const int BUTTON_CX = 295;
-static const int BUTTON_CY = 115;
-static const int BUTTON_R_UP = 16;    // 弹起态外圈半径
-static const int BUTTON_R_DOWN = 13;  // 按下态外圈半径（稍微缩小）
-static const int BUTTON_RING_THICK = 2;      // 描边粗细（比默认 drawCircle 粗一点，体现体积感）
-static const float BUTTON_PAW_SCALE = 0.65f;  // 爪印相对 drawPawPrint 原始大小的缩放（按 BUTTON_R_UP 标定）
+// ---- 关键词播报按钮：像一个从侧面看的狗粮碗——椭圆形"碗口"盖住圆角矩形
+// "碗身"的顶边，碗口里画一个爪印。固定画在屏幕右下角（字幕已经不会同时
+// 出现在这块区域，不用像圆形按钮那版一样特意避让字幕框）。BODY_TOP/BOTTOM
+// 是碗身顶/底边相对 BUTTON_CY（碗口椭圆圆心）的偏移：BODY_TOP 是负数、比碗口
+// 竖直半径 BUTTON_RY 小很多，确保碗身顶边落在碗口内部会被盖住；BODY_BOTTOM
+// 比 BUTTON_RY 大，让碗身底边露出在碗口下方一截，形成"碗身比碗口窄一圈、
+// 只露出下半部分"的剪影。down 态整体按 BUTTON_DOWN_SCALE 缩小，靠
+// buttonScaleAnim_ 过渡出"按一下"的动画。----
+static const int BUTTON_CX = 270;
+static const int BUTTON_CY = 205;
+static const int BUTTON_RX = 32;              // 碗口（椭圆）横向半径
+static const int BUTTON_RY = 18;              // 碗口（椭圆）竖向半径
+static const int BUTTON_BODY_W = 48;          // 碗身（圆角矩形）宽度
+static const int BUTTON_BODY_TOP = -2;        // 碗身顶边相对 BUTTON_CY 的偏移
+static const int BUTTON_BODY_BOTTOM = 22;     // 碗身底边相对 BUTTON_CY 的偏移
+static const int BUTTON_BODY_RADIUS = 7;      // 碗身圆角半径
+static const float BUTTON_DOWN_SCALE = 0.75f; // 按下瞬间整体缩小的比例
+static const float BUTTON_PAW_SCALE = 0.7f;   // 爪印相对 drawPawPrint 原始大小的缩放
 
 // 把局部偏移量 (ox,oy) 绕原点旋转 angle 弧度，用于让部件"自身"的朝向也跟着转
 // （而不只是把部件的位置搬到旋转后的地方）。angle=0 时精确还原原始偏移量。
@@ -565,6 +574,11 @@ class PuppyEar : public Drawable {
   // 完整淡出，不会出现"上一次淡出还没走完，新一轮又换了位置"的跳变。
   FloatTransition leftPawAnim_{150}, rightPawAnim_{150};
 
+  // 关键词播报按钮的缩放动画（只在 !isLeft 的耳朵实例上使用）：主机端
+  // down→短暂停留→up 的调用节奏，靠这个 150ms 的过渡动画渲染成"按一下"的
+  // 缩小再放大效果。
+  FloatTransition buttonScaleAnim_{150};
+
   // 兴奋表情爪印的状态机（只在 !isLeft 的耳朵实例上使用）：
   //   -1 = 还没到 EXCITED_PAW_START_MS，都不显示
   //   0..2*EXCITED_PAW_CYCLES = 左右交替阶段（偶数=左爪，奇数=右爪），最后一个
@@ -880,18 +894,28 @@ class PuppyEar : public Drawable {
       drawPawPrint(spi, DOUBT_PIVOT_X + 35 + pawJitterX_[1] + pawSwing, pawCy + pawJitterY_[1], rightScale, true, rightRot, col);
     }
 
-    // ===== 关键词播报按钮：圆形外圈 + 爪印，固定画在屏幕右侧空白区（不随
-    // 表情移动，独立于耳朵动画），只在右耳组件里画一次。state 由 /button
-    // 端点控制：up=正常大小白色描边，down=缩小且变亮（模拟按下）。=====
-    if (!isLeft && g_buttonState != 0) {
-      bool down = (g_buttonState == 2);
-      int r = down ? BUTTON_R_DOWN : BUTTON_R_UP;
-      uint16_t btnCol = down ? TFT_YELLOW : TFT_WHITE;
-      for (int t = 0; t < BUTTON_RING_THICK; t++) {
-        spi->drawCircle(BUTTON_CX, BUTTON_CY, r - t, btnCol);
+    // ===== 关键词播报按钮：椭圆碗口盖住圆角矩形碗身的顶边，碗口里画一个
+    // 爪印，固定画在屏幕右下角（不随表情移动），只在右耳组件里画一次。
+    // buttonScaleAnim_ 每帧都朝目标缩放过渡（即使按钮当前隐藏也照常更新，
+    // 保证下次出现时动画状态是对的），目标由 g_buttonState 决定：
+    // 0/1=正常大小(1.0)，2=按下(BUTTON_DOWN_SCALE)。=====
+    if (!isLeft) {
+      float buttonScale = buttonScaleAnim_.update(g_buttonState == 2 ? BUTTON_DOWN_SCALE : 1.0f);
+      if (g_buttonState != 0) {
+        int rx = max(1, (int)roundf(BUTTON_RX * buttonScale));
+        int ry = max(1, (int)roundf(BUTTON_RY * buttonScale));
+        int bodyHalfW = max(1, (int)roundf(BUTTON_BODY_W / 2.0f * buttonScale));
+        int bodyTopY = BUTTON_CY + (int)roundf(BUTTON_BODY_TOP * buttonScale);
+        int bodyBottomY = BUTTON_CY + (int)roundf(BUTTON_BODY_BOTTOM * buttonScale);
+        int bodyR = max(1, (int)roundf(BUTTON_BODY_RADIUS * buttonScale));
+        // 碗身：圆角矩形描边，先画——顶边随后会被碗口盖住一部分
+        spi->drawRoundRect(BUTTON_CX - bodyHalfW, bodyTopY, bodyHalfW * 2,
+                            bodyBottomY - bodyTopY, bodyR, col);
+        // 碗口：实心椭圆，盖住碗身顶边
+        spi->fillEllipse(BUTTON_CX, BUTTON_CY, rx, ry, col);
+        // 爪印：黑色，画在白色碗口上才看得清
+        drawPawPrint(spi, BUTTON_CX, BUTTON_CY, BUTTON_PAW_SCALE * buttonScale, false, 0.0f, TFT_BLACK);
       }
-      float pawScale = BUTTON_PAW_SCALE * (r / (float)BUTTON_R_UP);
-      drawPawPrint(spi, BUTTON_CX, BUTTON_CY, pawScale, false, 0.0f, btnCol);
     }
 
     // ===== 底部字幕：用户看不到设备在录音/思考/播报，靠这个文字提示——只在
