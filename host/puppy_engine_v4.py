@@ -582,6 +582,11 @@ class PuppyEngine:
         self.face_confirm_count = 0
         self.last_face_seen_time = 0
 
+        # 一次"来访"期间是否已经打过招呼——第一次进 HAPPY 播完整开心动画后
+        # 置 True，期间人脸丢失/重新检测到都不再重复播放动画，只在真正离开
+        # 很久（进 SLEEPY/PRIVACY）之后才重置，见 enter_happy()/transition()。
+        self.session_active = False
+
         # 触摸检测
         self.last_touch_poll = 0
         self.touch_pressed = False
@@ -634,6 +639,11 @@ class PuppyEngine:
         self.state = new_state
         self.state_enter_time = time.time()
 
+        # 进 SLEEPY/PRIVACY 说明主人已经离开很久了，这次"来访"结束，下次
+        # 再见到人脸要重新完整地打招呼。
+        if new_state in (State.SLEEPY, State.PRIVACY):
+            self.session_active = False
+
         if   new_state == State.HAPPY:    play_happy_animation()
         elif new_state == State.EXCITED:  play_excited_animation()
         elif new_state == State.SLEEPY:   play_sleepy_animation()
@@ -642,6 +652,23 @@ class PuppyEngine:
         elif new_state == State.CURIOUS:  play_curious_animation()
         elif new_state == State.THINKING: play_thinking_animation()
         elif new_state == State.SORRY:    play_sorry_animation()
+
+    def enter_happy(self):
+        """人脸(重新)确认在场、准备进入/停留在 HAPPY 时统一走这里，而不是直接
+        调 transition(State.HAPPY)：一次来访期间只在第一次打招呼时播放完整的
+        开心动画（摇头等），之后 session_active 为 True 期间，不管是人脸短暂
+        丢失又重新检测到、还是对话间隙重新确认人脸在场，都只是静默切到/停在
+        HAPPY，不重复播放动画。"""
+        if not self.session_active:
+            self.session_active = True
+            self.transition(State.HAPPY)
+            return
+        if self.state == State.HAPPY:
+            return
+        print(f"[转移] {self.state.value} → 开心（静默，来访进行中，不重复播放动画）")
+        self.state = State.HAPPY
+        self.state_enter_time = time.time()
+        set_expression("happy")
 
     def record_interaction(self):
         self.last_interaction = time.time()
@@ -831,7 +858,7 @@ class PuppyEngine:
         print(f"[唤醒] 音量突增 (rms={rms:.0f})，扫描找人...")
         self.record_interaction()
         if self.scan_for_face():
-            self.transition(State.HAPPY)
+            self.enter_happy()
             time.sleep(0.3)
             self.run_conversation_turn()
         return True
@@ -850,7 +877,10 @@ class PuppyEngine:
             self._run_conversation_turn_body()
         except Exception as e:
             print(f"[对话] [异常] run_conversation_turn 出错，回退到安全状态: {e!r}")
-            self.transition(State.HAPPY if self.face_detected else State.IDLE)
+            if self.face_detected:
+                self.enter_happy()
+            else:
+                self.transition(State.IDLE)
         finally:
             print(f"[对话] 对话结束，回到状态={self.state.value}，恢复音量监听")
 
@@ -947,11 +977,11 @@ class PuppyEngine:
         方法不会触发 EXCITED。"""
         if track_ok:
             print("[追踪] 对话期间人脸追踪全程成功，直接进入开心，不重新扫描")
-            self.transition(State.HAPPY)
+            self.enter_happy()
         else:
             print("[追踪] 对话期间追踪丢失过，重新扫描定位")
             if self.scan_for_face():
-                self.transition(State.HAPPY)
+                self.enter_happy()
             else:
                 self.transition(State.IDLE)
 
@@ -996,7 +1026,7 @@ class PuppyEngine:
             if self.state in (State.IDLE, State.SLEEPY, State.PRIVACY):
                 print("[触发] 短按 → 扫描找人")
                 if self.scan_for_face():
-                    self.transition(State.HAPPY)
+                    self.enter_happy()
             elif self.state == State.HAPPY:
                 print("[触发] 短按（已在开心，跳过扫描）")
             return
@@ -1016,7 +1046,7 @@ class PuppyEngine:
                 self.check_face()
             if self.face_detected:
                 print("[触发] 被动检测到人脸")
-                self.transition(State.HAPPY)
+                self.enter_happy()
             elif self.idle_seconds() > IDLE_TO_SLEEPY_SEC:
                 print("[触发] 空闲超过 3 分钟")
                 self.transition(State.SLEEPY)
@@ -1031,14 +1061,17 @@ class PuppyEngine:
 
         elif self.state == State.EXCITED:
             if self.state_duration() > EXCITED_DURATION_SEC:
-                self.transition(State.HAPPY if self.face_detected else State.IDLE)
+                if self.face_detected:
+                    self.enter_happy()
+                else:
+                    self.transition(State.IDLE)
 
         elif self.state == State.SLEEPY:
             if do_face_check:
                 self.check_face()
             if self.face_detected:
                 print("[触发] 困倦中检测到人脸！")
-                self.transition(State.HAPPY)
+                self.enter_happy()
             elif self.state_duration() > SLEEPY_TO_PRIVACY_SEC:
                 print("[触发] 困倦超过 10 分钟 → 隐私")
                 self.transition(State.PRIVACY)
@@ -1048,7 +1081,7 @@ class PuppyEngine:
                 self.check_face()
             if self.face_detected:
                 print("[触发] 隐私中检测到人脸！")
-                self.transition(State.HAPPY)
+                self.enter_happy()
 
         elif self.state == State.SORRY:
             # 表情映射v6.xlsx：抱歉状态只由新的语音唤醒打断（上面已经处理），
