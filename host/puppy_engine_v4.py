@@ -173,6 +173,24 @@ WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE_TYPE = "int8"
 WHISPER_LANGUAGE = "zh"
 
+# vad_filter 默认 min_speech_duration_ms=0，意味着哪怕只有几十毫秒的"像人声"
+# 的信号（比如一次敲击声、咳嗽、椅子响）也能通过 VAD 这道关，送进 Whisper 之
+# 后 Whisper 仍然可能在这种极短/低质量片段上幻听。调高到 250ms 要求必须是
+# 一段有一定长度的连续人声才放行，实测对着真实短语音（"小狗小狗小狗"）没有
+# 影响，但纯噪音/静音测试样本都能被更干净地过滤掉。
+WHISPER_VAD_MIN_SPEECH_MS = 250
+WHISPER_VAD_SPEECH_PAD_MS = 200
+
+# vad_filter 不是 100% 保险——已经实测遇到过噪音/静音在加了 vad_filter 之后
+# 仍然被识别成这几个固定短语（Whisper 训练数据里记住的视频字幕组/平台水印
+# 文案，和本项目调用的 DeepSeek/edge-tts 完全无关，纯粹是这个本地 Whisper
+# 模型文件自带的幻听内容）。作为最后一道保险，命中这个名单就直接当噪音
+# 处理，不管前面的 VAD/置信度判断是否放行了它。
+WHISPER_HALLUCINATION_BLACKLIST = [
+    "字幕by索兰娅",
+    "优优独播剧场",
+]
+
 # --- LLM (DeepSeek) ---
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
@@ -774,13 +792,26 @@ class PuppyEngine:
         在纯噪音/静音输入上不会老实返回空结果，而是会"幻听"出训练数据里记住
         的固定短语（实测这个模型在安静环境噪音下稳定幻听出"字幕by索兰娅"这类
         视频字幕组/平台水印文案），把这段幻觉文本当成正常识别结果返回，混进
-        真实对话流程。"""
+        真实对话流程。这和调用的 DeepSeek/edge-tts 没有关系，纯粹是本地这个
+        Whisper 模型文件自带的幻听内容。
+        但 vad_filter 不是 100% 保险——已经实测有过加了 vad_filter 之后同样
+        的幻听仍然偶发的情况，猜测是极短的噪音/敲击声也能通过默认过于宽松的
+        VAD 参数，所以额外做了两层加固：调紧 VAD 的最短人声时长，以及命中
+        已知幻听短语名单就直接当噪音丢弃。"""
         wav_path = AUDIO_DIR / filename
         wav_path.write_bytes(wav_bytes)
         segments, _ = self.whisper_model.transcribe(
-            str(wav_path), language=WHISPER_LANGUAGE, vad_filter=True
+            str(wav_path), language=WHISPER_LANGUAGE, vad_filter=True,
+            vad_parameters=dict(
+                min_speech_duration_ms=WHISPER_VAD_MIN_SPEECH_MS,
+                speech_pad_ms=WHISPER_VAD_SPEECH_PAD_MS,
+            ),
         )
-        return "".join(seg.text for seg in segments).strip()
+        text = "".join(seg.text for seg in segments).strip()
+        if any(p in text for p in WHISPER_HALLUCINATION_BLACKLIST):
+            print(f"  [识别] 命中已知幻听短语名单，当噪音丢弃: 「{text}」")
+            return ""
+        return text
 
     def check_voice_wake(self):
         """轮询 /volume；音量超过阈值直接扫描找人→开心→进入好奇开始问题录音
