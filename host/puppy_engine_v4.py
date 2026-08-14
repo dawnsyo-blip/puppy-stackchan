@@ -76,6 +76,20 @@ FACE_DETECTION_CONFIDENCE = 0.6
 FACE_CONFIRM_FRAMES = 2
 FACE_MODEL_PATH = "C:/tmp/blaze_face_short_range.tflite"
 
+# --- CURIOUS/THINKING 期间的轻量级人脸追踪 ---
+# CURIOUS 状态整个持续时间都被 /record 的一次阻塞式 HTTP 调用占满——StackChan
+# 的 WebServer 是单线程的，处理 /record 请求期间完全不会响应 /camera，所以
+# "每 3 秒追踪一次" 在 CURIOUS 里做不到，只能在开始录音前追踪一次。THINKING
+# 阶段等 DeepSeek 回复时设备是空闲的，用后台线程跑 LLM 请求、主线程照常每隔
+# FACE_TRACK_INTERVAL_SEC 追踪一次，这里才是真正能做到"持续追踪"的地方。
+FACE_TRACK_INTERVAL_SEC = 3.0
+FACE_TRACK_YAW_GAIN = 300        # 人脸水平偏移(-1..1)换算成 yaw 微调量的系数。
+                                  # 偏移方向和 yaw 正方向的对应关系没法在没有
+                                  # 实机的情况下确认，如果调整方向反了（越调
+                                  # 越偏），把这个值取负号即可。
+FACE_TRACK_YAW_MAX_STEP = 250    # 单次微调的最大幅度，避免一帧检测误差导致
+                                  # 舵机猛地转过头
+
 # --- 开心动画参数 ---
 HAPPY_YAW_RANGE = 500
 HAPPY_YAW_SPEED = 400
@@ -287,6 +301,16 @@ def go_home():
 
 def get_touch():
     r = api_get("/touch")
+    if r:
+        try:    return r.json()
+        except: return None
+    return None
+
+def get_status():
+    """/status 会带回舵机当前实际的 yaw/pitch，用来给人脸追踪算增量微调，
+    不用自己在 host 端维护一份"当前 yaw"的状态（很多地方都会改 yaw，维护
+    起来容易和实机不同步）。"""
+    r = api_get("/status")
     if r:
         try:    return r.json()
         except: return None
@@ -605,6 +629,41 @@ class PuppyEngine:
         results = self.face_detector.detect(mp_img)
         return len(results.detections) > 0
 
+    def detect_face_offset(self):
+        """拍一帧检测人脸，返回人脸中心相对画面中心的水平偏移，范围 -1..1
+        （负值＝人脸偏向画面左侧），没检测到人脸返回 None。"""
+        img = capture_frame()
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        results = self.face_detector.detect(mp_img)
+        if not results.detections:
+            return None
+        bbox = results.detections[0].bounding_box
+        face_center_x = bbox.origin_x + bbox.width / 2
+        return (face_center_x / w - 0.5) * 2
+
+    def track_face_once(self):
+        """CURIOUS/THINKING 状态下的轻量级人脸追踪：检测到人脸就按水平偏移
+        微调 yaw，让设备持续朝向说话的人；没检测到人脸就不动舵机。返回是否
+        检测到了人脸——调用方用这个判断"这轮对话期间追踪是不是全程成功"，
+        决定对话结束后要不要重新触发 scan_for_face()。"""
+        offset = self.detect_face_offset()
+        if offset is None:
+            print("[追踪] 本次未检测到人脸")
+            return False
+
+        status = get_status()
+        current_yaw = status.get("yaw", 0) if status else 0
+        delta = max(-FACE_TRACK_YAW_MAX_STEP,
+                    min(FACE_TRACK_YAW_MAX_STEP, -offset * FACE_TRACK_YAW_GAIN))
+        new_yaw = max(-1280, min(1280, int(current_yaw + delta)))
+        print(f"[追踪] 人脸偏移={offset:.2f}，yaw {current_yaw}→{new_yaw}")
+        move_servo(yaw=new_yaw, speed=200)
+        return True
+
     def check_face(self):
         """带连续确认的人脸检测。"""
         now = time.time()
@@ -767,12 +826,20 @@ class PuppyEngine:
             print(f"[对话] 对话结束，回到状态={self.state.value}，恢复音量监听")
 
     def _run_conversation_turn_body(self):
-        """完整的一次语音交互：好奇录音 → 思考(STT+LLM) → 按意图四路分支应对。"""
+        """完整的一次语音交互：好奇录音 → 思考(STT+LLM) → 按意图四路分支应对。
+        全程用 track_ok 记录"这轮对话期间人脸追踪是否一直成功"，成功的话结束
+        后就不需要再重新 scan_for_face() 一次——详见 _settle_happy()。"""
+        track_ok = True
+
         self.transition(State.CURIOUS)
+        # CURIOUS 整个持续时间都在阻塞式地调 /record，StackChan 的 WebServer
+        # 是单线程的，这期间无法再响应 /camera，所以只能在开始录音前追踪一次。
+        if not self.track_face_once():
+            track_ok = False
         wav_bytes = record_audio(CURIOUS_RECORD_SECONDS)
         if not wav_bytes:
             print("[对话] 录音失败")
-            self.transition(State.HAPPY if self.face_detected else State.IDLE)
+            self._settle_happy(track_ok)
             return
 
         self.transition(State.THINKING)
@@ -780,13 +847,29 @@ class PuppyEngine:
         print(f"[对话] 识别结果: 「{user_text}」")
         if not user_text:
             print("[对话] 没识别到内容")
-            self.transition(State.HAPPY if self.face_detected else State.IDLE)
+            self._settle_happy(track_ok)
             return
 
-        reply_text, intent, data = ask_llm(user_text, self.deepseek_api_key)
+        # 等 DeepSeek 回复期间设备是空闲的（不像 CURIOUS 时被 /record 占满），
+        # 用后台线程发 LLM 请求，主线程每隔 FACE_TRACK_INTERVAL_SEC 追踪一次。
+        llm_result = {}
+        def _call_llm():
+            llm_result["value"] = ask_llm(user_text, self.deepseek_api_key)
+        llm_thread = threading.Thread(target=_call_llm, daemon=True)
+        llm_thread.start()
+        last_track = time.time()
+        while llm_thread.is_alive():
+            if time.time() - last_track >= FACE_TRACK_INTERVAL_SEC:
+                last_track = time.time()
+                if not self.track_face_once():
+                    track_ok = False
+            time.sleep(0.2)
+        llm_thread.join()
+        reply_text, intent, data = llm_result.get("value", (None, "other", {}))
+
         if reply_text is None:
             print("[对话] LLM 调用失败")
-            self.transition(State.HAPPY if self.face_detected else State.IDLE)
+            self._settle_happy(track_ok)
             return
 
         print(f"[对话] 回复:「{reply_text}」 意图: {intent}")
@@ -794,7 +877,7 @@ class PuppyEngine:
 
         if intent == "qa_simple":
             answer = data.get("answer", "no")
-            self.transition(State.HAPPY)
+            self._settle_happy(track_ok)
             if answer == "yes":
                 print("[对话] 简单回应: 点头 (yes)")
                 play_nod_animation()
@@ -813,8 +896,24 @@ class PuppyEngine:
         else:  # qa_complex / other：逐个念关键词
             keywords = data.get("keywords") or [reply_text[:6]]
             print(f"[对话] 复杂回应，播报关键词: {keywords}")
-            self.transition(State.HAPPY)
+            self._settle_happy(track_ok)
             self.speak_keywords(keywords)
+
+    def _settle_happy(self, track_ok):
+        """对话收尾时决定要不要重新扫描找人：整轮对话期间 track_face_once()
+        一直检测到人脸，说明设备本来就一直朝向说话的人，直接进 HAPPY 就好；
+        中途丢失过的话，先用 scan_for_face() 转头重新定位一次再决定。
+        EXCITED 只会来自这里以外的两处：LLM 判定 praise，或触摸长按——这个
+        方法不会触发 EXCITED。"""
+        if track_ok:
+            print("[追踪] 对话期间人脸追踪全程成功，直接进入开心，不重新扫描")
+            self.transition(State.HAPPY)
+        else:
+            print("[追踪] 对话期间追踪丢失过，重新扫描定位")
+            if self.scan_for_face():
+                self.transition(State.HAPPY)
+            else:
+                self.transition(State.IDLE)
 
     def speak_keywords(self, keywords):
         """依次合成并播放每个关键词，关键词之间间隔 KEYWORD_GAP_SEC。播放的同时
