@@ -676,48 +676,45 @@ class PuppyEngine:
     # ---------- 人脸检测 ----------
 
     def detect_face_once(self):
-        """拍一帧检测人脸。"""
+        """拍一帧检测人脸，返回 (是否检测到, 人脸中心的水平归一化坐标)。
+        坐标范围 0.0(最左)~1.0(最右)；没检测到人脸时坐标为 None。"""
         img = capture_frame()
         if img is None:
-            return False
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        results = self.face_detector.detect(mp_img)
-        return len(results.detections) > 0
-
-    def detect_face_offset(self):
-        """拍一帧检测人脸，返回人脸中心相对画面中心的水平偏移，范围 -1..1
-        （负值＝人脸偏向画面左侧），没检测到人脸返回 None。"""
-        img = capture_frame()
-        if img is None:
-            return None
+            return False, None
         h, w = img.shape[:2]
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         results = self.face_detector.detect(mp_img)
         if not results.detections:
-            return None
+            return False, None
         bbox = results.detections[0].bounding_box
         face_center_x = bbox.origin_x + bbox.width / 2
-        return (face_center_x / w - 0.5) * 2
+        return True, face_center_x / w
 
-    def track_face_once(self):
-        """CURIOUS/THINKING 状态下的轻量级人脸追踪：检测到人脸就按水平偏移
-        微调 yaw，让设备持续朝向说话的人；没检测到人脸就不动舵机。返回是否
-        检测到了人脸——调用方用这个判断"这轮对话期间追踪是不是全程成功"，
-        决定对话结束后要不要重新触发 scan_for_face()。"""
-        offset = self.detect_face_offset()
-        if offset is None:
-            print("[追踪] 本次未检测到人脸")
-            return False
-
+    def track_face_servo(self, face_x):
+        """把人脸水平位置(0.0=最左, 1.0=最右)相对画面中心(0.5)的偏差，
+        转换成一次 yaw 微调量并下发。只做增量式的小步微调（受
+        FACE_TRACK_YAW_MAX_STEP 限制），不是把头转到某个绝对角度，这样连续
+        调用时不会出现大幅度突然转头。"""
+        offset = (face_x - 0.5) * 2  # 换算成 -1..1，负值＝人脸偏向画面左侧
         status = get_status()
         current_yaw = status.get("yaw", 0) if status else 0
         delta = max(-FACE_TRACK_YAW_MAX_STEP,
                     min(FACE_TRACK_YAW_MAX_STEP, -offset * FACE_TRACK_YAW_GAIN))
         new_yaw = max(-1280, min(1280, int(current_yaw + delta)))
-        print(f"[追踪] 人脸偏移={offset:.2f}，yaw {current_yaw}→{new_yaw}")
+        print(f"[追踪] 人脸位置={face_x:.2f}，yaw {current_yaw}→{new_yaw}")
         move_servo(yaw=new_yaw, speed=200)
+
+    def track_face_once(self):
+        """CURIOUS/THINKING 状态下的轻量级人脸追踪：检测到人脸就用
+        track_face_servo 微调朝向，让设备持续朝向说话的人；没检测到人脸就
+        不动舵机。返回是否检测到了人脸——调用方用这个判断"这轮对话期间追踪
+        是不是全程成功"，决定对话结束后要不要重新触发 scan_for_face()。"""
+        found, face_x = self.detect_face_once()
+        if not found:
+            print("[追踪] 本次未检测到人脸")
+            return False
+        self.track_face_servo(face_x)
         return True
 
     def check_face(self):
@@ -727,7 +724,7 @@ class PuppyEngine:
             return
         self.last_face_check = now
 
-        found = self.detect_face_once()
+        found, _ = self.detect_face_once()
 
         if found:
             self.face_confirm_count += 1
@@ -744,21 +741,21 @@ class PuppyEngine:
                 self.face_detected = False
 
     def retrack_face(self):
-        """开心状态下定期回正重新检测人脸。"""
+        """开心状态下定期检测人脸并跟随：检测到就用 track_face_servo 微调
+        朝向，而不是每次都先把头转回 yaw=0 再检测——那样每隔
+        FACE_RETRACK_INTERVAL_SEC 就会有一次生硬的"回正"动作，人脸不在正
+        前方时看起来像在甩头。现在只做增量微调，跟随更平滑。"""
         now = time.time()
         if now - self.last_retrack_time < FACE_RETRACK_INTERVAL_SEC:
             return
         self.last_retrack_time = now
 
-        # 回到正面位置拍照
-        move_servo(yaw=0, pitch=450, speed=300)
-        set_expression("happy")
-        time.sleep(0.5)
-
-        if self.detect_face_once():
+        found, face_x = self.detect_face_once()
+        if found:
             self.last_face_seen_time = now
             self.face_detected = True
             self.record_interaction()
+            self.track_face_servo(face_x)
             print("[追踪] 人脸仍在")
         else:
             print("[追踪] 本次未检到人脸")
@@ -773,7 +770,8 @@ class PuppyEngine:
         for yaw_pos in SCAN_POSITIONS:
             move_servo(yaw=yaw_pos, pitch=450, speed=SCAN_SPEED)
             time.sleep(SCAN_PAUSE)
-            if self.detect_face_once():
+            found, _ = self.detect_face_once()
+            if found:
                 print(f"[扫描] 在 yaw={yaw_pos} 找到人脸！")
                 self.face_detected = True
                 self.face_confirm_count = FACE_CONFIRM_FRAMES
