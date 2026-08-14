@@ -155,8 +155,8 @@ static const float BUTTON_DOWN_SCALE = 0.75f; // 按下瞬间整体缩小的比�
 // 之间留有几像素不重叠的间隙（碗口是扁椭圆，比爪印天然的长宽比更"矮"，所以
 // 缩放系数比脚趾动画用的默认值小很多）。改这两个值之前建议先算一遍外包络，
 // 不要直接凭感觉调大，否则爪印会露出碗口或者脚趾互相粘在一起。
-static const float BUTTON_PAW_SCALE = 0.38f;           // 爪印相对 drawPawPrint 原始大小的缩放（比上一版再缩小10%）
-static const float BUTTON_PAW_TOE_SPREAD_MUL = 1.15f;  // 爪印内部脚趾相对脚掌/彼此的间距放大系数（椭圆压扁后收窄一点，维持外包络留有余量）
+static const float BUTTON_PAW_SCALE = 0.34f;           // 爪印相对 drawPawPrint 原始大小的缩放（比上一版再缩小10%）
+static const float BUTTON_PAW_TOE_SPREAD_MUL = 1.30f;  // 爪印内部脚趾相对脚掌/彼此的间距放大系数（爪印缩小后余量变多，适当调大避免脚趾粘连）
 
 // 把局部偏移量 (ox,oy) 绕原点旋转 angle 弧度，用于让部件"自身"的朝向也跟着转
 // （而不只是把部件的位置搬到旋转后的地方）。angle=0 时精确还原原始偏移量。
