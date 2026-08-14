@@ -64,6 +64,19 @@ int g_subTotalChars = 0;
 unsigned long g_speechStart = 0;
 unsigned long g_speechDurMs = 0;
 
+// 字幕框几何：整体只有 50px 高（原来是 66px），但仍然比 16px 高的 CJK 字体
+// （efontCN_16）宽裕得多，两行文字加翻页圆点都放得下——SUB_BOX_Y 保持跟原来
+// 一样的 168，只往上收了底边，所以框的顶边位置不变。
+static const int SUB_BOX_X = 6;
+static const int SUB_BOX_Y = 168;
+static const int SUB_BOX_W = 308;
+static const int SUB_BOX_H = 50;
+static const int SUB_BOX_R = 10;
+static const int SUB_LINE1_Y = 176;   // 两行文字时，第一行的 y
+static const int SUB_LINE2_Y = 194;   // 两行文字时，第二行的 y
+static const int SUB_SINGLE_Y = 186;  // 只有一行文字时，垂直居中的 y
+static const int SUB_DOTS_Y = 213;    // 翻页圆点的 y（超过两行文字才会出现）
+
 // Keyword-broadcast paw button (drawn by PuppyEar): 0=hidden, 1=up (idle),
 // 2=down (pressed-in, flashed briefly before each keyword plays).
 volatile int g_buttonState = 0;
@@ -114,25 +127,25 @@ static void drawSubtitle(M5Canvas *spi, uint16_t fg) {
     if (elapsed < acc) { page = p; break; }
   }
 
-  spi->fillRoundRect(6, 168, 308, 66, 10, 0);
-  spi->drawRoundRect(6, 168, 308, 66, 10, fg);
-  spi->drawRoundRect(7, 169, 306, 64, 9, fg);
+  spi->fillRoundRect(SUB_BOX_X, SUB_BOX_Y, SUB_BOX_W, SUB_BOX_H, SUB_BOX_R, 0);
+  spi->drawRoundRect(SUB_BOX_X, SUB_BOX_Y, SUB_BOX_W, SUB_BOX_H, SUB_BOX_R, fg);
+  spi->drawRoundRect(SUB_BOX_X + 1, SUB_BOX_Y + 1, SUB_BOX_W - 2, SUB_BOX_H - 2, SUB_BOX_R - 1, fg);
   spi->setFont(&fonts::efontCN_16);
   spi->setTextSize(1);
   spi->setTextColor(fg);
   spi->setTextDatum(TL_DATUM);
   bool hasL2 = (page * 2 + 1 < nLines);
   if (!hasL2) {
-    spi->drawString(g_subLines[page * 2], 14, 192);
+    spi->drawString(g_subLines[page * 2], 14, SUB_SINGLE_Y);
   } else {
-    spi->drawString(g_subLines[page * 2], 14, 178);
-    spi->drawString(g_subLines[page * 2 + 1], 14, 202);
+    spi->drawString(g_subLines[page * 2], 14, SUB_LINE1_Y);
+    spi->drawString(g_subLines[page * 2 + 1], 14, SUB_LINE2_Y);
   }
   if (nPages > 1) {
     for (int p = 0; p < nPages && p < 8; p++) {
       int dx = 302 - (nPages - 1 - p) * 10;
-      if (p == page) spi->fillCircle(dx, 227, 2, fg);
-      else spi->drawCircle(dx, 227, 2, fg);
+      if (p == page) spi->fillCircle(dx, SUB_DOTS_Y, 2, fg);
+      else spi->drawCircle(dx, SUB_DOTS_Y, 2, fg);
     }
   }
   spi->setFont(&fonts::Font0);

@@ -174,13 +174,17 @@ CURIOUS_PRE_RECORD_DELAY_SEC = 1.0   # 进 CURIOUS、切好奇表情之后到真
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
 BUTTON_PRESS_MS = 200            # 每个关键词播放前，按钮"按下"状态维持的时长
 
-# --- 字幕：用户看不到设备侧的录音指示灯，只能靠屏幕判断小狗现在在做什么。
-#     两个使用场景：①录音期间显示麦克风图标，②等 LLM 回复期间显示思考图标。
-#     qa_complex 播报关键词期间不再用字幕（改成一直显示爪印按钮，见
-#     speak_keywords()），其它状态只切表情，不显示文字也不播语音提示。 ---
-THINKING_SUBTITLE_DUR_MS = 10000  # /speech 的 dur 参数：思考图标展示上限。正常
-                                   # 情况下 LLM 一回复完就会主动清空字幕，这个只是
-                                   # 兜底上限，避免异常分支下图标卡住不消失
+# --- 字幕：分两段出现，帮用户确认小狗"听懂了什么"——①录音期间显示麦克风
+#     图标，表示"在听"；②录音结束、语音识别出结果后，把识别到的文字显示
+#     出来，方便用户确认输入内容，一直保留到 LLM 回复出来、即将执行下一步
+#     动作时才清空。注意 SenseVoice 是整段录完才能出结果，不是逐字流式识别，
+#     所以这里做不到"边说边出字幕"，只能做到"识别完成的那一刻立刻显示"——
+#     架构上要支持真正的逐字实时字幕，需要把 /record 改成边录边传的流式接口，
+#     这里先不做。qa_complex 播报关键词期间用的是爪印按钮（见
+#     speak_keywords()），不是字幕；其它状态只切表情，不显示文字。 ---
+SUBTITLE_DUR_MS = 15000  # /speech 的 dur 参数：字幕展示上限（两个场景共用）。
+                          # 正常情况下都会有显式的清空调用，这个只是兜底上限，
+                          # 避免万一清空请求丢了导致字幕卡住不消失
 
 # --- 语音识别 (FunASR SenseVoice) ---
 # 从 faster-whisper 切换过来的原因：不再需要本地维护一份模型文件路径，
@@ -527,6 +531,22 @@ def tts_to_wav(text, out_stem):
     except Exception as e:
         print(f"  [TTS] 合成失败: {e}")
         return None
+
+
+def reorder_keywords_nouns_first(keywords):
+    """把 LLM 提取的关键词重排成"名词全部在前、动词全部在后"，组内保持原有
+    相对顺序（Python sorted() 是稳定排序）。用 jieba 词性标注判断每个关键词
+    是名词还是动词：取该词切分后第一个分词的词性，只要不是以 'v' 开头就归为
+    名词一类——SYSTEM_PROMPT 里已经要求关键词只能是名词或动词，不需要处理
+    第三种词性。"""
+    import jieba.posseg as pseg
+
+    def is_verb(word):
+        for _, flag in pseg.cut(word):
+            return flag.startswith("v")
+        return False
+
+    return sorted(keywords, key=is_verb)
 
 
 def ask_llm(user_text, api_key):
@@ -931,14 +951,16 @@ class PuppyEngine:
         time.sleep(CURIOUS_PRE_RECORD_DELAY_SEC)
 
         # 开始录音时切成绿灯，示意"可以说话了"；屏幕上同时显示麦克风图标，
-        # dur 直接和 CURIOUS_RECORD_SECONDS 对齐，录音结束时字幕正好自然过期。
+        # 表示小狗在听。dur 只是兜底上限（避免下面的显式清空请求万一丢了导致
+        # 卡住），真正的消失时机是下面进 THINKING 前的显式 set_subtitle("")。
         set_led(0, 255, 0)
-        set_subtitle("🎤", dur_ms=CURIOUS_RECORD_SECONDS * 1000)
+        set_subtitle("🎤", dur_ms=SUBTITLE_DUR_MS)
         print("[对话] 录音中...")
         wav_bytes = record_audio(CURIOUS_RECORD_SECONDS)
         if not wav_bytes:
             print("[对话] 录音失败")
             set_led(off=True)
+            set_subtitle("")
             self._settle_happy(track_ok)
             return
 
@@ -949,15 +971,20 @@ class PuppyEngine:
             track_ok = False
 
         set_led(off=True)
+        # 语音输入到这里才算确定结束（即将进入思考），麦克风图标字幕在这一刻
+        # 清空——不再靠录音时长倒推的定时器，是真正跟"结束"这个事件对齐的
+        # 显式调用。
+        set_subtitle("")
         self.transition(State.THINKING)
-        set_subtitle("💭", dur_ms=THINKING_SUBTITLE_DUR_MS)
         user_text = self.transcribe(wav_bytes, "question.wav")
         print(f"[对话] 识别结果: 「{user_text}」")
         if not user_text:
             print("[对话] 没识别到内容")
-            set_subtitle("")
             self._settle_happy(track_ok)
             return
+        # 识别结果一出来就立刻显示在字幕框里，方便用户确认小狗听到的是什么；
+        # 一直留到 LLM 回复出来、即将执行下一步动作时才清空（见下面 join 后）。
+        set_subtitle(user_text, dur_ms=SUBTITLE_DUR_MS)
 
         # 等 DeepSeek 回复期间设备是空闲的（不像 CURIOUS 时被 /record 占满），
         # 用后台线程发 LLM 请求，主线程每隔 FACE_TRACK_INTERVAL_SEC 追踪一次。
@@ -975,7 +1002,9 @@ class PuppyEngine:
             time.sleep(0.2)
         llm_thread.join()
         reply_text, intent, data = llm_result.get("value", (None, "other", {}))
-        set_subtitle("")  # LLM 回应完成，思考图标下线
+        # LLM 到这里已经有结果了（或者失败），用户提问的字幕不管接下来是失败
+        # 兜底还是正常回应都不再需要，统一在这里清空。
+        set_subtitle("")
 
         if reply_text is None:
             print("[对话] LLM 调用失败")
@@ -1005,7 +1034,8 @@ class PuppyEngine:
 
         else:  # qa_complex / other：逐个念关键词
             keywords = data.get("keywords") or [reply_text[:6]]
-            print(f"[对话] 复杂回应，播报关键词: {keywords}")
+            keywords = reorder_keywords_nouns_first(keywords)
+            print(f"[对话] 复杂回应，播报关键词（名词优先）: {keywords}")
             self._settle_happy(track_ok)
             self.speak_keywords(keywords)
 
@@ -1029,16 +1059,24 @@ class PuppyEngine:
         """依次合成并播放每个关键词，关键词之间间隔 KEYWORD_GAP_SEC。不再用字幕
         提示——思考一结束就让屏幕右下角的爪印按钮出现，之后每念一个关键词前
         按钮先"按一下"（down 保持 BUTTON_PRESS_MS 后弹回 up，固件那边会把这
-        一段渲染成缩小再放大的动画），在按钮弹回 up 的瞬间开始播放该关键词的
-        音频；全部念完后按钮消失。这是全系统唯一用到按钮的场景。"""
+        一段渲染成缩小再放大的动画），关键词音频要在按钮"放大"的同一刻开始
+        播——如果像之前那样等按钮弹回 up 以后才现合成 TTS，合成本身的网络
+        延迟（几百毫秒到一两秒不等）会让音频比放大动画晚很多才响，两者根本
+        对不上。所以改成提前一步合成：进循环前先把第 1 个词的音频备好，每播
+        完一个词、趁按钮消失前的间隔时间顺手把下一个词也合成好，这样每次轮
+        到按钮弹起时音频总是已经就绪，可以立刻播放。全部念完后按钮消失。这
+        是全系统唯一用到按钮的场景。"""
         set_button("up")
-        for i, kw in enumerate(keywords):
+        next_wav = tts_to_wav(keywords[0], "kw_0") if keywords else None
+        for i in range(len(keywords)):
             set_button("down")
             time.sleep(BUTTON_PRESS_MS / 1000)
             set_button("up")
-            wav_path = tts_to_wav(kw, f"kw_{i}")
+            wav_path = next_wav
             if wav_path:
                 play_wav_file(wav_path)
+            if i + 1 < len(keywords):
+                next_wav = tts_to_wav(keywords[i + 1], f"kw_{i + 1}")
             time.sleep(KEYWORD_GAP_SEC)
         set_button("off")
 
