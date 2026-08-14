@@ -19,12 +19,22 @@
  *   GET /play       — play WAV from URL (streaming, up to 2MB/62s)
  *   GET /speech     — display subtitle text
  *   GET /volume     — mic volume level
+ *   GET /led        — set LED color (r,g,b) or turn off (off=1)
+ *   GET /button     — show/hide the on-screen paw button (state=up/down/off)
  */
 #include <M5StackChan.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <esp_camera.h>
+
+// Forward-declared here so PuppyFace.h (included below) can call it from
+// PuppyEar::draw() — the real definition (with the subtitle line-wrapping
+// logic) lives further down in this file, after the g_sub* globals it reads.
+// M5Canvas itself (a `using` alias onto m5gfx::M5Canvas) is already visible
+// via the M5StackChan.h include above.
+static void drawSubtitle(M5Canvas *spi, uint16_t fg);
+
 #include <Avatar.h>
 #include <Face.h>
 #include "PuppyFace.h"
@@ -53,6 +63,10 @@ volatile int g_subNLines = 0;
 int g_subTotalChars = 0;
 unsigned long g_speechStart = 0;
 unsigned long g_speechDurMs = 0;
+
+// Keyword-broadcast paw button (drawn by PuppyEar): 0=hidden, 1=up (idle),
+// 2=down (pressed-in, flashed briefly before each keyword plays).
+volatile int g_buttonState = 0;
 
 // UTF-8 line breaking: CJK (3 bytes) = 16px, ASCII = 8px, max line width 292px
 static void buildSubtitle(const String &text) {
@@ -535,6 +549,20 @@ void handleFace() {
   server.send(200, "application/json", "{\"ok\":true,\"expr\":\"" + expr + "\"}");
 }
 
+void handleLed() {
+  if (server.hasArg("off") && server.arg("off") == "1") {
+    M5StackChan.showRgbColor(0, 0, 0);
+    server.send(200, "application/json", "{\"ok\":true,\"off\":true}");
+    return;
+  }
+  int r = constrain(server.hasArg("r") ? server.arg("r").toInt() : 0, 0, 255);
+  int g = constrain(server.hasArg("g") ? server.arg("g").toInt() : 0, 0, 255);
+  int b = constrain(server.hasArg("b") ? server.arg("b").toInt() : 0, 0, 255);
+  M5StackChan.showRgbColor(r, g, b);
+  server.send(200, "application/json",
+    "{\"ok\":true,\"r\":" + String(r) + ",\"g\":" + String(g) + ",\"b\":" + String(b) + "}");
+}
+
 void handleServo() {
   int yaw = server.hasArg("yaw") ? server.arg("yaw").toInt() : 0;
   int pitch = server.hasArg("pitch") ? server.arg("pitch").toInt() : 450;
@@ -880,6 +908,18 @@ void handleSpeech() {
     "{\"ok\":true,\"text\":\"" + text + "\"}");
 }
 
+void handleButton() {
+  String state = server.arg("state");
+  if (state == "up") { g_buttonState = 1; }
+  else if (state == "down") { g_buttonState = 2; }
+  else if (state == "off") { g_buttonState = 0; }
+  else {
+    server.send(400, "application/json", "{\"error\":\"unknown state. options: up/down/off\"}");
+    return;
+  }
+  server.send(200, "application/json", "{\"ok\":true,\"state\":\"" + state + "\"}");
+}
+
 void handleVolume() {
   // /volume is polled continuously for the device's entire uptime (wake-word
   // listening), unlike every other handler which is only used occasionally
@@ -1037,6 +1077,8 @@ void setup() {
   server.on("/play", handlePlay);
   server.on("/volume", handleVolume);
   server.on("/speech", handleSpeech);
+  server.on("/led", handleLed);
+  server.on("/button", handleButton);
   server.begin();
 
   M5StackChan.Display().println("Server started!");

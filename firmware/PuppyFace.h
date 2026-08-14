@@ -35,6 +35,11 @@
 
 // g_customExpr 定义在 firmware.ino，用于扩展表情
 extern String g_customExpr;
+// g_buttonState 定义在 firmware.ino：0=隐藏 1=弹起(up) 2=按下(down)，
+// 关键词播报按钮
+extern volatile int g_buttonState;
+// g_subNLines 定义在 firmware.ino：字幕当前的行数，0=没有字幕要显示
+extern volatile int g_subNLines;
 
 namespace m5avatar {
 
@@ -124,6 +129,16 @@ static const float EXCITED_EYE_BOOST = 1.4f;       // 兴奋时眼睛在整体�
 static const float EXCITED_EYE_INWARD_PX = 8.0f;   // 兴奋时两只眼睛互相靠拢的像素数
 static const float EXCITED_EAR_INWARD_PX = 12.0f;  // 兴奋时耳朵朝眼睛方向靠拢的像素数
 static const float EXCITED_NOSE_UP_PX = 10.0f;     // 兴奋时鼻子朝眼睛方向靠拢（往上贴）的像素数
+
+// ---- 关键词播报按钮（圆形外圈 + 爪印），画在屏幕右侧空白区，避开五官
+// （右耳最宽时大约延伸到 x≈272）和底部字幕框（y=168 起）。up/down 两态共用
+// 同一个圆心，down 态整体缩小、颜色变亮，模拟"按下"的视觉反馈。----
+static const int BUTTON_CX = 295;
+static const int BUTTON_CY = 115;
+static const int BUTTON_R_UP = 16;    // 弹起态外圈半径
+static const int BUTTON_R_DOWN = 13;  // 按下态外圈半径（稍微缩小）
+static const int BUTTON_RING_THICK = 2;      // 描边粗细（比默认 drawCircle 粗一点，体现体积感）
+static const float BUTTON_PAW_SCALE = 0.65f;  // 爪印相对 drawPawPrint 原始大小的缩放（按 BUTTON_R_UP 标定）
 
 // 把局部偏移量 (ox,oy) 绕原点旋转 angle 弧度，用于让部件"自身"的朝向也跟着转
 // （而不只是把部件的位置搬到旋转后的地方）。angle=0 时精确还原原始偏移量。
@@ -863,6 +878,27 @@ class PuppyEar : public Drawable {
       float rightRot = pawRotDeg_[1] * PI / 180.0f;
       drawPawPrint(spi, DOUBT_PIVOT_X - 35 + pawJitterX_[0] + pawSwing, pawCy + pawJitterY_[0], leftScale, false, leftRot, col);
       drawPawPrint(spi, DOUBT_PIVOT_X + 35 + pawJitterX_[1] + pawSwing, pawCy + pawJitterY_[1], rightScale, true, rightRot, col);
+    }
+
+    // ===== 关键词播报按钮：圆形外圈 + 爪印，固定画在屏幕右侧空白区（不随
+    // 表情移动，独立于耳朵动画），只在右耳组件里画一次。state 由 /button
+    // 端点控制：up=正常大小白色描边，down=缩小且变亮（模拟按下）。=====
+    if (!isLeft && g_buttonState != 0) {
+      bool down = (g_buttonState == 2);
+      int r = down ? BUTTON_R_DOWN : BUTTON_R_UP;
+      uint16_t btnCol = down ? TFT_YELLOW : TFT_WHITE;
+      for (int t = 0; t < BUTTON_RING_THICK; t++) {
+        spi->drawCircle(BUTTON_CX, BUTTON_CY, r - t, btnCol);
+      }
+      float pawScale = BUTTON_PAW_SCALE * (r / (float)BUTTON_R_UP);
+      drawPawPrint(spi, BUTTON_CX, BUTTON_CY, pawScale, false, 0.0f, btnCol);
+    }
+
+    // ===== 底部字幕：用户看不到设备在录音/思考/播报，靠这个文字提示——只在
+    // 右耳组件里画一次。之前这段调用错放在 firmware.ino 里未被实例化的
+    // CustomBrow 类中，从来没有真正渲染过，这里搬到实际生效的 PuppyEar 里。=====
+    if (!isLeft && g_subNLines > 0) {
+      drawSubtitle(spi, col);
     }
   }
 };

@@ -172,6 +172,7 @@ CURIOUS_PRE_RECORD_DELAY_SEC = 1.0   # 进 CURIOUS、切好奇表情之后到真
                                   # 太短，用户经常还没反应过来表情已经切换完，
                                   # 加长到 1 秒）
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
+BUTTON_PRESS_MS = 200            # 每个关键词播放前，按钮"按下"状态维持的时长
 
 # --- 字幕：用户看不到设备侧的录音指示灯，只能靠屏幕判断小狗现在在做什么。
 #     三个使用场景：①录音期间显示麦克风图标，②等 LLM 回复期间显示思考图标，
@@ -317,6 +318,17 @@ def set_subtitle(text, dur_ms=None):
         q += f"&dur={int(dur_ms)}"
     api_get(q)
 
+def set_led(r=0, g=0, b=0, off=False):
+    """调用固件的 /led 控制机身 LED。off=True 时忽略 r/g/b 直接关灯。"""
+    if off:
+        api_get("/led?off=1")
+    else:
+        api_get(f"/led?r={r}&g={g}&b={b}")
+
+def set_button(state):
+    """调用固件的 /button 控制关键词播报按钮：up/down/off。"""
+    api_get(f"/button?state={state}")
+
 def move_servo(yaw=None, pitch=None, speed=None):
     params = []
     if yaw is not None:   params.append(f"yaw={yaw}")
@@ -362,8 +374,10 @@ def capture_frame():
     return None
 
 def record_audio(seconds):
-    """调用 /record?seconds=N，返回 WAV 字节，失败返回 None。"""
-    r = api_get(f"/record?seconds={seconds}", timeout=seconds + RECORD_TIMEOUT_MARGIN)
+    """调用 /record?seconds=N，返回 WAV 字节，失败返回 None。led=0 关掉固件
+    自带的录音指示灯（会用暗一点的绿色自动开关），改由主机侧的 set_led()
+    统一控制灯光节奏，避免两边抢着切换颜色。"""
+    r = api_get(f"/record?seconds={seconds}&led=0", timeout=seconds + RECORD_TIMEOUT_MARGIN)
     if r is None or r.status_code != 200:
         print(f"  [录音] 失败: {r.status_code if r else '无响应'}")
         return None
@@ -887,6 +901,9 @@ class PuppyEngine:
             else:
                 self.transition(State.IDLE)
         finally:
+            # 保证整轮对话结束后灯一定是关的，不依赖某个具体分支有没有记得关——
+            # 万一中间哪一步在开灯之后、关灯之前抛了异常，这里兜底收尾。
+            set_led(off=True)
             print(f"[对话] 对话结束，回到状态={self.state.value}，恢复音量监听")
 
     def _run_conversation_turn_body(self):
@@ -894,6 +911,15 @@ class PuppyEngine:
         全程用 track_ok 记录"这轮对话期间人脸追踪是否一直成功"，成功的话结束
         后就不需要再重新 scan_for_face() 一次——详见 _settle_happy()。"""
         track_ok = True
+
+        # 音量突增触发后先闪两下白灯再常亮，跟切好奇表情同步——灯光比表情变化
+        # 更显眼，让用户第一时间意识到小狗有反应了。闪烁=开→关→开（两次
+        # "开"调用中间夹一次"关"），最后停在常亮状态。
+        set_led(255, 255, 255)
+        time.sleep(0.15)
+        set_led(off=True)
+        time.sleep(0.15)
+        set_led(255, 255, 255)
 
         self.transition(State.CURIOUS)
         # 两阶段录音：先切好奇表情让用户知道小狗注意到了，固定等待
@@ -905,13 +931,15 @@ class PuppyEngine:
         # 拖长；追踪挪到录音结束后（不影响开录时机）做一次，具体在下面。
         time.sleep(CURIOUS_PRE_RECORD_DELAY_SEC)
 
-        # 用户看不到设备在录音，屏幕上显示麦克风图标提示——dur 直接和
-        # CURIOUS_RECORD_SECONDS 对齐，录音结束时字幕正好自然过期。
+        # 开始录音时切成绿灯，示意"可以说话了"；屏幕上同时显示麦克风图标，
+        # dur 直接和 CURIOUS_RECORD_SECONDS 对齐，录音结束时字幕正好自然过期。
+        set_led(0, 255, 0)
         set_subtitle("🎤", dur_ms=CURIOUS_RECORD_SECONDS * 1000)
         print("[对话] 录音中...")
         wav_bytes = record_audio(CURIOUS_RECORD_SECONDS)
         if not wav_bytes:
             print("[对话] 录音失败")
+            set_led(off=True)
             self._settle_happy(track_ok)
             return
 
@@ -921,6 +949,7 @@ class PuppyEngine:
         if not self.track_face_once():
             track_ok = False
 
+        set_led(off=True)
         self.transition(State.THINKING)
         set_subtitle("💭", dur_ms=THINKING_SUBTITLE_DUR_MS)
         user_text = self.transcribe(wav_bytes, "question.wav")
@@ -998,15 +1027,21 @@ class PuppyEngine:
                 self.transition(State.IDLE)
 
     def speak_keywords(self, keywords):
-        """依次合成并播放每个关键词，关键词之间间隔 KEYWORD_GAP_SEC。播放的同时
-        用字幕同步显示当前正在念的那个词——这是全系统唯一用到字幕的场景。"""
+        """依次合成并播放每个关键词，关键词之间间隔 KEYWORD_GAP_SEC。每个关键词
+        播放前先让屏幕右侧的爪印按钮"按一下"（down 保持 BUTTON_PRESS_MS 后
+        弹回 up），配合字幕同步显示当前正在念的那个词——这是全系统唯一用到
+        字幕和按钮的场景，最后一个关键词播完后把两者都清掉。"""
         for i, kw in enumerate(keywords):
+            set_button("down")
+            time.sleep(BUTTON_PRESS_MS / 1000)
+            set_button("up")
             set_subtitle(kw, dur_ms=KEYWORD_SUBTITLE_DUR_MS)
             wav_path = tts_to_wav(kw, f"kw_{i}")
             if wav_path:
                 play_wav_file(wav_path)
             time.sleep(KEYWORD_GAP_SEC)
         set_subtitle("")
+        set_button("off")
 
     # ---------- 计时器 ----------
 
