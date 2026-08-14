@@ -160,7 +160,12 @@ VOLUME_RMS_THRESHOLD = 600       # 音量触发阈值。这个数值经过了几
                                   # 而清楚说话时的 rms 能冲到 1000-7000 量级，两者有一到两个数量级
                                   # 的差距，600 留了足够的安全边际。
 # --- 完整对话链路 ---
-CURIOUS_RECORD_SECONDS = 4       # 好奇状态下录真正问题的时长
+CURIOUS_RECORD_SECONDS = 5       # 好奇状态下录真正问题的时长。原来 3-4 秒
+                                  # 经常在用户反应过来、开口说完整句话之前就
+                                  # 结束了，只录到半句话，延长到 5 秒。
+CURIOUS_PRE_RECORD_DELAY_SEC = 0.5   # 进 CURIOUS、切好奇表情之后到真正开始
+                                  # 录音之间的固定等待，给用户一个"小狗注意到
+                                  # 我了，可以开始说了"的反应缓冲
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
 
 # --- 字幕（唯一使用场景：qa_complex 逐个播报关键词时，同步显示当前正在念的
@@ -863,15 +868,26 @@ class PuppyEngine:
         track_ok = True
 
         self.transition(State.CURIOUS)
-        # CURIOUS 整个持续时间都在阻塞式地调 /record，StackChan 的 WebServer
-        # 是单线程的，这期间无法再响应 /camera，所以只能在开始录音前追踪一次。
-        if not self.track_face_once():
-            track_ok = False
+        # 两阶段录音：先切好奇表情让用户知道小狗注意到了，固定等待
+        # CURIOUS_PRE_RECORD_DELAY_SEC 给一个反应缓冲，再真正开始录音——之前
+        # 进 CURIOUS 后立刻开录（中间还夹了一次人脸追踪的网络往返，耗时不固定），
+        # 经常在用户反应过来、开口说完整句话之前就把开头吃掉了，只录到半句话。
+        # 这里不在开录前做人脸追踪，就是为了让"表情切换→开始录音"之间的等待
+        # 是固定可预期的 0.5 秒，不被追踪请求的耗时拖长；追踪挪到录音结束后
+        # （不影响开录时机）做一次，具体在下面。
+        time.sleep(CURIOUS_PRE_RECORD_DELAY_SEC)
+        print("[对话] 请说话...")
         wav_bytes = record_audio(CURIOUS_RECORD_SECONDS)
         if not wav_bytes:
             print("[对话] 录音失败")
             self._settle_happy(track_ok)
             return
+
+        # CURIOUS 整个持续时间都在阻塞式地调 /record，StackChan 的 WebServer
+        # 是单线程的，这期间无法响应 /camera，所以人脸追踪放在录音刚结束、
+        # 进 THINKING 之前做一次，保证每轮对话至少有一次追踪判断。
+        if not self.track_face_once():
+            track_ok = False
 
         self.transition(State.THINKING)
         user_text = self.transcribe(wav_bytes, "question.wav")
