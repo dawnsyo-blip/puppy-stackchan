@@ -143,8 +143,7 @@ PRIVACY_SPEED = 150
 # host 端连续调用 /led 模拟隐私状态的渐暗效果，相当于给这个本不该被高频调用
 # 的接口硬造出一次 /volume 当年那种轮询（CLAUDE.md 里记过那次教训：碎片化
 # 堆，最后设备反复重启），所以改成了现在这个"固件本地驱动"的架构。
-WARM_WHITE_RGB = (255, 180, 90)       # 呼吸灯/闪烁/渐暗统一用这个暖白色调
-HAPPY_LED_PERIOD_MS = 200             # 开心"暖白灯快闪"
+WARM_WHITE_RGB = (255, 180, 90)       # 呼吸灯/闪烁/渐暗/常亮统一用这个暖白色调
 CURIOUS_LED_BREATHE_PERIOD_MS = 1600  # 好奇/思考共用"暖白呼吸灯"
 SORRY_LED_PERIOD_MS = 1500            # 抱歉"缓慢闪烁"
 EXCITED_LED_PERIOD_MS = 300           # 兴奋"彩虹快闪"（具体颜色表内置在固件里）
@@ -498,7 +497,7 @@ def capture_frame():
 
 def play_happy_animation():
     set_expression("happy")
-    set_led_mode("blink", *WARM_WHITE_RGB, period_ms=HAPPY_LED_PERIOD_MS)
+    set_led_mode("solid", *WARM_WHITE_RGB)
     move_servo(pitch=HAPPY_PITCH, speed=HAPPY_YAW_SPEED)
     time.sleep(0.2)
     for _ in range(HAPPY_CYCLES):
@@ -1100,8 +1099,8 @@ class PuppyEngine:
         set_expression("happy")
         # 不重复播放摇头动画，但 LED 还是要重新确认一下模式：如果是从别的
         # 地方（比如 speak_keywords() 播报关键词、EXCITED 定时结束）静默切
-        # 回开心，LED 可能还停在上一个状态的效果上，这里补一次快闪。
-        set_led_mode("blink", *WARM_WHITE_RGB, period_ms=HAPPY_LED_PERIOD_MS)
+        # 回开心，LED 可能还停在上一个状态的效果上，这里补一次常亮。
+        set_led_mode("solid", *WARM_WHITE_RGB)
 
     def record_interaction(self):
         self.last_interaction = time.time()
@@ -1501,9 +1500,9 @@ class PuppyEngine:
 
         LED：表情映射表里这一行写的是"语音响起时亮起暖白灯"——每个关键词的
         音频播放期间用 set_led() 临时点亮暖白色（借用/覆盖掉开心状态本来在
-        跑的快闪效果），播完就熄灭。这是一次性覆盖，不是通过 set_led_mode()
+        跑的常亮效果），播完就熄灭。这是一次性覆盖，不是通过 set_led_mode()
         进某个持续模式，所以全部念完以后要显式把 LED 交还给当前状态本该有
-        的常驻效果（开心的暖白快闪，或者扫描失败落回常态的暗淡常亮）——不
+        的常驻效果（开心的暖白常亮，或者扫描失败落回常态时保持熄灭）——不
         然会一直卡在"熄灭"上，直到下一次真正的状态切换才会恢复。"""
         set_button("up")
         time.sleep(BUTTON_PRESS_MS / 1000)  # 等"隐藏→出现"这段过渡动画播完，
@@ -1526,7 +1525,7 @@ class PuppyEngine:
         set_button("off")
 
         if self.state == State.HAPPY:
-            set_led_mode("blink", *WARM_WHITE_RGB, period_ms=HAPPY_LED_PERIOD_MS)
+            set_led_mode("solid", *WARM_WHITE_RGB)
         elif self.state == State.IDLE:
             set_led(off=True)
 
