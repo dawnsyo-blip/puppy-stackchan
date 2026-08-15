@@ -1208,6 +1208,12 @@ void setup() {
   Serial.begin(115200);
   M5StackChan.begin();
 
+  // 显式熄灯：g_ledMode 全局默认就是 OFF，但那只保证 updateLed() 不会主动
+  // 点亮它——如果这次是软重启（不是真的断电），LED 硬件本身可能还残留着
+  // 重启前最后一次设的颜色，不会自动清零。这里直接发一次熄灯指令，不依赖
+  // "没人点过它就该是暗的"这个假设。
+  M5StackChan.showRgbColor(0, 0, 0);
+
   // M5Unified's board profile for CoreS3 sets mic magnification down to 1-2
   // (vs. the library default of 16), and the driver divides magnification by
   // (over_sampling*2)=4 internally — so the effective gain was ~0.25-0.5x,
