@@ -128,6 +128,13 @@ SLEEPY_SPEED = 50
 PRIVACY_YAW = 800
 PRIVACY_PITCH = 100
 PRIVACY_SPEED = 150
+# LED（参考表情映射v6.xlsx 第9行：隐私状态"渐暗至熄灭，过渡2s"）。固件的
+# /led 只有"立即设色"和"立即熄灭"两种，没有原生渐变，这里在 host 端连续调用
+# /led、每次把亮度调低一档来模拟"渐暗"的视觉效果——跟 sleepy 用一样的暖白
+# 色调，呼应常态/好奇状态里"暖白"这个基调。
+PRIVACY_LED_WARM_WHITE = (255, 180, 90)
+PRIVACY_LED_FADE_SEC = 2.0
+PRIVACY_LED_FADE_STEPS = 16
 
 # --- 抱歉(sorry)动画参数（数值参考表情映射v6.xlsx）---
 SORRY_PITCH = 200                # 微低头
@@ -294,46 +301,80 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"老�
 3. 老大在责备你：直接输出，不要输出别的文字：
 {"type": "scold"}
 
-4. 开放式问题（qa_complex）或其它情况（other）：先输出 2-4 个关键词（空格分隔），
-再换行输出 JSON：
-{"type": "qa_complex", "keywords": [...]}  或  {"type": "other", "keywords": [...]}
+4. 老大让你去睡觉/休息/自己待一会儿、暗示不再需要你陪着（比如"去睡觉吧"
+"你去休息吧""我们先聊到这里"这类意思）：直接输出，不要输出别的文字：
+{"type": "privacy"}
 
-第 4 条的关键词选择规则：
-- 优先从下面的词库里选，但不局限于词库，需要时可以用词库外的词：
-  枢纽词（优先级最高，可以和任何词搭配）：想、要、来、好、不要
-  需求词：外面、出门、玩、水、零食、飞盘、球球、拔河、罐罐、牛奶、睡觉、尿尿、噗噗
+5. 开放式问题（qa_complex）或其它情况（other）：
+   第一步——先想清楚：如果你是这只小狗，针对老大这句话，你会有什么具体、
+   符合逻辑的真实反应？用一句大白话写下来，哪怕很短也行。这句话不会被
+   念出来，只是逼自己先想清楚答案，不许跳过这一步，也不许把老大问题里的
+   词原样当成"想清楚的答案"。
+   第二步——把这句大白话压缩成 2-4 个关键词（空格分隔），再换行输出 JSON：
+   {"type": "qa_complex", "keywords": [...]}  或  {"type": "other", "keywords": [...]}
+
+第 5 条的关键词选择规则：
+- 关键词必须来自你自己想清楚的那句大白话，不能是老大问题原句里出现的词的
+  简单复读。如果发现自己选的词和问题原句几乎一样，说明大概率是偷懒没有
+  真的回答，回去重想。
+- 优先从下面的词库里选，但不局限于词库，需要时可以用词库外的词（权重从高
+  到低排列）：
+  需求词（权重最高）：外面、出门、玩、水、零食、飞盘、球球、拔河、罐罐、
+  牛奶、睡觉、尿尿、噗噗
   时间词：今天、明天、现在、刚才、结束
-  对象词：老大、小狗、小猫、咪咪、耶耶、边边、大黄
+  对象词：老大、小猫、咪咪、耶耶、边边、大黄
   地点词：外面、厨房、阳台、房间
   状态词：开心、怕怕、累、饿、痛痛
   情感词：love you、爱你
   动作词：打架、风
+  枢纽词（权重次低，仅高于"小狗"，默认少用——只有需要表达明确的意愿/态度、
+  单靠其它词说不清楚时才加一个，通常放在词语组合的最后而不是最前面）：
+  想、要、来、好、不要
+  自称词（权重最低，默认不用）：小狗——你说的每句话本来就是小狗在说，
+  没必要每次自报家门。只有在需要特别强调"这件事是我自己的感受/我自己想
+  要"这种强烈情感场合，才用一次"小狗 + 想/要 + 具体需求"（小狗放最前
+  面），偶尔出现就好，不要变成习惯性开头。
 - 每次 2-4 个词，根据表达需要灵活选：简单回应用 2 个，需要更多信息用 3-4 个。
 - 不用动名词组合（说"飞盘"，不说"玩飞盘"）。
 - 不要重复意思相近的动词。
 - 最迫切/最重要的词放最前面。
 - 指代对象（老大、咪咪等）或地点（外面、厨房）放在前面。
 - 允许重复同一个词表达强烈情感，比如"外面 外面 外面"。
-- 特别强烈的需求，用"小狗 + 想/要 + 具体需求"这种模式（小狗自己的名字加想/要放最前面）。
 
 示例：
 用户：今天天气怎么样？
+今天天气很好，还有风
 外面 好 风
 {"type": "qa_complex", "keywords": ["外面", "好", "风"]}
 
 用户：你想吃什么？
-小狗 想 零食 罐罐
-{"type": "qa_complex", "keywords": ["小狗", "想", "零食", "罐罐"]}
+好想吃零食和罐罐
+零食 罐罐 想
+{"type": "qa_complex", "keywords": ["零食", "罐罐", "想"]}
 
 用户：咪咪在哪里？
+咪咪在厨房呀
 咪咪 厨房
 {"type": "qa_complex", "keywords": ["咪咪", "厨房"]}
+
+用户：你为什么不去找咪咪玩？
+因为咪咪在睡觉，不想吵她
+咪咪 睡觉
+{"type": "qa_complex", "keywords": ["咪咪", "睡觉"]}
+
+用户：谁最想出去玩呀？
+是我呀，我最想出去玩了
+小狗 想 外面
+{"type": "qa_complex", "keywords": ["小狗", "想", "外面"]}
 
 用户：你想出去玩吗？
 {"type": "qa_simple", "answer": "yes"}
 
 用户：你真棒！
 {"type": "praise"}
+
+用户：去睡觉吧
+{"type": "privacy"}
 
 用户：你把鞋子咬坏了！
 {"type": "scold"}"""
@@ -454,6 +495,12 @@ def play_sleepy_animation():
 def play_privacy_animation():
     set_expression("privacy")
     move_servo(yaw=PRIVACY_YAW, pitch=PRIVACY_PITCH, speed=PRIVACY_SPEED)
+    r, g, b = PRIVACY_LED_WARM_WHITE
+    for i in range(PRIVACY_LED_FADE_STEPS, 0, -1):
+        frac = i / PRIVACY_LED_FADE_STEPS
+        set_led(int(r * frac), int(g * frac), int(b * frac))
+        time.sleep(PRIVACY_LED_FADE_SEC / PRIVACY_LED_FADE_STEPS)
+    set_led(off=True)
 
 def play_idle_animation():
     set_expression("idle")
@@ -494,6 +541,41 @@ def play_shake_animation():
 # ╔══════════════════════════════════════════════╗
 # ║              语音链路辅助函数                 ║
 # ╚══════════════════════════════════════════════╝
+
+def local_model_cache_dir(model_id, revision="master"):
+    """把 funasr AutoModel 的 model/vad_model 参数从"模型 ID 字符串"尽量换成
+    本地 ModelScope 缓存目录的绝对路径。
+
+    实测过：即使模型早就缓存在本地，funasr 的 download_from_ms() 只要一看到
+    参数是个 ID 字符串（而不是一个已经存在的路径），就会去调
+    get_or_download_model_dir() -> ModelScope 的 snapshot_download()，对方会
+    挨个请求 SenseVoiceSmall 20 个文件、fsmn-vad 8 个文件的元信息核对哈希——
+    这几次网络往返（本机还挂着代理，见 CLAUDE.md）就是"预加载"里那几秒卡顿
+    的来源，模型本体其实根本没有重新下载。反过来，如果 model 参数本身就是
+    一个已经存在的本地目录，download_from_ms() 会直接跳过
+    get_or_download_model_dir()，完全不发请求。用同样的临时脚本量过：
+    两个模型一起加载，模型 ID 字符串方式 8.80s，本地路径方式 4.13s，省下的
+    ~4.7s 基本就是这几次网络请求的开销，剩下的 4s 多是加载 ~900MB 权重文件
+    本身的硬盘 IO + 反序列化，没法再省。
+
+    `fsmn-vad` 这种简写在 funasr 内部会先查表转换成完整 ID（比如
+    "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"）才去找缓存目录，这里要
+    自己复刻一遍这个查表，不然拼出来的路径对不上。缓存目录还没建好（比如第
+    一次运行、或者以后手动清过缓存）就原样把 model_id 传回去，照常走一遍
+    ModelScope 下载——不会因为这个优化导致首次运行失败。"""
+    try:
+        from funasr.download.name_maps_from_hub import name_maps_ms
+        resolved = name_maps_ms.get(model_id, model_id)
+    except ImportError:
+        resolved = model_id
+    cache_dir = (
+        Path.home() / ".cache" / "modelscope" / "models"
+        / resolved.replace("/", "--") / "snapshots" / revision
+    )
+    if (cache_dir / "configuration.json").exists() or (cache_dir / "config.yaml").exists():
+        return str(cache_dir)
+    return model_id
+
 
 def load_deepseek_api_key():
     """从项目根目录 .env 手动解析 DEEPSEEK_API_KEY（不读环境变量，也不依赖
@@ -867,14 +949,16 @@ class PuppyEngine:
 
         # 语音链路：启动时一次性预加载，避免每次对话都重新加载模型。
         # 模型首次运行会自动从 ModelScope 下载并缓存到本地，之后启动就是直接
-        # 加载缓存，不会重复下载。
+        # 加载缓存——但"直接加载缓存"不代表零网络开销，见
+        # local_model_cache_dir() 的说明：传模型 ID 字符串的话 funasr 每次都会
+        # 找 ModelScope hub 核对一遍文件哈希，传本地目录路径能把这一步跳过。
         print("[引擎] 预加载 SenseVoice 模型...")
         from funasr import AutoModel
         from funasr.utils.postprocess_utils import rich_transcription_postprocess
         self._rich_transcription_postprocess = rich_transcription_postprocess
         self.asr_model = AutoModel(
-            model=SENSEVOICE_MODEL,
-            vad_model=SENSEVOICE_VAD_MODEL,
+            model=local_model_cache_dir(SENSEVOICE_MODEL),
+            vad_model=local_model_cache_dir(SENSEVOICE_VAD_MODEL),
             vad_kwargs={"max_single_segment_time": SENSEVOICE_VAD_MAX_SEGMENT_MS},
             device=SENSEVOICE_DEVICE,
             disable_update=True,
@@ -1299,6 +1383,10 @@ class PuppyEngine:
         elif intent == "scold":
             print("[对话] 责备 → 抱歉")
             self.transition(State.SORRY)
+
+        elif intent == "privacy":
+            print("[对话] 老大示意去休息/独处 → 隐私")
+            self.transition(State.PRIVACY)
 
         else:  # qa_complex / other：逐个念关键词。数量是 2-4 个，不固定，
                # 顺序（迫切程度/指代对象和地点在前等）由 SYSTEM_PROMPT 里的
