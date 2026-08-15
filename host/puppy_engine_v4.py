@@ -128,15 +128,25 @@ SLEEPY_SPEED = 50
 PRIVACY_YAW = 800
 PRIVACY_PITCH = 100
 PRIVACY_SPEED = 150
-# LED（参考表情映射v6.xlsx 第9行：隐私状态"渐暗至熄灭，过渡2s"）。固件的
-# /led 只有"立即设色"和"立即熄灭"两种，没有原生渐变，这里在 host 端连续调用
-# /led、每次把亮度调低一档来模拟"渐暗"的视觉效果——跟 sleepy 用一样的暖白
-# 色调，呼应常态/好奇状态里"暖白"这个基调。
-PRIVACY_LED_WARM_WHITE = (255, 180, 90)
-PRIVACY_LED_FADE_SEC = 2.0
-PRIVACY_LED_FADE_STEPS = 16
 
-# --- 抱歉(sorry)动画参数（数值参考表情映射v6.xlsx）---
+# --- LED（对照表情映射v7.xlsx）---
+# 固件的 /led 现在支持 mode 参数（solid/blink/breathe/rainbow/fade），呼吸/
+# 闪烁/彩虹/渐暗这些需要"持续"播放的效果由固件自己在本地 loop() 里驱动（见
+# firmware.ino 的 updateLed()）。host 端只在状态切换时调一次 /led 告诉固件
+# "从现在起用哪种模式"，不需要开一个后台线程持续轮询去模拟——早期版本试过
+# host 端连续调用 /led 模拟隐私状态的渐暗效果，相当于给这个本不该被高频调用
+# 的接口硬造出一次 /volume 当年那种轮询（CLAUDE.md 里记过那次教训：碎片化
+# 堆，最后设备反复重启），所以改成了现在这个"固件本地驱动"的架构。
+WARM_WHITE_RGB = (255, 180, 90)       # 呼吸灯/闪烁/渐暗统一用这个暖白色调
+IDLE_LED_DIM_RGB = (40, 28, 14)       # 常态"微弱暖白常亮"——同色相，亮度调低
+HAPPY_LED_PERIOD_MS = 200             # 开心"暖白灯快闪"
+CURIOUS_LED_BREATHE_PERIOD_MS = 1600  # 好奇/思考共用"暖白呼吸灯"
+SORRY_LED_PERIOD_MS = 1500            # 抱歉"缓慢闪烁"
+EXCITED_LED_PERIOD_MS = 300           # 兴奋"彩虹快闪"（具体颜色表内置在固件里）
+SLEEPY_LED_FADE_MS = 5000             # 困倦"渐暗至熄灭"
+PRIVACY_LED_FADE_MS = 2000            # 隐私"渐暗至熄灭"
+
+# --- 抱歉(sorry)动画参数（数值参考表情映射v7.xlsx）---
 SORRY_PITCH = 200                # 微低头
 SORRY_YAW = 100                  # 微微偏转，避开视线
 SORRY_SPEED = 100
@@ -414,11 +424,24 @@ def set_subtitle(text, dur_ms=None):
     api_get(q)
 
 def set_led(r=0, g=0, b=0, off=False):
-    """调用固件的 /led 控制机身 LED。off=True 时忽略 r/g/b 直接关灯。"""
+    """调用固件的 /led 立即设成某个静态颜色（off=True 时直接关灯），用于一次性
+    的短促效果（比如语音触发时闪两下白灯）。会覆盖掉当前状态本该持续播放的
+    LED 效果（呼吸/闪烁等），用完记得恢复，见 set_led_mode()。"""
     if off:
         api_get("/led?off=1")
     else:
         api_get(f"/led?r={r}&g={g}&b={b}")
+
+def set_led_mode(mode, r=0, g=0, b=0, period_ms=None, fade_ms=None):
+    """调用固件 /led 的 mode 参数，让固件自己在本地持续驱动呼吸/闪烁/彩虹/
+    渐暗这些效果（见 firmware.ino 的 updateLed()）。状态切换时调一次就够，
+    之后固件自己接管，不需要 host 端持续发请求维持效果。"""
+    q = f"/led?mode={mode}&r={r}&g={g}&b={b}"
+    if period_ms is not None:
+        q += f"&period_ms={int(period_ms)}"
+    if fade_ms is not None:
+        q += f"&fade_ms={int(fade_ms)}"
+    api_get(q)
 
 def set_button(state):
     """调用固件的 /button 控制关键词播报按钮：up/down/off。"""
@@ -465,6 +488,7 @@ def capture_frame():
 
 def play_happy_animation():
     set_expression("happy")
+    set_led_mode("blink", *WARM_WHITE_RGB, period_ms=HAPPY_LED_PERIOD_MS)
     move_servo(pitch=HAPPY_PITCH, speed=HAPPY_YAW_SPEED)
     time.sleep(0.2)
     for _ in range(HAPPY_CYCLES):
@@ -477,6 +501,7 @@ def play_happy_animation():
 
 def play_excited_animation():
     set_expression("excited")
+    set_led_mode("rainbow", period_ms=EXCITED_LED_PERIOD_MS)
     for _ in range(EXCITED_CYCLES):
         move_servo(yaw=EXCITED_YAW_RANGE, pitch=EXCITED_PITCH_HIGH, speed=EXCITED_YAW_SPEED)
         time.sleep(EXCITED_CYCLE_DELAY)
@@ -486,6 +511,7 @@ def play_excited_animation():
 
 def play_sleepy_animation():
     set_expression("sleepy")
+    set_led_mode("fade", *WARM_WHITE_RGB, fade_ms=SLEEPY_LED_FADE_MS)
     move_servo(yaw=0, speed=200)
     time.sleep(0.2)
     for p in SLEEPY_PITCH_STEPS:
@@ -495,29 +521,31 @@ def play_sleepy_animation():
 def play_privacy_animation():
     set_expression("privacy")
     move_servo(yaw=PRIVACY_YAW, pitch=PRIVACY_PITCH, speed=PRIVACY_SPEED)
-    r, g, b = PRIVACY_LED_WARM_WHITE
-    for i in range(PRIVACY_LED_FADE_STEPS, 0, -1):
-        frac = i / PRIVACY_LED_FADE_STEPS
-        set_led(int(r * frac), int(g * frac), int(b * frac))
-        time.sleep(PRIVACY_LED_FADE_SEC / PRIVACY_LED_FADE_STEPS)
-    set_led(off=True)
+    set_led_mode("fade", *WARM_WHITE_RGB, fade_ms=PRIVACY_LED_FADE_MS)
 
 def play_idle_animation():
     set_expression("idle")
     go_home()
+    set_led_mode("solid", *IDLE_LED_DIM_RGB)
 
 def play_curious_animation():
     """好奇：显示表情即可——语音已经由后台流式监听（MicStream）捕捉完毕，
     这里不用再等录音。"""
     set_expression("curious")
+    set_led_mode("breathe", *WARM_WHITE_RGB, period_ms=CURIOUS_LED_BREATHE_PERIOD_MS)
 
 def play_thinking_animation():
-    """思考：显示表情即可，持续时长就是 STT+LLM 实际处理耗时。"""
+    """思考：显示表情即可，持续时长就是 STT+LLM 实际处理耗时。LED 呼吸灯
+    延续好奇状态的效果（表情映射表里"思考"这行写的也是"保持暖白呼吸灯"），
+    这里重新调一次只是为了保证独立进入 THINKING 时也一定是对的，不依赖
+    "一定是从好奇过来的"这个假设。"""
     set_expression("thinking")
+    set_led_mode("breathe", *WARM_WHITE_RGB, period_ms=CURIOUS_LED_BREATHE_PERIOD_MS)
 
 def play_sorry_animation():
     set_expression("sorry")
     move_servo(pitch=SORRY_PITCH, yaw=SORRY_YAW, speed=SORRY_SPEED)
+    set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
 
 def play_nod_animation():
     """点头，模拟 qa_simple 的"是"。"""
@@ -1018,6 +1046,15 @@ class PuppyEngine:
         if new_state in (State.SLEEPY, State.PRIVACY):
             self.session_active = False
 
+        # 隐私状态下 tick() 不再轮询摄像头（见下面 PRIVACY 分支的说明），
+        # 所以进入隐私那一刻起，"是否检测到人脸"这个状态本身就该视为未知，
+        # 不能继续沿用进隐私前残留的 True——不然 check_voice_wake() 会因为
+        # 这个陈旧的 True 而跳过重新扫描，等于摄像头"看似关了"但旧的判断
+        # 结果还在悄悄生效。
+        if new_state == State.PRIVACY:
+            self.face_detected = False
+            self.face_confirm_count = 0
+
         if   new_state == State.HAPPY:    play_happy_animation()
         elif new_state == State.EXCITED:  play_excited_animation()
         elif new_state == State.SLEEPY:   play_sleepy_animation()
@@ -1043,6 +1080,10 @@ class PuppyEngine:
         self.state = State.HAPPY
         self.state_enter_time = time.time()
         set_expression("happy")
+        # 不重复播放摇头动画，但 LED 还是要重新确认一下模式：如果是从别的
+        # 地方（比如 speak_keywords() 播报关键词、EXCITED 定时结束）静默切
+        # 回开心，LED 可能还停在上一个状态的效果上，这里补一次快闪。
+        set_led_mode("blink", *WARM_WHITE_RGB, period_ms=HAPPY_LED_PERIOD_MS)
 
     def record_interaction(self):
         self.last_interaction = time.time()
@@ -1296,9 +1337,11 @@ class PuppyEngine:
             else:
                 self.transition(State.IDLE)
         finally:
-            # 保证整轮对话结束后灯一定是关的，不依赖某个具体分支有没有记得关——
-            # 万一中间哪一步在开灯之后、关灯之前抛了异常，这里兜底收尾。
-            set_led(off=True)
+            # 不在这里兜底关灯——现在每个状态都有自己该持续播放的 LED 效果
+            # （呼吸/闪烁/常亮等，见 transition()/enter_happy()），无论是正常
+            # 走完还是走了上面的异常分支，各自都已经通过 transition()/
+            # enter_happy() 把 LED 设成了当前状态该有的样子，这里再关一次灯
+            # 反而会把刚设好的效果盖掉。
             print(f"[对话] 对话结束，回到状态={self.state.value}，恢复流式监听")
 
     def _run_conversation_turn_body(self, pcm_bytes):
@@ -1438,7 +1481,14 @@ class PuppyEngine:
         出现动画已经播完、按钮停在正常大小，再开始给第一个关键词播放"按一
         下"的动画。
 
-        全部念完后按钮消失。这是全系统唯一用到按钮的场景。"""
+        全部念完后按钮消失。这是全系统唯一用到按钮的场景。
+
+        LED：表情映射表里这一行写的是"语音响起时亮起暖白灯"——每个关键词的
+        音频播放期间用 set_led() 临时点亮暖白色（借用/覆盖掉开心状态本来在
+        跑的快闪效果），播完就熄灭。这是一次性覆盖，不是通过 set_led_mode()
+        进某个持续模式，所以全部念完以后要显式把 LED 交还给当前状态本该有
+        的常驻效果（开心的暖白快闪，或者扫描失败落回常态的暗淡常亮）——不
+        然会一直卡在"熄灭"上，直到下一次真正的状态切换才会恢复。"""
         set_button("up")
         time.sleep(BUTTON_PRESS_MS / 1000)  # 等"隐藏→出现"这段过渡动画播完，
                                              # 确保第一次"按一下"是从正常大小
@@ -1451,11 +1501,18 @@ class PuppyEngine:
             set_button("up")
             wav_path = next_wav
             if wav_path:
+                set_led(*WARM_WHITE_RGB)
                 play_wav_file(wav_path)
+                set_led(off=True)
             if i + 1 < len(keywords):
                 next_wav = tts_to_wav(keywords[i + 1], f"kw_{i + 1}")
             time.sleep(KEYWORD_GAP_SEC)
         set_button("off")
+
+        if self.state == State.HAPPY:
+            set_led_mode("blink", *WARM_WHITE_RGB, period_ms=HAPPY_LED_PERIOD_MS)
+        elif self.state == State.IDLE:
+            set_led_mode("solid", *IDLE_LED_DIM_RGB)
 
     # ---------- 计时器 ----------
 
@@ -1540,14 +1597,19 @@ class PuppyEngine:
                 self.transition(State.PRIVACY)
 
         elif self.state == State.PRIVACY:
-            if do_face_check:
-                self.check_face()
-            if self.face_detected:
-                print("[触发] 隐私中检测到人脸！")
-                self.enter_happy()
+            # 故意不轮询摄像头：之前跟 SLEEPY/IDLE 一样靠 check_face() 自动
+            # 判断退出，但实机遇到过没人在场时被别的物体误判成人脸、突然从
+            # 隐私跳回开心的情况。表情映射表里隐私这一行的退出条件本来就只
+            # 写了"听到提问"（语音）和触摸，没提摄像头/人脸——这里索性彻底
+            # 停止人脸检测，相当于隐私状态下"关摄像头"，直到被 check_voice_
+            # wake()（tick() 顶部，不分状态每轮都会跑）或 check_touch() 的
+            # 短按分支（已经把 PRIVACY 算进"短按→扫描找人"那一档）重新唤醒
+            # 才会再看一眼摄像头。这两条路径已经覆盖了"语音或触摸触发"，这
+            # 里不需要再做什么。
+            pass
 
         elif self.state == State.SORRY:
-            # 表情映射v6.xlsx：抱歉状态只由新的语音唤醒打断（上面已经处理），
+            # 表情映射v7.xlsx：抱歉状态只由新的语音唤醒打断（上面已经处理），
             # 单纯看到人脸不会自动跳出，所以这里只更新追踪状态，不触发转移。
             if do_face_check:
                 self.check_face()

@@ -21,7 +21,11 @@
  *   GET /play       — play WAV from URL (streaming, up to 2MB/62s)
  *   GET /speech     — display subtitle text
  *   GET /volume     — mic volume level
- *   GET /led        — set LED color (r,g,b) or turn off (off=1)
+ *   GET /led        — set LED color (r,g,b) or turn off (off=1). Also takes
+ *                     mode=solid/blink/breathe/rainbow/fade (+period_ms /
+ *                     fade_ms) for continuous effects driven locally from
+ *                     loop() via updateLed() — caller sets the mode once per
+ *                     state change, no need to keep polling /led.
  *   GET /button     — show/hide the on-screen paw button (state=up/down/off)
  */
 #include <M5StackChan.h>
@@ -653,18 +657,104 @@ void handleFace() {
   server.send(200, "application/json", "{\"ok\":true,\"expr\":\"" + expr + "\"}");
 }
 
+// LED modes: 表情映射表里每个状态大多要求 LED "持续"播放某种效果（呼吸/
+// 闪烁/彩虹快闪），不是进状态那一刻闪一下就完事，之前如果让 host 端每隔
+// 100~300ms 打一次 /led 来模拟，等于给这个本来就不高频调用的接口硬造出一个
+// 类似 /volume 当年那样的高频轮询——CLAUDE.md 里记过那次教训（碎片化堆，
+// 最后设备反复重启）。这里改成固件自己在本地用 updateLed() 持续驱动效果
+// （从 loop() 里非阻塞地调用，不用 delay()），host 端只在状态切换时调一次
+// /led 告诉固件"从现在起用哪种模式"，之后固件自己接管，不需要持续发请求。
+enum class LedMode { OFF, SOLID, BLINK, BREATHE, RAINBOW, FADE_OUT };
+LedMode g_ledMode = LedMode::OFF;
+uint8_t g_ledR = 0, g_ledG = 0, g_ledB = 0;      // BLINK/BREATHE/FADE_OUT 的基色
+uint32_t g_ledPeriodMs = 200;                     // BLINK/BREATHE/RAINBOW 的周期
+uint32_t g_ledFadeMs = 2000;                      // FADE_OUT 的总时长
+uint32_t g_ledModeStartMs = 0;                    // 本次模式的起始 millis()，动画相位从这里算
+bool g_ledFadeReachedOff = false;                 // FADE_OUT 到底以后只需要真正调一次熄灭
+unsigned long g_ledLastUpdateMs = 0;              // 节流：不用每次 loop() 都重算颜色
+
+static const uint8_t LED_RAINBOW_COLORS[][3] = {
+  {255, 0, 0}, {255, 140, 0}, {255, 255, 0}, {0, 200, 0}, {0, 120, 255}, {160, 0, 220},
+};
+static const int LED_RAINBOW_COUNT = sizeof(LED_RAINBOW_COLORS) / sizeof(LED_RAINBOW_COLORS[0]);
+
+// 从 loop() 里每次都调用，内部自己节流到约 50Hz——比任何一种效果的周期都
+// 密，肉眼看不出跟"每帧都算"的差别，但省掉大部分冗余的 showRgbColor() 调用。
+static void updateLed() {
+  unsigned long now = millis();
+  if (now - g_ledLastUpdateMs < 20) return;
+  g_ledLastUpdateMs = now;
+  uint32_t t = now - g_ledModeStartMs;
+
+  switch (g_ledMode) {
+    case LedMode::OFF:
+    case LedMode::SOLID:
+      break;  // 静态颜色只需要在 handleLed() 里设一次，这里不用重复发送
+    case LedMode::BLINK: {
+      bool on = (t / (g_ledPeriodMs / 2)) % 2 == 0;
+      M5StackChan.showRgbColor(on ? g_ledR : 0, on ? g_ledG : 0, on ? g_ledB : 0);
+      break;
+    }
+    case LedMode::BREATHE: {
+      float phase = fmodf((float)t, (float)g_ledPeriodMs) / (float)g_ledPeriodMs;
+      float bness = (1.0f - cosf(2.0f * PI * phase)) / 2.0f;  // 0..1 平滑呼吸
+      M5StackChan.showRgbColor((uint8_t)(g_ledR * bness), (uint8_t)(g_ledG * bness), (uint8_t)(g_ledB * bness));
+      break;
+    }
+    case LedMode::RAINBOW: {
+      int idx = (t / g_ledPeriodMs) % LED_RAINBOW_COUNT;
+      M5StackChan.showRgbColor(LED_RAINBOW_COLORS[idx][0], LED_RAINBOW_COLORS[idx][1], LED_RAINBOW_COLORS[idx][2]);
+      break;
+    }
+    case LedMode::FADE_OUT: {
+      if (t >= g_ledFadeMs) {
+        if (!g_ledFadeReachedOff) {
+          M5StackChan.showRgbColor(0, 0, 0);
+          g_ledFadeReachedOff = true;
+        }
+      } else {
+        float frac = 1.0f - (float)t / (float)g_ledFadeMs;
+        M5StackChan.showRgbColor((uint8_t)(g_ledR * frac), (uint8_t)(g_ledG * frac), (uint8_t)(g_ledB * frac));
+      }
+      break;
+    }
+  }
+}
+
 void handleLed() {
   if (server.hasArg("off") && server.arg("off") == "1") {
+    g_ledMode = LedMode::OFF;
     M5StackChan.showRgbColor(0, 0, 0);
     server.send(200, "application/json", "{\"ok\":true,\"off\":true}");
     return;
   }
+
   int r = constrain(server.hasArg("r") ? server.arg("r").toInt() : 0, 0, 255);
   int g = constrain(server.hasArg("g") ? server.arg("g").toInt() : 0, 0, 255);
   int b = constrain(server.hasArg("b") ? server.arg("b").toInt() : 0, 0, 255);
-  M5StackChan.showRgbColor(r, g, b);
-  server.send(200, "application/json",
-    "{\"ok\":true,\"r\":" + String(r) + ",\"g\":" + String(g) + ",\"b\":" + String(b) + "}");
+  long periodMs = constrain(server.hasArg("period_ms") ? server.arg("period_ms").toInt() : 200, 20, 10000);
+  long fadeMs = constrain(server.hasArg("fade_ms") ? server.arg("fade_ms").toInt() : 2000, 100, 20000);
+  String mode = server.hasArg("mode") ? server.arg("mode") : "solid";
+
+  g_ledR = r; g_ledG = g; g_ledB = b;
+  g_ledPeriodMs = (uint32_t)periodMs;
+  g_ledFadeMs = (uint32_t)fadeMs;
+  g_ledModeStartMs = millis();
+  g_ledFadeReachedOff = false;
+
+  if (mode == "blink") g_ledMode = LedMode::BLINK;
+  else if (mode == "breathe") g_ledMode = LedMode::BREATHE;
+  else if (mode == "rainbow") g_ledMode = LedMode::RAINBOW;
+  else if (mode == "fade") g_ledMode = LedMode::FADE_OUT;
+  else { g_ledMode = LedMode::SOLID; M5StackChan.showRgbColor(r, g, b); }
+
+  // 用 static 缓冲区 + snprintf 拼 JSON，不用 String 拼接——这个接口现在每次
+  // 状态切换才调一次，调用频率不高，但顺手按项目里已经确立的零堆分配习惯写。
+  static char buf[160];
+  snprintf(buf, sizeof(buf),
+    "{\"ok\":true,\"mode\":\"%s\",\"r\":%d,\"g\":%d,\"b\":%d,\"period_ms\":%lu,\"fade_ms\":%lu}",
+    mode.c_str(), r, g, b, (unsigned long)periodMs, (unsigned long)fadeMs);
+  server.send(200, "application/json", buf);
 }
 
 void handleServo() {
@@ -1214,6 +1304,7 @@ void setup() {
 void loop() {
   M5StackChan.update();
   server.handleClient();
+  updateLed();
 
   // WiFi auto-reconnect
   static unsigned long lastWifiCheck = 0;
