@@ -13,8 +13,8 @@
 - `firmware/firmware.ino` — 主固件，包含 HTTP API 服务器和表情渲染
 - `firmware/PuppyFace.h` — 自定义小狗表情组件（PuppyEye, PuppyNose, PuppyEar）
 - `firmware/config.h` — WiFi 配置（SSID: DAWN, 密码: 12121212）
-- `host/puppy_engine_v3.py` — 行为状态机（人脸检测、触摸、空闲计时）
-- `host/voice_test.py` — 语音链路（录音→STT→LLM→TTS→播放）
+- `host/puppy_engine_v4.py` — 行为状态机（人脸检测、触摸、空闲计时、语音唤醒），当前最新版
+- `host/voice_test.py` — 语音链路独立测试（录音→STT→LLM→TTS→播放）
 
 ## HTTP API
 - `/face?expr=<表情>` — 切换表情（neutral/happy/sleepy/curious/sorry/thinking/excited/privacy）
@@ -22,7 +22,15 @@
 - `/camera` — 拍照返回 JPEG
 - `/touch` — 触摸传感器状态
 - `/play?url=<url>` — 播放 WAV 音频
-- `/record?seconds=N` — 录音
+- `/record?seconds=N` — 录音（一次性、有限时长；puppy_engine_v4.py 不再用它做语音
+  唤醒，改用下面的 `/stream`，仅保留给独立测试脚本用）
+- `/stream?port=N` / `/stream?stop=1` — 语音唤醒的核心：StackChan 主动连到
+  host 的 `port` 上持续推送 PCM（16bit/16kHz/单声道），host 端（见
+  `puppy_engine_v4.py` 的 `MicStream`）常驻监听 + 滚动缓冲 + VAD 分段，断线
+  自动重连。**非阻塞**——推流跑在固件的后台 FreeRTOS 任务里（详见
+  `firmware.ino` 的 `streamTaskFn()`），不会像早期实现那样卡住主 HTTP 线程；
+  `/play` 播放期间会短暂让它让路（共享同一个 I2S 麦克风/喇叭外设），播完自动
+  恢复。
 
 ## 表情系统
 PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr 字符串画不同图形：

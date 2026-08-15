@@ -38,6 +38,10 @@ import asyncio
 import tempfile
 import threading
 import http.server
+import socket
+import queue
+import wave
+import io
 from pathlib import Path
 from enum import Enum
 from urllib.parse import quote
@@ -54,10 +58,10 @@ from mediapipe.tasks.python import BaseOptions
 # ╚══════════════════════════════════════════════╝
 
 BASE_URL = "http://192.168.137.100"
-COMPUTER_IP = "192.168.137.1"   # 电脑在热点网络上的 IP（StackChan 用它来下载要播放的音频）
+COMPUTER_IP = "192.168.137.1"   # 电脑在热点网络上的 IP（StackChan 用它来下载要播放的音频，
+                                 # 也是 /stream 推流要连过来的地址）
 AUDIO_SERVER_PORT = 8080
-TIMEOUT = 5                     # 普通请求（/face、/servo、/touch、/volume）超时
-RECORD_TIMEOUT_MARGIN = 8       # /record?seconds=N 的请求超时 = N + 这个余量
+TIMEOUT = 5                     # 普通请求（/face、/servo、/touch）超时
 PLAY_TIMEOUT = 30               # /play 是阻塞调用（播完才返回），要给够时间
 API_RETRY_DELAY_SEC = 2.0       # API 请求失败（连不上/超时）后，等这么久再重试一次，
                                  # 不要立刻重试，避免在设备本来就吃紧时继续加压
@@ -151,45 +155,44 @@ SCAN_PAUSE = 1.0
 # --- 触摸检测 ---
 TOUCH_POLL_SEC = 0.5
 
-# --- 语音唤醒（方案A：音量触发）---
-VOLUME_POLL_SEC = 3.0            # 轮询 /volume 的间隔。实测 /volume 每次调用都会启停一次
-                                  # 麦克风(I2S)，持续高频调用即使 2s 一次也偶尔会让设备重启，
-                                  # 所以留了更大的余量；如果还不稳定可以继续调大。
-VOLUME_RMS_THRESHOLD = 450       # 音量触发阈值。这个数值经过了几轮固件修复才最终校准：
-                                  # 1) /volume 原来只采样 100ms 就报数，每 3s 轮询一次相当于
-                                  #    只有 3.3% 的时间在"听"，几乎不可能刚好盖住说话的瞬间——
-                                  #    改成整整 1 秒的采样窗口。
-                                  # 2) 每次录音在调 M5.Mic.end() 前的最后一块缓冲区读到的是固定
-                                  #    的垃圾数据（不同时间录到的值完全一样，明显不是真实声音），
-                                  #    多录一小段扔掉来避开这块脏数据。
-                                  # 3) M5Unified 给 CoreS3 预设的麦克风增益（magnification）只有
-                                  #    1-2，配合库内部再除以 4 的换算，等于把原始信号衰减到约
-                                  #    0.5 倍而不是放大——在 setup() 里显式调到 5 才是效果比较
-                                  #    合理的档位（调到 48 会削波）。
-                                  # 后来实机连续观察到的安静环境 rms 基线其实在 280-367 附近
-                                  # （比早期测得的 50-160 更高，可能和当时的环境噪音有关），
-                                  # 而说话触发时能冲到 778 左右——600 相对基线的安全边际偏小，
-                                  # 调到 450 留出更明确的余量，同时依然明显高于安静基线。
+# --- 语音唤醒（方案B：TCP 流式监听，取代方案A的 /volume 轮询 + /record
+#     间歇录音）---
+# 旧方案的根本问题：/volume、/record 都是"一次性、有限时长"的调用，
+# /volume 每 VOLUME_POLL_SEC 秒才采样一次，中间大段时间设备根本没在听；
+# 触发之后还要另开一次 /record 才能录到真正的问题，如果用户说话节奏跟这套
+# "听一下→（可能）转头→再录音"的节奏对不上，开头就被切掉、甚至整段错过。
+# 流式方案让 StackChan 主动推流、host 常驻监听，音频从来不会"没在录"，
+# 触发条件（音量超过阈值）判断到的那一刻，实际说的内容已经在滚动缓冲区里
+# 了，不需要再额外录一次。
+STREAM_PORT = 8081                 # StackChan 的 /stream?port=N 主动连过来的端口
+STREAM_BUFFER_SECONDS = 8.0        # 滚动缓冲区保留的音频时长——够放下一整句话，
+                                    # 又不会无限占内存（16kHz/16bit/单声道下
+                                    # 8 秒约 256KB）
+STREAM_CHUNK_SECONDS = 0.5         # 每凑够这么多新数据就算一次 RMS
+STREAM_SILENCE_SECONDS = 1.0       # 连续这么久 RMS 都低于阈值，判定"说完了"
+STREAM_PREROLL_SECONDS = 0.4       # 判定"开始说话"的那一刻往前多留一点余量
+                                    # （因为是按 0.5s 一段判定的，真正开口的
+                                    # 时刻很可能比"这一段整体超过阈值"稍早）
+STREAM_RMS_THRESHOLD = 450         # 语音触发阈值——沿用旧方案(/volume 方案)
+                                    # 校准出的数值：安静环境基线约 280-367，
+                                    # 说话时能冲到 778 左右，麦克风硬件和增益
+                                    # 都没变，只是采样方式从"偶尔采 1 秒"改成
+                                    # "连续按 0.5 秒一段"，量级应该还适用；如果
+                                    # 实机测下来触发不灵/太灵，从这个值开始调。
 # --- 完整对话链路 ---
-CURIOUS_RECORD_SECONDS = 5       # 好奇状态下录真正问题的时长。原来 3-4 秒
-                                  # 经常在用户反应过来、开口说完整句话之前就
-                                  # 结束了，只录到半句话，延长到 5 秒。
-CURIOUS_PRE_RECORD_DELAY_SEC = 1.0   # 进 CURIOUS、切好奇表情之后到真正开始
-                                  # 录音之间的固定等待，给用户一个"小狗注意到
-                                  # 我了，可以开始说了"的反应缓冲（原来 0.5 秒
-                                  # 太短，用户经常还没反应过来表情已经切换完，
-                                  # 加长到 1 秒）
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
 BUTTON_PRESS_MS = 200            # 每个关键词播放前，按钮"按下"状态维持的时长
 
-# --- 字幕：分两段出现，帮用户确认小狗"听懂了什么"——①录音期间显示麦克风
-#     图标，表示"在听"；②录音结束、语音识别出结果后，把识别到的文字显示
-#     出来，方便用户确认输入内容，一直保留到 LLM 回复出来、即将执行下一步
-#     动作时才清空。注意 SenseVoice 是整段录完才能出结果，不是逐字流式识别，
-#     所以这里做不到"边说边出字幕"，只能做到"识别完成的那一刻立刻显示"——
-#     架构上要支持真正的逐字实时字幕，需要把 /record 改成边录边传的流式接口，
-#     这里先不做。qa_complex 播报关键词期间用的是爪印按钮（见
-#     speak_keywords()），不是字幕；其它状态只切表情，不显示文字。 ---
+# --- 字幕：语音段识别出结果后，把识别到的文字显示出来，方便用户确认输入
+#     内容，一直保留到 LLM 回复出来、即将执行下一步动作时才清空。改成流式
+#     监听（MicStream）之后不再有单独的"录音中"状态可以配麦克风图标——语音
+#     是持续后台捕捉的，触发的时候内容已经录完了，所以只剩这一段用途。注意
+#     SenseVoice 是整段音频喂进去才能出结果，不是逐字流式识别，所以这里做不
+#     到"边说边出字幕"，只能做到"识别完成的那一刻立刻显示"——/stream 虽然
+#     现在是连续推流了，但那只解决了"音频有没有连续送到 host"，逐字实时字幕
+#     还需要 SenseVoice 本身支持增量/流式推理，这里先不做。qa_complex 播报
+#     关键词期间用的是爪印按钮（见 speak_keywords()），不是字幕；其它状态只
+#     切表情，不显示文字。 ---
 SUBTITLE_DUR_MS = 15000  # /speech 的 dur 参数：字幕展示上限（两个场景共用）。
                           # 正常情况下都会有显式的清空调用，这个只是兜底上限，
                           # 避免万一清空请求丢了导致字幕卡住不消失
@@ -367,32 +370,12 @@ def get_status():
         except: return None
     return None
 
-def get_volume():
-    # /volume now captures a full 1s of audio on the device before replying
-    # (see firmware.ino handleVolume()), so give it more headroom than the
-    # old 100ms-capture version needed.
-    r = api_get("/volume", timeout=5)
-    if r and r.status_code == 200:
-        try:    return r.json()
-        except: return None
-    return None
-
 def capture_frame():
     r = api_get("/camera")
     if r and r.status_code == 200:
         arr = np.frombuffer(r.content, np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
     return None
-
-def record_audio(seconds):
-    """调用 /record?seconds=N，返回 WAV 字节，失败返回 None。led=0 关掉固件
-    自带的录音指示灯（会用暗一点的绿色自动开关），改由主机侧的 set_led()
-    统一控制灯光节奏，避免两边抢着切换颜色。"""
-    r = api_get(f"/record?seconds={seconds}&led=0", timeout=seconds + RECORD_TIMEOUT_MARGIN)
-    if r is None or r.status_code != 200:
-        print(f"  [录音] 失败: {r.status_code if r else '无响应'}")
-        return None
-    return r.content
 
 
 # ╔══════════════════════════════════════════════╗
@@ -437,7 +420,8 @@ def play_idle_animation():
     go_home()
 
 def play_curious_animation():
-    """好奇：显示表情即可，真正的录音由 run_conversation_turn() 触发。"""
+    """好奇：显示表情即可——语音已经由后台流式监听（MicStream）捕捉完毕，
+    这里不用再等录音。"""
     set_expression("curious")
 
 def play_thinking_animation():
@@ -609,6 +593,204 @@ def ask_llm(user_text, api_key):
 
 
 # ╔══════════════════════════════════════════════╗
+# ║          语音流式监听 (MicStream)             ║
+# ╚══════════════════════════════════════════════╝
+
+def _pcm_rms(chunk: bytes) -> float:
+    """算一段 16bit PCM 数据的 RMS 响度。"""
+    if not chunk:
+        return 0.0
+    samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float64)
+    return float(np.sqrt(np.mean(samples * samples)))
+
+
+def pcm_to_wav_bytes(pcm: bytes, sample_rate=16000, channels=1, sample_width=2) -> bytes:
+    """给一段裸 PCM 数据加上 WAV 头，SenseVoice/wave 模块都要读完整的 WAV 文件，
+    不能直接吃裸 PCM。"""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(sample_width)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+class MicStream:
+    """StackChan 通过 /stream?port=N 主动连过来推流 PCM 音频（16bit/16kHz/
+    单声道），这个类在 host 端常驻监听、接收、缓冲、做简单的语音活动检测：
+
+    - 一个后台线程负责 accept：绑定端口监听，StackChan 连上来就持续收数据；
+      连接断开（无论是对端主动关闭、网络问题，还是固件那边 /play 期间暂停
+      推流导致的重连）就回到 accept() 等下一次连接——全程不需要 host 主动
+      发起重连，是 StackChan 那边主动连过来的，host 只要一直守着端口就行。
+    - 收到的数据一份写入滚动缓冲区（只保留最近 STREAM_BUFFER_SECONDS 秒），
+      另一份喂给 VAD：每凑够 STREAM_CHUNK_SECONDS 秒新数据算一次 RMS，超过
+      阈值记为"正在说话"，连续 STREAM_SILENCE_SECONDS 秒低于阈值判定"说完
+      了"——这时直接从滚动缓冲区里把这段语音（含一点前置余量）切出来放进
+      一个小队列，主循环用 take_utterance() 非阻塞取走，不需要再另外调用
+      /record 补录一次，因为要说的话已经在缓冲区里了。
+
+    音频的读写全部发生在同一个后台线程里（accept 线程本身），所以内部状态
+    不需要加锁；跟主线程之间唯一的交接点是线程安全的 _utterance_queue。
+    """
+
+    def __init__(self, port=STREAM_PORT, sample_rate=16000,
+                 buffer_seconds=STREAM_BUFFER_SECONDS,
+                 chunk_seconds=STREAM_CHUNK_SECONDS,
+                 silence_seconds=STREAM_SILENCE_SECONDS,
+                 preroll_seconds=STREAM_PREROLL_SECONDS,
+                 rms_threshold=STREAM_RMS_THRESHOLD):
+        self.port = port
+        self.sample_rate = sample_rate
+        self._bytes_per_sample = 2
+        self._max_buffer_bytes = int(buffer_seconds * sample_rate * self._bytes_per_sample)
+        self._chunk_bytes = int(chunk_seconds * sample_rate * self._bytes_per_sample)
+        self._silence_chunks_needed = max(1, round(silence_seconds / chunk_seconds))
+        self._preroll_bytes = int(preroll_seconds * sample_rate * self._bytes_per_sample)
+        self.rms_threshold = rms_threshold
+
+        self._buffer = bytearray()
+        self._total = 0            # 已收到的总字节数（绝对偏移，单调递增）
+        self._rms_cursor = 0       # 下一次要做 RMS 判定的绝对起点
+
+        self._speech_active = False
+        self._speech_start_abs = 0
+        self._quiet_chunks = 0
+
+        self._utterance_queue = queue.Queue()
+        self._running = False
+        self._server_sock = None
+        self._accept_thread = None
+        self.connected = False     # 仅供主循环/调试查看，不用于同步
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._accept_thread.start()
+
+    def stop(self):
+        """程序退出时调用：停掉 accept 循环、关掉监听 socket 和当前连接。"""
+        self._running = False
+        if self._server_sock:
+            try:
+                self._server_sock.close()
+            except OSError:
+                pass
+
+    def take_utterance(self):
+        """非阻塞取出最近一段捕捉到的完整语音（bytes，裸 PCM）；没有就绪的
+        返回 None。如果处理不过来、队列里积压了好几段，只保留最新的一段——
+        堆积的旧片段大概率是过时的噪音，没必要一段段排队处理。"""
+        segment = None
+        while True:
+            try:
+                segment = self._utterance_queue.get_nowait()
+            except queue.Empty:
+                break
+        return segment
+
+    # ---------- 内部：接收 + 缓冲 + VAD ----------
+
+    def _accept_loop(self):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("0.0.0.0", self.port))
+        srv.listen(1)
+        srv.settimeout(1.0)
+        self._server_sock = srv
+        print(f"[流式监听] TCP 服务器已启动 0.0.0.0:{self.port}，等待 StackChan 连接...")
+
+        while self._running:
+            try:
+                conn, addr = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break  # stop() 关掉了监听 socket
+
+            print(f"[流式监听] StackChan 已连接 {addr}")
+            self.connected = True
+            # 新连接开始，丢弃上一次连接里可能还没判定完的"正在说话"状态，
+            # 避免跨连接（比如中间断了好几分钟）把两段不相干的声音拼在一起。
+            self._speech_active = False
+            self._quiet_chunks = 0
+            self._recv_loop(conn)
+            self.connected = False
+            print("[流式监听] 连接断开，等待重连...")
+
+        srv.close()
+
+    def _recv_loop(self, conn):
+        conn.settimeout(5.0)
+        try:
+            while self._running:
+                data = conn.recv(4096)
+                if not data:
+                    break
+                self._feed(data)
+        except socket.timeout:
+            print("[流式监听] 5 秒没收到数据，断开重连")
+        except OSError as e:
+            print(f"[流式监听] 接收出错: {e}")
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _feed(self, data: bytes):
+        self._buffer += data
+        self._total += len(data)
+        if len(self._buffer) > self._max_buffer_bytes:
+            del self._buffer[: len(self._buffer) - self._max_buffer_bytes]
+
+        while self._total - self._rms_cursor >= self._chunk_bytes:
+            start_abs = self._rms_cursor
+            end_abs = start_abs + self._chunk_bytes
+            base = self._total - len(self._buffer)
+            lo, hi = start_abs - base, end_abs - base
+            if lo < 0:
+                # 这个 chunk 已经被滚动缓冲区挤掉了，理论上不会发生（缓冲区
+                # 留了 STREAM_BUFFER_SECONDS 秒，远比一个 chunk 长），兜底跳过。
+                self._rms_cursor = base
+                continue
+            chunk = bytes(self._buffer[lo:hi])
+            self._rms_cursor = end_abs
+            self._process_chunk(start_abs, end_abs, chunk)
+
+    def _process_chunk(self, start_abs, end_abs, chunk):
+        rms = _pcm_rms(chunk)
+        if rms >= self.rms_threshold:
+            if not self._speech_active:
+                self._speech_active = True
+                self._speech_start_abs = max(0, start_abs - self._preroll_bytes)
+            self._quiet_chunks = 0
+        elif self._speech_active:
+            self._quiet_chunks += 1
+            if self._quiet_chunks >= self._silence_chunks_needed:
+                # 说完了：结束点回退到"最后一段响的 chunk 结尾"，不把安静的
+                # 尾巴也算进去。
+                speech_end_abs = end_abs - self._chunk_bytes * (self._quiet_chunks - 1)
+                self._emit_utterance(self._speech_start_abs, speech_end_abs)
+                self._speech_active = False
+                self._quiet_chunks = 0
+
+    def _emit_utterance(self, start_abs, end_abs):
+        base = self._total - len(self._buffer)
+        lo = max(0, start_abs - base)
+        hi = min(len(self._buffer), end_abs - base)
+        if hi <= lo:
+            return
+        segment = bytes(self._buffer[lo:hi])
+        dur = len(segment) / self._bytes_per_sample / self.sample_rate
+        print(f"[流式监听] 捕捉到一段语音，时长 {dur:.2f}s")
+        self._utterance_queue.put(segment)
+
+
+# ╔══════════════════════════════════════════════╗
 # ║               行为引擎                        ║
 # ╚══════════════════════════════════════════════╝
 
@@ -640,9 +822,6 @@ class PuppyEngine:
         self.touch_pressed = False
         self.touch_press_start = 0
 
-        # 语音唤醒
-        self.last_volume_poll = 0
-
         # 主循环计数（用于轮流轮询 + 心跳打印）
         self.tick_count = 0
 
@@ -670,11 +849,19 @@ class PuppyEngine:
 
         ensure_audio_server()
 
+        # 语音流式监听：先在 host 端把 TCP 监听起来，再告诉 StackChan 开始
+        # 推流过来——顺序不能反，不然 StackChan 连过来的时候 host 这边端口
+        # 还没起来，第一次连接会失败（好在后台任务本身会自动重试，不是致命
+        # 问题，但先起监听更干净）。
+        self.mic_stream = MicStream()
+        self.mic_stream.start()
+        api_get(f"/stream?port={STREAM_PORT}")
+
         print("[引擎] 小狗行为引擎 v4 启动！")
         print(f"[引擎] 当前状态: {self.state.value}")
         print("[引擎] 轻点头顶 → 扫描找人")
         print("[引擎] 长按头顶(1秒) → 兴奋")
-        print(f"[引擎] 音量突增 (rms >= {VOLUME_RMS_THRESHOLD}) → 扫描找人 → 好奇聆听 → 思考 → 回应")
+        print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应")
         print("[引擎] Ctrl+C 退出\n")
 
     # ---------- 状态转移 ----------
@@ -885,31 +1072,25 @@ class PuppyEngine:
         return self._rich_transcription_postprocess(res[0]["text"]).strip()
 
     def check_voice_wake(self):
-        """轮询 /volume；音量超过阈值直接扫描找人→开心→进入好奇开始问题录音
-        （不再做单独的唤醒词校验录音——是不是噪音由 run_conversation_turn()
-        里的识别结果是否为空来判断）。返回 True 表示这次 tick 已经被这套流程占用。"""
-        now = time.time()
-        if now - self.last_volume_poll < VOLUME_POLL_SEC:
-            return False
-        self.last_volume_poll = now
-
-        vol = get_volume()
-        if vol is None:
-            return False
-        rms = vol.get("rms", 0)
-        print(f"[唤醒] rms={rms:.0f} (阈值={VOLUME_RMS_THRESHOLD})")
-        if rms < VOLUME_RMS_THRESHOLD:
+        """检查后台流式监听（MicStream）有没有捕捉到一段完整的语音——不需要
+        发任何 HTTP 请求，纯内存队列查询，所以这个方法可以每个 tick 都调用，
+        不用像旧的 /volume 轮询那样节流。抓到语音就直接扫描找人→开心→跑完
+        对话链路的思考/应答部分：不再需要像以前那样另外进 CURIOUS 状态录一次
+        音——流式监听本身就一直在录，捕捉到的这段音频就是用户刚刚说的话。
+        返回 True 表示这次 tick 已经被这套流程占用。"""
+        segment = self.mic_stream.take_utterance()
+        if segment is None:
             return False
 
-        print(f"[唤醒] 音量突增 (rms={rms:.0f})，扫描找人...")
+        dur = len(segment) / 2 / self.mic_stream.sample_rate
+        print(f"[唤醒] 捕捉到语音段（{dur:.2f}s），扫描找人...")
         self.record_interaction()
         if self.scan_for_face():
             self.enter_happy()
-            time.sleep(0.3)
-            self.run_conversation_turn()
+            self.run_conversation_turn(segment)
         return True
 
-    def run_conversation_turn(self):
+    def run_conversation_turn(self, pcm_bytes):
         """run_conversation_turn() 内部涉及好几层网络调用（DeepSeek、edge-tts、
         StackChan 的 HTTP 接口），任何一层偶尔抛出的未预料异常（比如 DeepSeek
         返回了不含 choices 字段的响应体）以前都不会被 run() 主循环之外的任何
@@ -918,9 +1099,9 @@ class PuppyEngine:
         失灵，表现出来就是"只有第一次对话能成功，后续再也不触发"。这里包一层
         try/except 确保对话链路里出的任何问题都只是这一轮对话失败、退回安全
         状态，不会打死整个引擎；finally 里按用户要求打印一行确认状态机确实
-        恢复了、下一轮 tick 会继续轮询 /volume。"""
+        恢复了、下一轮 tick 会继续检查流式监听。"""
         try:
-            self._run_conversation_turn_body()
+            self._run_conversation_turn_body(pcm_bytes)
         except Exception as e:
             print(f"[对话] [异常] run_conversation_turn 出错，回退到安全状态: {e!r}")
             if self.face_detected:
@@ -931,15 +1112,17 @@ class PuppyEngine:
             # 保证整轮对话结束后灯一定是关的，不依赖某个具体分支有没有记得关——
             # 万一中间哪一步在开灯之后、关灯之前抛了异常，这里兜底收尾。
             set_led(off=True)
-            print(f"[对话] 对话结束，回到状态={self.state.value}，恢复音量监听")
+            print(f"[对话] 对话结束，回到状态={self.state.value}，恢复流式监听")
 
-    def _run_conversation_turn_body(self):
-        """完整的一次语音交互：好奇录音 → 思考(STT+LLM) → 按意图四路分支应对。
+    def _run_conversation_turn_body(self, pcm_bytes):
+        """完整的一次语音交互：好奇 → 思考(STT+LLM) → 按意图四路分支应对。
         全程用 track_ok 记录"这轮对话期间人脸追踪是否一直成功"，成功的话结束
-        后就不需要再重新 scan_for_face() 一次——详见 _settle_happy()。"""
+        后就不需要再重新 scan_for_face() 一次——详见 _settle_happy()。要说的话
+        已经在 pcm_bytes 里了（后台流式监听 MicStream 捕捉到的完整语音段），
+        这里不需要再另外录一次音。"""
         track_ok = True
 
-        # 音量突增触发后先闪两下白灯再常亮，跟切好奇表情同步——灯光比表情变化
+        # 语音突增触发后先闪两下白灯再常亮，跟切好奇表情同步——灯光比表情变化
         # 更显眼，让用户第一时间意识到小狗有反应了。闪烁=开→关→开（两次
         # "开"调用中间夹一次"关"），最后停在常亮状态。
         set_led(255, 255, 255)
@@ -949,41 +1132,15 @@ class PuppyEngine:
         set_led(255, 255, 255)
 
         self.transition(State.CURIOUS)
-        # 两阶段录音：先切好奇表情让用户知道小狗注意到了，固定等待
-        # CURIOUS_PRE_RECORD_DELAY_SEC 给一个反应缓冲，再真正开始录音——之前
-        # 进 CURIOUS 后立刻开录（中间还夹了一次人脸追踪的网络往返，耗时不固定），
-        # 经常在用户反应过来、开口说完整句话之前就把开头吃掉了，只录到半句话。
-        # 这里不在开录前做人脸追踪，就是为了让"表情切换→开始录音"之间的等待
-        # 是固定可预期的 CURIOUS_PRE_RECORD_DELAY_SEC 秒，不被追踪请求的耗时
-        # 拖长；追踪挪到录音结束后（不影响开录时机）做一次，具体在下面。
-        time.sleep(CURIOUS_PRE_RECORD_DELAY_SEC)
-
-        # 开始录音时切成绿灯，示意"可以说话了"；屏幕上同时显示麦克风图标，
-        # 表示小狗在听。dur 只是兜底上限（避免下面的显式清空请求万一丢了导致
-        # 卡住），真正的消失时机是下面进 THINKING 前的显式 set_subtitle("")。
-        set_led(0, 255, 0)
-        set_subtitle("🎤", dur_ms=SUBTITLE_DUR_MS)
-        print("[对话] 录音中...")
-        wav_bytes = record_audio(CURIOUS_RECORD_SECONDS)
-        if not wav_bytes:
-            print("[对话] 录音失败")
-            set_led(off=True)
-            set_subtitle("")
-            self._settle_happy(track_ok)
-            return
-
-        # CURIOUS 整个持续时间都在阻塞式地调 /record，StackChan 的 WebServer
-        # 是单线程的，这期间无法响应 /camera，所以人脸追踪放在录音刚结束、
-        # 进 THINKING 之前做一次，保证每轮对话至少有一次追踪判断。
+        # 趁着还在好奇状态顺手做一次人脸追踪——录音已经不需要等了（内容早就
+        # 在 pcm_bytes 里），这里纯粹是让好奇表情下有个实际动作，同时保证每轮
+        # 对话至少有一次追踪判断。
         if not self.track_face_once():
             track_ok = False
 
         set_led(off=True)
-        # 语音输入到这里才算确定结束（即将进入思考），麦克风图标字幕在这一刻
-        # 清空——不再靠录音时长倒推的定时器，是真正跟"结束"这个事件对齐的
-        # 显式调用。
-        set_subtitle("")
         self.transition(State.THINKING)
+        wav_bytes = pcm_to_wav_bytes(pcm_bytes, sample_rate=self.mic_stream.sample_rate)
         user_text = self.transcribe(wav_bytes, "question.wav")
         print(f"[对话] 识别结果: 「{user_text}」")
         if not user_text:
@@ -1117,9 +1274,11 @@ class PuppyEngine:
         self.tick_count += 1
         print(f"[循环] tick #{self.tick_count}, 状态={self.state.value}")
 
-        # 触摸/音量(语音唤醒)/人脸 三者轮流，每一轮 tick 只发起其中一种会打
-        # HTTP 请求的轮询，避免同一轮里对 StackChan 连打三个请求。
-        poll_slot = self.tick_count % 3   # 0=触摸 1=音量 2=人脸
+        # 触摸/人脸两者轮流，每一轮 tick 只发起其中一种会打 HTTP 请求的轮询，
+        # 避免同一轮里对 StackChan 连打好几个请求。语音唤醒不算在这个轮转
+        # 里——check_voice_wake() 现在只是查一下后台流式监听线程的内存队列，
+        # 不发请求，每个 tick 都查一次没有额外开销，还能让语音触发反应更快。
+        poll_slot = self.tick_count % 2   # 0=触摸 1=人脸
 
         # --- 触摸（最高优先级）---
         touch = self.check_touch() if poll_slot == 0 else None
@@ -1138,15 +1297,15 @@ class PuppyEngine:
                 print("[触发] 短按（已在开心，跳过扫描）")
             return
 
-        # --- 语音唤醒（好奇/思考期间已经在处理语音了，不重复轮询）---
-        if poll_slot == 1 and self.state not in (State.CURIOUS, State.THINKING):
+        # --- 语音唤醒（好奇/思考期间已经在处理语音了，不重复检查）---
+        if self.state not in (State.CURIOUS, State.THINKING):
             if self.check_voice_wake():
                 return
 
         # --- 状态内行为 ---
-        # 人脸检测（会发 /camera 请求）只在轮到 poll_slot==2 时真正执行；
+        # 人脸检测（会发 /camera 请求）只在轮到 poll_slot==1 时真正执行；
         # 计时器类判断（空闲/困倦/兴奋持续时间）不发请求，每轮都可以正常判断。
-        do_face_check = (poll_slot == 2)
+        do_face_check = (poll_slot == 1)
 
         if self.state == State.IDLE:
             if do_face_check:
@@ -1224,6 +1383,13 @@ class PuppyEngine:
         except KeyboardInterrupt:
             print("\n[引擎] Ctrl+C，归位中...")
             play_idle_animation()
+        finally:
+            # 不管是正常 Ctrl+C 退出还是主循环里跑出了没接住的异常，都要把
+            # TCP 监听关掉、告诉 StackChan 别再往这边推流了——不然进程都退出
+            # 了，固件那边还在无意义地反复尝试重连一个没人听的端口。
+            print("[引擎] 清理流式监听...")
+            self.mic_stream.stop()
+            api_get("/stream?stop=1", timeout=3)
             print("[引擎] 已退出。")
 
 
