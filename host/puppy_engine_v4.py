@@ -73,7 +73,13 @@ IDLE_TO_SLEEPY_SEC = 180
 SLEEPY_TO_PRIVACY_SEC = 600
 FACE_LOST_GRACE_SEC = 20        # 人脸消失后等多久才离开开心
 EXCITED_DURATION_SEC = 6
-LONG_PRESS_THRESHOLD = 1.0      # 按住超过这个时间=长按
+
+# --- 触摸触发 ---
+# 隐私状态太容易被误触退出（之前是短按就退出，很容易被不小心碰一下打断）。
+# 现在只保留隐私这一条触摸触发路径，而且要求长按满 3 秒才生效，其它状态
+# 原来的触摸触发（短按→扫描找人、长按1秒→兴奋）暂时先关掉——见 tick() 里
+# 触摸处理那一段的注释。
+PRIVACY_EXIT_HOLD_SEC = 3.0
 
 # --- 面部追踪 ---
 FACE_CHECK_INTERVAL_SEC = 3.0
@@ -327,6 +333,11 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"老�
 - 关键词必须来自你自己想清楚的那句大白话，不能是老大问题原句里出现的词的
   简单复读。如果发现自己选的词和问题原句几乎一样，说明大概率是偷懒没有
   真的回答，回去重想。
+- **每一个关键词本身必须是单个词/短语（1-3个字为主），绝对不能是完整的
+  主谓宾句子**（比如不能写"老大叫我"这种，应该拆成"老大"和"叫"两个独立
+  的词，各占 keywords 数组里的一项）。你说的每一句话，不管是简单回应还是
+  复杂回应，都只能通过关键词表达，不能输出完整语句——这是这只小狗表达
+  自己的唯一方式，类似 AAC（辅助沟通）设备，不是在写一句正常的话。
 - 优先从下面的词库里选，但不局限于词库，需要时可以用词库外的词（权重从高
   到低排列）：
   需求词（权重最高）：外面、出门、玩、水、零食、飞盘、球球、拔河、罐罐、
@@ -1026,13 +1037,20 @@ class PuppyEngine:
 
         print("[引擎] 小狗行为引擎 v4 启动！")
         print(f"[引擎] 当前状态: {self.state.value}")
-        print("[引擎] 轻点头顶 → 扫描找人")
-        print("[引擎] 长按头顶(1秒) → 兴奋")
+        print(f"[引擎] （触摸触发暂时只保留隐私状态退出：长按满 {PRIVACY_EXIT_HOLD_SEC}s，"
+              f"其它状态的短按/长按触摸触发已临时关闭）")
         print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应")
         print("[引擎] Ctrl+C 退出\n")
 
     # ---------- 状态转移 ----------
 
+    # 重要：所有进入 HAPPY 的路径必须走 enter_happy()，不要直接调
+    # transition(State.HAPPY)。transition() 每次都会重新播放完整的开心动画
+    # （摇头等），只有 enter_happy() 会检查 session_active——同一次来访期间
+    # 只在第一次打招呼时播完整动画，之后人脸短暂丢失又重新检测到、或者对话
+    # 间隙重新确认人脸在场，都应该静默切到/停在 HAPPY，不能再触发一次完整
+    # 动画打断正在进行的事情。全仓库搜索 `self.transition(State.HAPPY)` 的
+    # 结果应该只有 enter_happy() 自己内部这一处调用。
     def transition(self, new_state):
         old = self.state
         if old == new_state:
@@ -1202,7 +1220,10 @@ class PuppyEngine:
     # ---------- 触摸检测 ----------
 
     def check_touch(self):
-        """短按 vs 长按检测。返回 'short_tap' / 'long_press' / None。"""
+        """检测触摸松开，返回这次按住的秒数（float）；没有发生松开动作时
+        返回 None。不再在这里分类"短按/长按"——调用方（tick()）自己按需要
+        的阈值判断，目前只有隐私状态退出这一处在用（长按满
+        PRIVACY_EXIT_HOLD_SEC 才生效）。"""
         now = time.time()
         if now - self.last_touch_poll < TOUCH_POLL_SEC:
             return None
@@ -1220,19 +1241,14 @@ class PuppyEngine:
             print("[触摸] 按下...")
 
         # 松开瞬间：计算持续时间
-        result = None
+        duration = None
         if not pressed and self.touch_pressed:
             duration = now - self.touch_press_start
-            if duration >= LONG_PRESS_THRESHOLD:
-                print(f"[触摸] 长按松开（{duration:.1f}s）")
-                result = "long_press"
-            else:
-                print(f"[触摸] 短按松开（{duration:.1f}s）")
-                result = "short_tap"
+            print(f"[触摸] 松开（{duration:.1f}s）")
             self.record_interaction()
 
         self.touch_pressed = pressed
-        return result
+        return duration
 
     # ---------- 语音唤醒 + 完整对话链路 ----------
 
@@ -1535,20 +1551,19 @@ class PuppyEngine:
         poll_slot = self.tick_count % 2   # 0=触摸 1=人脸
 
         # --- 触摸（最高优先级）---
-        touch = self.check_touch() if poll_slot == 0 else None
-
-        if touch == "long_press":
-            print("[触发] 长按 → 兴奋！")
-            self.transition(State.EXCITED)
-            return
-
-        if touch == "short_tap":
-            if self.state in (State.IDLE, State.SLEEPY, State.PRIVACY):
-                print("[触发] 短按 → 扫描找人")
+        # 其它状态的触摸触发条件暂时先取消（原来的短按→扫描找人、长按1秒→
+        # 兴奋），只留隐私状态这一条退出路径：长按满 PRIVACY_EXIT_HOLD_SEC(3s)
+        # 才生效，用来解决隐私状态太容易被误触退出的问题（之前短按就退出，
+        # 不小心碰一下就会打断）。
+        touch_hold_sec = self.check_touch() if poll_slot == 0 else None
+        if touch_hold_sec is not None and self.state == State.PRIVACY:
+            if touch_hold_sec >= PRIVACY_EXIT_HOLD_SEC:
+                print(f"[触发] 长按 {touch_hold_sec:.1f}s → 退出隐私")
                 if self.scan_for_face():
                     self.enter_happy()
-            elif self.state == State.HAPPY:
-                print("[触发] 短按（已在开心，跳过扫描）")
+            else:
+                print(f"[触发] 隐私状态下按了 {touch_hold_sec:.1f}s，不足 "
+                      f"{PRIVACY_EXIT_HOLD_SEC}s，忽略")
             return
 
         # --- 语音唤醒（好奇/思考期间已经在处理语音了，不重复检查）---
