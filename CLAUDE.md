@@ -118,10 +118,16 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   以及仍保留但已不用的 `/record`/`/volume`）现在通过 `g_i2sMutex` +
   `g_streamPauseForOtherAudio` 协调——没有这个协调，推流任务会在 TTS 播放
   期间的下一次循环（~100ms 后）就把麦克风抢回去，把播放打断。
-- **`reorder_keywords_nouns_first()` 用 `jieba.posseg` 判断名词/动词**有个
-  已知局限：jieba 词典把"散步""跑步""唱歌"这类双字动作词标成名词（不是
-  动词），这几个词会被排进"名词组"而不是预期的"动词组"——是词典本身的收录
-  方式，不是排序逻辑写错了。
+- **关键词顺序完全由 `SYSTEM_PROMPT` 约束 LLM 直接输出，host 端不再做任何
+  后处理重排**（`puppy_engine_v4.py` 的 `_run_conversation_turn_body()`）。
+  早期版本用 `jieba.posseg` 判断名词/动词、机械把"名词全部排到动词前面"
+  （`reorder_keywords_nouns_first()`，已删除），后来改成基于犬类 AAC 按钮的
+  固定词库（枢纽词/需求词/时间词/对象词/地点词/状态词/情感词/动作词）+
+  "最迫切的词放最前、指代对象或地点放前面"等提示词规则后，这套机械重排会
+  破坏 LLM 自己给出的有意义顺序（比如"小狗 想 零食"里"想"必须紧跟在
+  "小狗"后面，按词性重排会拆散这个组合），所以直接信任 prompt 产出的顺序。
+  以后如果关键词顺序又出现问题，先检查 `SYSTEM_PROMPT` 里的规则描述/示例
+  够不够清楚，而不是想着在 host 端加后处理。
 
 ## 编译 / 烧录 / 验证流程
 本机的 `arduino-cli` 不在 PATH 里，可执行文件在

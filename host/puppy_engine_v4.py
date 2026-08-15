@@ -186,16 +186,31 @@ BUTTON_PRESS_MS = 200            # 每个关键词播放前，按钮"按下"状�
 # --- 字幕：语音段识别出结果后，把识别到的文字显示出来，方便用户确认输入
 #     内容，一直保留到 LLM 回复出来、即将执行下一步动作时才清空。改成流式
 #     监听（MicStream）之后不再有单独的"录音中"状态可以配麦克风图标——语音
-#     是持续后台捕捉的，触发的时候内容已经录完了，所以只剩这一段用途。注意
-#     SenseVoice 是整段音频喂进去才能出结果，不是逐字流式识别，所以这里做不
-#     到"边说边出字幕"，只能做到"识别完成的那一刻立刻显示"——/stream 虽然
-#     现在是连续推流了，但那只解决了"音频有没有连续送到 host"，逐字实时字幕
-#     还需要 SenseVoice 本身支持增量/流式推理，这里先不做。qa_complex 播报
-#     关键词期间用的是爪印按钮（见 speak_keywords()），不是字幕；其它状态只
-#     切表情，不显示文字。 ---
+#     是持续后台捕捉的，触发的时候内容已经录完了，所以只剩这一段用途。
+#     SenseVoice 不是逐字流式识别模型，做不到真正的"边说边一个字一个字往外
+#     蹦"，但退而求其次可以做到：只要用户还在说（MicStream 判定"说完"之前），
+#     就每隔一小段时间把目前为止录到的全部内容整段重新识别一次，用新结果
+#     整体替换掉字幕——旧结果如果因为当时音频不够长而识别错/识别漏，随着
+#     音频变长、后面几次重新识别通常会自动"纠正"过来，效果上就是用户能看到
+#     字幕跟着说话大致同步出现、偶尔还会自我修正，而不需要真正的流式模型。
+#     见 PARTIAL_TRANSCRIBE_* 系列参数和 MicStream.peek_partial()/
+#     PuppyEngine._partial_transcribe_loop()。qa_complex 播报关键词期间用的
+#     是爪印按钮（见 speak_keywords()），不是字幕；其它状态只切表情，不显示
+#     文字。 ---
 SUBTITLE_DUR_MS = 15000  # /speech 的 dur 参数：字幕展示上限（两个场景共用）。
                           # 正常情况下都会有显式的清空调用，这个只是兜底上限，
                           # 避免万一清空请求丢了导致字幕卡住不消失
+
+# --- 实时（增量）字幕 ---
+PARTIAL_TRANSCRIBE_ENABLED = True
+PARTIAL_TRANSCRIBE_INTERVAL_SEC = 1.2   # 两次增量识别之间至少间隔这么久——说话
+                                         # 过程中不停地对整段音频重新做一次完整
+                                         # 识别，CPU 是有真实开销的，间隔太短会
+                                         # 跟真正说完后那次"官方"识别抢 CPU，
+                                         # 反而拖慢最终应答。
+PARTIAL_TRANSCRIBE_MIN_NEW_SEC = 0.8    # 距上次增量识别，新增音频不足这么多秒
+                                         # 就跳过这一轮，没必要为了多几百毫秒
+                                         # 数据就整段重新识别一次。
 
 # --- 语音识别 (FunASR SenseVoice) ---
 # 从 faster-whisper 切换过来的原因：不再需要本地维护一份模型文件路径，
@@ -263,40 +278,65 @@ class State(Enum):
 # ║          LLM 意图分类 system prompt           ║
 # ╚══════════════════════════════════════════════╝
 
-SYSTEM_PROMPT = """你是一只可爱的电子小狗，名叫 StackChan。
-你需要理解用户说的话，然后在回答末尾用 JSON 标注意图和关键词。
+SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"老大"。
+你家里的朋友：一只三花小猫，名字叫"咪咪"。
+你在公园认识的朋友：萨摩耶"耶耶"、边牧"边边"、田园犬"大黄"。
+
+你需要理解老大说的话，用 JSON 标注意图和关键词回应。
 
 规则：
-1. 先用一句简短可爱的话回应用户（像小狗一样热情）
-2. 然后输出 JSON，格式如下：
-
-如果是可以用是/否回答的问题：
+1. 是非问题（可以用"是/否"回答的问题）：不用关键词，直接输出，不要输出别的文字：
 {"type": "qa_simple", "answer": "yes" 或 "no"}
 
-如果是开放式问题，提取回答中最重要的3个关键词（只用名词和动词，不要语气词、助词、形容词）：
-{"type": "qa_complex", "keywords": ["关键词1", "关键词2", "关键词3"]}
-
-如果用户在表扬你：
+2. 老大在表扬你：直接输出，不要输出别的文字：
 {"type": "praise"}
 
-如果用户在责备你：
+3. 老大在责备你：直接输出，不要输出别的文字：
 {"type": "scold"}
 
-其他情况，也提取3个关键词（只用名词和动词，不要语气词、助词、形容词）：
-{"type": "other", "keywords": ["关键词1", "关键词2", "关键词3"]}
+4. 开放式问题（qa_complex）或其它情况（other）：先输出 2-4 个关键词（空格分隔），
+再换行输出 JSON：
+{"type": "qa_complex", "keywords": [...]}  或  {"type": "other", "keywords": [...]}
+
+第 4 条的关键词选择规则：
+- 优先从下面的词库里选，但不局限于词库，需要时可以用词库外的词：
+  枢纽词（优先级最高，可以和任何词搭配）：想、要、来、好、不要
+  需求词：外面、出门、玩、水、零食、飞盘、球球、拔河、罐罐、牛奶、睡觉、尿尿、噗噗
+  时间词：今天、明天、现在、刚才、结束
+  对象词：老大、小狗、小猫、咪咪、耶耶、边边、大黄
+  地点词：外面、厨房、阳台、房间
+  状态词：开心、怕怕、累、饿、痛痛
+  情感词：love you、爱你
+  动作词：打架、风
+- 每次 2-4 个词，根据表达需要灵活选：简单回应用 2 个，需要更多信息用 3-4 个。
+- 不用动名词组合（说"飞盘"，不说"玩飞盘"）。
+- 不要重复意思相近的动词。
+- 最迫切/最重要的词放最前面。
+- 指代对象（老大、咪咪等）或地点（外面、厨房）放在前面。
+- 允许重复同一个词表达强烈情感，比如"外面 外面 外面"。
+- 特别强烈的需求，用"小狗 + 想/要 + 具体需求"这种模式（小狗自己的名字加想/要放最前面）。
 
 示例：
-用户: 今天天气怎么样？
-今天天气超好，适合散步！
-{"type": "qa_complex", "keywords": ["天气", "好", "散步"]}
+用户：今天天气怎么样？
+外面 好 风
+{"type": "qa_complex", "keywords": ["外面", "好", "风"]}
 
-用户: 你吃饭了吗？
-还没吃呢！
-{"type": "qa_simple", "answer": "no"}
+用户：你想吃什么？
+小狗 想 零食 罐罐
+{"type": "qa_complex", "keywords": ["小狗", "想", "零食", "罐罐"]}
 
-用户: 你真棒！
-谢谢夸奖！
-{"type": "praise"}"""
+用户：咪咪在哪里？
+咪咪 厨房
+{"type": "qa_complex", "keywords": ["咪咪", "厨房"]}
+
+用户：你想出去玩吗？
+{"type": "qa_simple", "answer": "yes"}
+
+用户：你真棒！
+{"type": "praise"}
+
+用户：你把鞋子咬坏了！
+{"type": "scold"}"""
 
 
 # ╔══════════════════════════════════════════════╗
@@ -525,22 +565,6 @@ def tts_to_wav(text, out_stem):
         return None
 
 
-def reorder_keywords_nouns_first(keywords):
-    """把 LLM 提取的关键词重排成"名词全部在前、动词全部在后"，组内保持原有
-    相对顺序（Python sorted() 是稳定排序）。用 jieba 词性标注判断每个关键词
-    是名词还是动词：取该词切分后第一个分词的词性，只要不是以 'v' 开头就归为
-    名词一类——SYSTEM_PROMPT 里已经要求关键词只能是名词或动词，不需要处理
-    第三种词性。"""
-    import jieba.posseg as pseg
-
-    def is_verb(word):
-        for _, flag in pseg.cut(word):
-            return flag.startswith("v")
-        return False
-
-    return sorted(keywords, key=is_verb)
-
-
 def ask_llm(user_text, api_key):
     """调用 DeepSeek，返回 (reply_text, intent, parsed_data)。失败时 intent='other'。"""
     if not api_key:
@@ -692,6 +716,22 @@ class MicStream:
                 break
         return segment
 
+    def peek_partial(self):
+        """跟 take_utterance() 不同：不等"判定说完"，只要当前正处于"检测到在
+        说话"这个状态，就把从开始说话到现在收到的全部音频原样吐出去（还在
+        继续增长，可以反复调用）；不在说话状态时返回 None。给增量字幕用。
+
+        这个方法从主线程（PuppyEngine 的后台增量识别线程）调用，跟 accept
+        线程之间不像 take_utterance() 靠 _utterance_queue 那样有专门的线程安全
+        交接。对一段仅用于展示的字幕来说这个折衷可以接受：最坏情况是读到的
+        切片跟 _speech_active 标志之间差了一两帧（比如刚好在这一刻判定说完
+        了），不会崩溃或者数据错乱，下一次调用就会用最新状态纠正过来。"""
+        if not self._speech_active:
+            return None
+        base = self._total - len(self._buffer)
+        lo = max(0, self._speech_start_abs - base)
+        return bytes(self._buffer[lo:])
+
     # ---------- 内部：接收 + 缓冲 + VAD ----------
 
     def _accept_loop(self):
@@ -839,6 +879,11 @@ class PuppyEngine:
             device=SENSEVOICE_DEVICE,
             disable_update=True,
         )
+        # 增量字幕线程和正式对话链路都会调用 transcribe()，两者共用同一个
+        # AutoModel 实例——ONNX/PyTorch 推理会话在 CPU 上不保证能安全并发调用，
+        # 用这把锁把两边的 generate() 调用互斥掉，退化成"谁先谁跑"而不是真的
+        # 同时跑，避免偶发的资源竞争问题。
+        self._asr_lock = threading.Lock()
         print("[引擎] SenseVoice 就绪")
 
         self.deepseek_api_key = load_deepseek_api_key()
@@ -856,6 +901,16 @@ class PuppyEngine:
         self.mic_stream = MicStream()
         self.mic_stream.start()
         api_get(f"/stream?port={STREAM_PORT}")
+
+        # 增量字幕：用户还在说话期间，周期性地把目前录到的内容整段重新识别
+        # 一次，见 _partial_transcribe_loop()。独立线程运行，不占用主 tick()
+        # 循环的时间，也不会拖慢触摸/人脸轮询。
+        self._running = True
+        if PARTIAL_TRANSCRIBE_ENABLED:
+            self._partial_transcribe_thread = threading.Thread(
+                target=self._partial_transcribe_loop, daemon=True
+            )
+            self._partial_transcribe_thread.start()
 
         print("[引擎] 小狗行为引擎 v4 启动！")
         print(f"[引擎] 当前状态: {self.state.value}")
@@ -1064,12 +1119,47 @@ class PuppyEngine:
         静音输入上瞎编一段结果出来。"""
         wav_path = AUDIO_DIR / filename
         wav_path.write_bytes(wav_bytes)
-        res = self.asr_model.generate(
-            input=str(wav_path), language=SENSEVOICE_LANGUAGE, use_itn=True,
-        )
+        with self._asr_lock:
+            res = self.asr_model.generate(
+                input=str(wav_path), language=SENSEVOICE_LANGUAGE, use_itn=True,
+            )
         if not res or not res[0].get("text"):
             return ""
         return self._rich_transcription_postprocess(res[0]["text"]).strip()
+
+    def _partial_transcribe_loop(self):
+        """后台线程：只要 MicStream 判定用户"正在说话"（peek_partial() 不是
+        None），就每隔 PARTIAL_TRANSCRIBE_INTERVAL_SEC 把目前为止录到的内容
+        整段重新识别一次并更新字幕，让用户不用等到"说完 + 正式识别跑完"才
+        第一次看到文字。一旦 MicStream 判定说完（peek_partial() 变回
+        None，进入 scan_for_face/CURIOUS/THINKING 那条正式链路），这里立刻
+        停手不再发起新的识别——跟 run_conversation_turn() 里的正式识别共用
+        同一个模型对象，靠 self._asr_lock 互斥，不会真的并发调用，最多是
+        谁先谁跑、后来的等一下。"""
+        last_len = 0
+        last_call_time = 0.0
+        while self._running:
+            partial = self.mic_stream.peek_partial()
+            if partial is None:
+                last_len = 0
+                time.sleep(0.2)
+                continue
+
+            now = time.time()
+            new_seconds = (len(partial) - last_len) / 2 / self.mic_stream.sample_rate
+            if (now - last_call_time < PARTIAL_TRANSCRIBE_INTERVAL_SEC
+                    or new_seconds < PARTIAL_TRANSCRIBE_MIN_NEW_SEC):
+                time.sleep(0.15)
+                continue
+
+            last_call_time = now
+            last_len = len(partial)
+            wav_bytes = pcm_to_wav_bytes(partial, sample_rate=self.mic_stream.sample_rate)
+            text = self.transcribe(wav_bytes, "partial.wav")
+            # 识别这几百毫秒里用户可能已经说完了（甚至正式链路已经接管），
+            # 这种"过期"结果不再展示，避免字幕在正式流程接管之后又被拽回来。
+            if text and self.mic_stream.peek_partial() is not None:
+                set_subtitle(text, dur_ms=SUBTITLE_DUR_MS)
 
     def check_voice_wake(self):
         """检查后台流式监听（MicStream）有没有捕捉到一段完整的语音——不需要
@@ -1083,9 +1173,22 @@ class PuppyEngine:
             return False
 
         dur = len(segment) / 2 / self.mic_stream.sample_rate
-        print(f"[唤醒] 捕捉到语音段（{dur:.2f}s），扫描找人...")
+        print(f"[唤醒] 捕捉到语音段（{dur:.2f}s）")
         self.record_interaction()
-        if self.scan_for_face():
+
+        if self.face_detected:
+            # 最近一次人脸检测/追踪已经确认人还在场——HAPPY 状态下
+            # retrack_face() 每 FACE_RETRACK_INTERVAL_SEC 秒都在刷新这个
+            # 状态，对话进行中的后续几轮问答基本都会走这条分支。没必要每问
+            # 一句都重新转头扫描一遍：scan_for_face() 光是第一个位置就要等
+            # SCAN_PAUSE(1s)，没扫到还要接着转，这段时间全部堆在"思考"前面，
+            # 是可以直接省掉的延迟。就算这期间人其实已经走开了也不要紧：
+            # 马上进入的 CURIOUS 阶段 track_face_once() 会立刻再确认一次，
+            # 追踪失败的话 _settle_happy() 收尾时还是会补上一次完整扫描。
+            print("[唤醒] 人脸已确认在场，跳过扫描，直接开始对话")
+            self.enter_happy()
+            self.run_conversation_turn(segment)
+        elif self.scan_for_face():
             self.enter_happy()
             self.run_conversation_turn(segment)
         return True
@@ -1197,10 +1300,16 @@ class PuppyEngine:
             print("[对话] 责备 → 抱歉")
             self.transition(State.SORRY)
 
-        else:  # qa_complex / other：逐个念关键词
+        else:  # qa_complex / other：逐个念关键词。数量是 2-4 个，不固定，
+               # 顺序（迫切程度/指代对象和地点在前等）由 SYSTEM_PROMPT 里的
+               # 规则直接约束 LLM 输出，这里不再做任何重排——早期版本用
+               # jieba 词性标注做过"名词全部排到动词前面"的后处理，但新
+               # 关键词词库里状态词/情感词等不是单纯名词动词二分，而且现在
+               # 顺序本身就带着语义（比如"小狗 想 零食"里"想"必须紧跟在
+               # "小狗"后面），机械按词性重排反而会破坏这个顺序，所以这版
+               # 直接信任 LLM 给出的顺序。
             keywords = data.get("keywords") or [reply_text[:6]]
-            keywords = reorder_keywords_nouns_first(keywords)
-            print(f"[对话] 复杂回应，播报关键词（名词优先）: {keywords}")
+            print(f"[对话] 复杂回应，播报关键词: {keywords}")
             self._settle_happy(track_ok)
             self.speak_keywords(keywords)
 
@@ -1388,6 +1497,7 @@ class PuppyEngine:
             # TCP 监听关掉、告诉 StackChan 别再往这边推流了——不然进程都退出
             # 了，固件那边还在无意义地反复尝试重连一个没人听的端口。
             print("[引擎] 清理流式监听...")
+            self._running = False
             self.mic_stream.stop()
             api_get("/stream?stop=1", timeout=3)
             print("[引擎] 已退出。")
