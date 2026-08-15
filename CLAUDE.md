@@ -18,8 +18,11 @@
 
 ## HTTP API
 - `/face?expr=<表情>` — 切换表情（neutral/happy/sleepy/curious/sorry/thinking/excited/privacy）
-- `/servo?yaw=N&pitch=N&speed=N` — 控制舵机
-- `/camera` — 拍照返回 JPEG
+- `/servo?yaw=N&pitch=N&speed=N` — 控制舵机（yaw 越大越向右转，越小越向左转，
+  见下面"人脸追踪方向"）
+- `/camera` — 拍照返回 JPEG。**这是机身正面朝外的摄像头，拍到的是房间/用户，
+  不是屏幕截图**——固件没有截屏接口，没有办法远程看到 LCD 上表情/按钮的实际
+  渲染效果，调表情/UI 只能靠实机肉眼看或者让用户拍照确认。
 - `/touch` — 触摸传感器状态
 - `/play?url=<url>` — 播放 WAV 音频
 - `/record?seconds=N` — 录音（一次性、有限时长；puppy_engine_v4.py 不再用它做语音
@@ -70,10 +73,62 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
 `firmware/host/expr_review.py` 里的 `STEPS`列表维护着每个表情改动后要重点看
 什么，每次改表情视觉效果后都要同步更新对应表情的说明文字。
 
+## 关键词播报按钮（爪印按钮）
+`PuppyFace.h` 里 `BUTTON_*` 一组常量控制的"狗粮碗"形状按钮，`qa_complex`
+逐个念关键词时出现，画在屏幕右下角，形状是椭圆"碗口"叠在圆角矩形"碗身"上。
+- **M5Canvas 没有真正的裁剪/布尔运算 API**，"碗口盖住碗身顶边"这个效果是靠
+  三步模拟出来的：①画碗身描边 ②用背景色实心椭圆把落在碗口范围内的部分擦掉
+  （连碗身的边一起擦）③补画一次碗口描边，让碗口自己的圆周保持完整。以后再
+  遇到"这个形状要盖住那个形状"的需求，可以复用这个"画→擦→补画"套路。
+- **改 `BUTTON_PAW_SCALE`/`BUTTON_PAW_TOE_SPREAD_MUL` 之前必须先数值验证**，
+  不能凭感觉调：爪印由脚掌三角+四个脚趾（带圆角半径）组成，缩放和脚趾间距
+  两个参数一起决定爪印的整体外包络多大；要求是外包络完整落在碗口椭圆内、
+  同时脚趾之间不重叠。写一个小 Python 脚本照抄 `drawPawPrint()` 里的坐标计算
+  逻辑（pad 三角形+沿边叠圆、四个脚趾的局部偏移和半径），采样多个点算出实际
+  外包络再跟椭圆方程比较，比目测/直接改完烧录再看快得多，也更准。
+- **按钮"按一下"动画要跟关键词音频同步播**：`speak_keywords()`
+  （`puppy_engine_v4.py`）里，播放某个关键词前必须提前一步把它的 TTS 合成
+  好（不能等按钮弹起再现合成——edge-tts 网络合成的延迟有几百毫秒到一两秒，
+  会让音频比"放大"动画晚很多才响）。另外**第一个关键词前的按钮动画容易被
+  吞掉**：按钮从隐藏到出现本身也是一段过渡动画（复用同一个
+  `buttonScaleAnim_`），如果出现后立刻触发第一次"按一下"，可能会在出现过渡
+  还没播完时就被打断，视觉上看不出"缩小"这一半——出现后要显式等一小段时间
+  （等于固件那边动画时长）确认已经长到正常大小，再开始第一次按一下。
+
+## 语音唤醒 / 流式监听（MicStream）
+`host/puppy_engine_v4.py` 的语音唤醒不再靠轮询 `/volume` + 触发后另开
+`/record`（两者都是一次性、有限时长的调用，大部分时间设备根本没在"听"）。
+现在是 StackChan 主动通过 `/stream?port=N` 连到 host 常驻监听的 TCP 端口
+持续推 PCM，host 端的 `MicStream` 类维护滚动缓冲区 + 简单 VAD（按
+`STREAM_CHUNK_SECONDS` 分段算 RMS，超过 `STREAM_RMS_THRESHOLD` 记为说话，
+连续 `STREAM_SILENCE_SECONDS` 低于阈值判定说完），说完那一刻直接把这段语音
+从缓冲区切出来，不需要再另外录一次——`check_voice_wake()` 因此变成纯内存
+队列查询，不发 HTTP 请求，可以每个 tick 都调用。
+- **ESP32 的 `WebServer` 是单线程的**（`loop()` 里同步调用
+  `server.handleClient()`）：任何 handler 只要阻塞得久，就会让设备在那段
+  时间内完全无法响应其它请求（表情、舵机、触摸、摄像头全部卡住）。
+  `/stream` 一开始就是这么写的（阻塞到超时或断开），后来发现"常驻推流"这个
+  用法下这几乎等于设备大部分时间都是死的，改成了后台 FreeRTOS 任务（用
+  `xTaskCreatePinnedToCore` 钉在另一个核心上跑，见 `firmware.ino` 的
+  `streamTaskFn()`），HTTP handler 只负责启动/停止这个任务、立刻返回。以后
+  给固件加"需要持续跑一段时间"的新功能，从一开始就该走这个模式，不要直接
+  写成阻塞的 HTTP handler。
+- **麦克风和喇叭共用同一个 I2S 外设**（`startMic()`/`startSpeaker()`
+  互斥，见 `firmware.ino`）：后台推流任务和任何要用喇叭的 handler（`/play`，
+  以及仍保留但已不用的 `/record`/`/volume`）现在通过 `g_i2sMutex` +
+  `g_streamPauseForOtherAudio` 协调——没有这个协调，推流任务会在 TTS 播放
+  期间的下一次循环（~100ms 后）就把麦克风抢回去，把播放打断。
+- **`reorder_keywords_nouns_first()` 用 `jieba.posseg` 判断名词/动词**有个
+  已知局限：jieba 词典把"散步""跑步""唱歌"这类双字动作词标成名词（不是
+  动词），这几个词会被排进"名词组"而不是预期的"动词组"——是词典本身的收录
+  方式，不是排序逻辑写错了。
+
 ## 编译 / 烧录 / 验证流程
+本机的 `arduino-cli` 不在 PATH 里，可执行文件在
+`C:\Users\89823\arduino-cli\arduino-cli.exe`：
 ```
-arduino-cli compile --fqbn m5stack:esp32:m5stack_cores3 firmware
-arduino-cli upload --fqbn m5stack:esp32:m5stack_cores3 --port COM3 firmware
+"C:\Users\89823\arduino-cli\arduino-cli.exe" compile --fqbn m5stack:esp32:m5stack_cores3 firmware
+"C:\Users\89823\arduino-cli\arduino-cli.exe" upload --fqbn m5stack:esp32:m5stack_cores3 --port COM3 firmware
 ```
 本机有一个本地沙盒 HTTP 代理会拦截到设备的请求，验证时需要绕过它（`curl` 加
 `--noproxy '*'`，PowerShell/bash 里也可以先清空 `http_proxy`/`https_proxy`
@@ -97,3 +152,14 @@ arduino-cli upload --fqbn m5stack:esp32:m5stack_cores3 --port COM3 firmware
   git log 里 "Fix root cause of StackChan reboots" 那次提交）——修法是用
   `static` 缓冲区 + `snprintf` 到栈上的定长 char 数组，全程零堆分配。以后新增
   类似"host 端常驻轮询"的接口，从一开始就按这个模式写。
+- **人脸追踪的 yaw 方向符号不确定时不要靠猜，也不要只做小幅度实测**：
+  `track_face_servo()`（`puppy_engine_v4.py`）之前 `FACE_TRACK_YAW_GAIN` 的
+  正负号是没有实机条件下猜的，实际是反的——表现为"回答完之后缓慢往一侧
+  漂移、最终跟丢人脸"，因为每次"修正"其实都在把人脸推得更偏，越修越偏。
+  排查/验证方法：①先查 M5StackChan 库 `motion.h` 里 `lookAtNormalized()` 的
+  文档确认 yaw 符号约定（越大越向右转）；②实机测试要用**大幅度**的单次
+  转动去看人脸在画面里的位置变化方向——小幅度调整量（几十个单位）容易被
+  人体自然晃动的噪声淹没，可能测出"两个方向调整后都显得更偏"的误导结果；
+  ③最终用真实的比例控制公式连续跑好几轮，看 yaw 是收敛到一个小区间（方向
+  对）还是持续单调跑偏（方向反了），这个方法比单次位移测试更贴近真实运行
+  情况、也不怕被噪声干扰。
