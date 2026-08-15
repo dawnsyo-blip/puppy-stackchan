@@ -15,7 +15,9 @@
  *   GET /home       — center servos
  *   GET /touch      — touch sensor readings
  *   GET /record     — record audio (WAV)
- *   GET /stream     — stream mic PCM to host via TCP
+ *   GET /stream     — start/stop continuous mic PCM streaming to host via TCP
+ *                     (?port=N to start, ?stop=1 to stop; non-blocking — runs
+ *                     as a background task, see streamTaskFn() below)
  *   GET /play       — play WAV from URL (streaming, up to 2MB/62s)
  *   GET /speech     — display subtitle text
  *   GET /volume     — mic volume level
@@ -27,6 +29,10 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <esp_camera.h>
+#include <mutex>
+#include <atomic>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 // Forward-declared here so PuppyFace.h (included below) can call it from
 // PuppyEar::draw() — the real definition (with the subtitle line-wrapping
@@ -408,6 +414,91 @@ void startSpeaker() {
   }
 }
 
+// ============ Mic streaming (background task) ============
+// /stream used to block the ESP32's single-threaded HTTP server (the same
+// thread that also runs M5StackChan.update() and every other endpoint) for
+// its whole duration — fine for an occasional one-off call, but once the
+// host wants to keep the mic streaming continuously (to replace /volume
+// polling), that blocking meant the whole device would freeze — no face
+// animation, no /servo, no /touch, no /face, nothing — for as long as
+// streaming was active, which would be almost always. Fixed by moving the
+// connect/record/send loop onto its own FreeRTOS task pinned to core 0,
+// away from the main loop() (which the Arduino framework runs on core 1),
+// so the two run in true parallel and the HTTP server stays responsive.
+//
+// The mic and speaker share one I2S peripheral (see startMic()/startSpeaker()
+// above — starting one always stops the other), so this background task and
+// any handler that needs the speaker (handlePlay(), and defensively
+// handleRecord()/handleVolume() too) must not touch it at the same time:
+// g_i2sMutex serializes the actual begin/end/record/playRaw calls, and
+// g_streamPauseForOtherAudio tells the streaming task to back off and not
+// even try to reacquire the mic while something else needs the peripheral —
+// without that second flag, the streaming task would grab the mic back (via
+// startMic(), which stops the speaker) on its very next loop iteration,
+// ~100ms later, cutting off playback almost as soon as it started.
+std::mutex g_i2sMutex;
+std::atomic<bool> g_streamTaskRunning{false};
+std::atomic<bool> g_streamPauseForOtherAudio{false};
+std::atomic<int> g_streamPort{0};
+TaskHandle_t g_streamTaskHandle = nullptr;
+
+static void streamTaskFn(void* param) {
+  WiFiClient client;
+  static int16_t chunk[1600];
+  unsigned long lastConnectAttempt = 0;
+
+  while (g_streamTaskRunning) {
+    if (g_streamPauseForOtherAudio) {
+      if (client.connected()) client.stop();
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+
+    if (!client.connected()) {
+      unsigned long now = millis();
+      if (now - lastConnectAttempt < 1000) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+      lastConnectAttempt = now;
+      if (!client.connect(CALLBACK_HOST, g_streamPort)) { continue; }
+      client.setNoDelay(true);
+    }
+
+    bool ok;
+    {
+      std::lock_guard<std::mutex> lock(g_i2sMutex);
+      if (g_streamPauseForOtherAudio) continue;  // re-check now that we hold the lock
+      startMic();
+      ok = M5.Mic.record(chunk, 1600, RECORD_SAMPLE_RATE);
+    }
+    if (!ok) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+
+    size_t off = 0;
+    while (off < sizeof(chunk)) {
+      size_t n = client.write(((const uint8_t*)chunk) + off, sizeof(chunk) - off);
+      if (n == 0) { client.stop(); break; }
+      off += n;
+    }
+  }
+
+  if (client.connected()) client.stop();
+  {
+    std::lock_guard<std::mutex> lock(g_i2sMutex);
+    if (micActive) { M5.Mic.end(); micActive = false; }
+  }
+  g_streamTaskHandle = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void startStreamTask(int port) {
+  g_streamPort = port;
+  if (g_streamTaskRunning) return;  // already running — next reconnect picks up the new port
+  g_streamTaskRunning = true;
+  xTaskCreatePinnedToCore(streamTaskFn, "micStream", 8192, nullptr, 1, &g_streamTaskHandle, 0);
+}
+
+void stopStreamTask() {
+  g_streamTaskRunning = false;  // task notices, cleans up, and deletes itself
+}
+
 void writeWavHeader(uint8_t* buf, uint32_t dataLen) {
   uint32_t fileSize = 36 + dataLen;
   buf[0]='R'; buf[1]='I'; buf[2]='F'; buf[3]='F';
@@ -627,6 +718,7 @@ void handleStatus() {
   json += ",\"pitch\":" + String(angles.y);
   json += ",\"camera\":" + String(cameraReady ? "true" : "false");
   json += ",\"camera_err\":\"" + cameraError + "\"";
+  json += ",\"mic_streaming\":" + String(g_streamTaskRunning ? "true" : "false");
   json += ",\"expr\":\"" + currentExprName + "\"";
   json += ",\"uptime_s\":" + String(millis() / 1000);
   json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
@@ -692,49 +784,58 @@ void handleRecord() {
   uint32_t maxSamples = RECORD_SAMPLE_RATE * seconds;
 
   if (showLed) M5StackChan.showRgbColor(0, 60, 0);
-  startMic();
-  delay(100);
-
+  // Defensive: the host no longer calls /record now that /stream covers
+  // continuous listening, but keep this safe against manual/legacy calls by
+  // pausing the mic-streaming background task for the duration — see the
+  // g_streamPauseForOtherAudio comment above streamTaskFn().
+  g_streamPauseForOtherAudio = true;
   const int chunkSize = 1600;
   uint32_t recorded = 0;
-  int silenceChunks = 0;
-  bool speechDetected = false;
-  const int SILENCE_THRESHOLD = 150;
-  const int SPEECH_THRESHOLD = 200;
-  const int SILENCE_NEEDED = 30;
+  {
+    std::lock_guard<std::mutex> lock(g_i2sMutex);
+    startMic();
+    delay(100);
 
-  while (recorded < maxSamples) {
-    int n = min((uint32_t)chunkSize, maxSamples - recorded);
-    M5.Mic.record(audioBuffer + recorded, n, RECORD_SAMPLE_RATE);
-    recorded += n;
+    int silenceChunks = 0;
+    bool speechDetected = false;
+    const int SILENCE_THRESHOLD = 150;
+    const int SPEECH_THRESHOLD = 200;
+    const int SILENCE_NEEDED = 30;
 
-    if (useVad) {
-      float rms = chunkRMS(audioBuffer + recorded - n, n);
-      if (!speechDetected) {
-        if (rms > SPEECH_THRESHOLD) speechDetected = true;
-      } else {
-        if (rms < SILENCE_THRESHOLD) {
-          silenceChunks++;
-          if (silenceChunks >= SILENCE_NEEDED) break;
+    while (recorded < maxSamples) {
+      int n = min((uint32_t)chunkSize, maxSamples - recorded);
+      M5.Mic.record(audioBuffer + recorded, n, RECORD_SAMPLE_RATE);
+      recorded += n;
+
+      if (useVad) {
+        float rms = chunkRMS(audioBuffer + recorded - n, n);
+        if (!speechDetected) {
+          if (rms > SPEECH_THRESHOLD) speechDetected = true;
         } else {
-          silenceChunks = 0;
+          if (rms < SILENCE_THRESHOLD) {
+            silenceChunks++;
+            if (silenceChunks >= SILENCE_NEEDED) break;
+          } else {
+            silenceChunks = 0;
+          }
         }
       }
     }
-  }
 
-  // The very last M5.Mic.record() chunk before M5.Mic.end() consistently comes
-  // back as a fixed garbage pattern (verified bit-identical across separate
-  // recordings/reflashes — not real noise, likely a DMA descriptor that never
-  // gets filled before the I2S peripheral is torn down). Record one extra
-  // throwaway chunk to absorb that artifact so the real requested audio
-  // (already fully captured in `recorded` samples above) stays intact.
-  {
-    static int16_t dummyChunk[chunkSize];
-    M5.Mic.record(dummyChunk, chunkSize, RECORD_SAMPLE_RATE);
+    // The very last M5.Mic.record() chunk before M5.Mic.end() consistently comes
+    // back as a fixed garbage pattern (verified bit-identical across separate
+    // recordings/reflashes — not real noise, likely a DMA descriptor that never
+    // gets filled before the I2S peripheral is torn down). Record one extra
+    // throwaway chunk to absorb that artifact so the real requested audio
+    // (already fully captured in `recorded` samples above) stays intact.
+    {
+      static int16_t dummyChunk[chunkSize];
+      M5.Mic.record(dummyChunk, chunkSize, RECORD_SAMPLE_RATE);
+    }
+    M5.Mic.end();
+    micActive = false;
   }
-  M5.Mic.end();
-  micActive = false;
+  g_streamPauseForOtherAudio = false;
   if (showLed) M5StackChan.showRgbColor(0, 0, 0);
 
   uint32_t dataLen = recorded * sizeof(int16_t);
@@ -798,6 +899,11 @@ void handlePlay() {
   size_t playedUpTo = 0;
   const size_t CHUNK_BYTES = 6400;
 
+  // Tell the mic-streaming background task to back off before we touch the
+  // speaker — see the g_streamPauseForOtherAudio comment above streamTaskFn()
+  // for why this is required, not just an optimization.
+  g_streamPauseForOtherAudio = true;
+
   while (read < len && (millis() - lastProgress < 10000)) {
     size_t avail = stream->available();
     if (avail > 0) {
@@ -827,7 +933,14 @@ void handlePlay() {
         size_t audioLen = len - dataOffset;
         if (dataSize > 0 && audioLen > dataSize) audioLen = dataSize;
         playEnd = dataOffset + audioLen;
-        startSpeaker();
+        {
+          // Guards against the narrow race where the streaming task is mid
+          // M5.Mic.record() (already holding the lock) right when we flip
+          // g_streamPauseForOtherAudio — without this, startSpeaker() here
+          // could run concurrently with that in-flight record() call.
+          std::lock_guard<std::mutex> lock(g_i2sMutex);
+          startSpeaker();
+        }
         started = true;
         playedUpTo = dataOffset;
         g_lipData = (int16_t*)(wavBuf + dataOffset);
@@ -858,6 +971,7 @@ void handlePlay() {
     updateLipSync();
   }
   http.end();
+  g_streamPauseForOtherAudio = false;  // let the mic-streaming task resume
 
   if (!started || playEnd == 0) {
     free(wavBuf); g_playBuf = nullptr;
@@ -871,45 +985,18 @@ void handlePlay() {
     ",\"rate\":" + String(sampleRate) + "}");
 }
 
-// Stream mic PCM to host via TCP (for real-time STT)
+// Start/stop continuous mic PCM streaming to host via TCP (for real-time
+// STT) — non-blocking, see streamTaskFn() above for the actual loop.
 void handleStream() {
-  int port = server.hasArg("port") ? server.arg("port").toInt() : 7073;
-  WiFiClient client;
-  if (!client.connect(CALLBACK_HOST, port)) {
-    server.send(502, "application/json", "{\"error\":\"stream connect failed\"}");
+  if (server.hasArg("stop")) {
+    stopStreamTask();
+    server.send(200, "application/json", "{\"ok\":true,\"streaming\":false}");
     return;
   }
-  client.setNoDelay(true);
-
-  bool showLed = !server.hasArg("led") || server.arg("led") != "0";
-  if (showLed) M5StackChan.showRgbColor(0, 60, 0);
-  startMic();
-  delay(100);
-
-  static int16_t chunk[1600];
-  size_t sentBytes = 0;
-  unsigned long t0 = millis();
-
-  while (client.connected() && millis() - t0 < 120000) {
-    M5.Mic.record(chunk, 1600, RECORD_SAMPLE_RATE);
-    size_t off = 0;
-    bool dead = false;
-    while (off < sizeof(chunk)) {
-      size_t n = client.write(((const uint8_t*)chunk) + off, sizeof(chunk) - off);
-      if (n == 0) { dead = true; break; }
-      off += n;
-    }
-    sentBytes += off;
-    if (dead) break;
-  }
-  client.stop();
-  M5.Mic.end();
-  micActive = false;
-  if (showLed) M5StackChan.showRgbColor(0, 0, 0);
-
+  int port = server.hasArg("port") ? server.arg("port").toInt() : 7073;
+  startStreamTask(port);
   server.send(200, "application/json",
-    "{\"ok\":true,\"bytes\":" + String(sentBytes) +
-    ",\"secs\":" + String(sentBytes / 32000.0, 1) + "}");
+    "{\"ok\":true,\"streaming\":true,\"port\":" + String(port) + "}");
 }
 
 void handleSpeech() {
@@ -953,25 +1040,33 @@ void handleVolume() {
   static int16_t volBuf[16000];
   const int sampleCount = 16000;
 
-  startMic();
-  delay(100);
-  M5.Mic.record(volBuf, sampleCount, RECORD_SAMPLE_RATE);
-  // Same fixed-garbage-tail issue fixed in handleRecord(): the chunk
-  // immediately before M5.Mic.end() reads back a constant bogus pattern
-  // instead of real mic data (verified bit-identical across separate
-  // recordings), inflating rms/peak even in total silence. Absorb it with a
-  // throwaway read so it doesn't land in volBuf.
+  // Defensive: the host no longer polls /volume now that /stream covers
+  // continuous listening, but keep this safe against manual/legacy calls —
+  // see the g_streamPauseForOtherAudio comment above streamTaskFn().
+  g_streamPauseForOtherAudio = true;
   {
-    static int16_t dummyChunk[1600];
-    M5.Mic.record(dummyChunk, 1600, RECORD_SAMPLE_RATE);
+    std::lock_guard<std::mutex> lock(g_i2sMutex);
+    startMic();
+    delay(100);
+    M5.Mic.record(volBuf, sampleCount, RECORD_SAMPLE_RATE);
+    // Same fixed-garbage-tail issue fixed in handleRecord(): the chunk
+    // immediately before M5.Mic.end() reads back a constant bogus pattern
+    // instead of real mic data (verified bit-identical across separate
+    // recordings), inflating rms/peak even in total silence. Absorb it with a
+    // throwaway read so it doesn't land in volBuf.
+    {
+      static int16_t dummyChunk[1600];
+      M5.Mic.record(dummyChunk, 1600, RECORD_SAMPLE_RATE);
+    }
+    // Unlike handleRecord()/handleStream(), this handler used to leave the mic
+    // running (never called M5.Mic.end()), which left the I2S mic driver
+    // streaming in the background indefinitely — same class of bug as the
+    // earlier camera-DMA reboot issue. Release it here just like the other
+    // mic-using handlers do.
+    M5.Mic.end();
+    micActive = false;
   }
-  // Unlike handleRecord()/handleStream(), this handler used to leave the mic
-  // running (never called M5.Mic.end()), which left the I2S mic driver
-  // streaming in the background indefinitely — same class of bug as the
-  // earlier camera-DMA reboot issue. Release it here just like the other
-  // mic-using handlers do.
-  M5.Mic.end();
-  micActive = false;
+  g_streamPauseForOtherAudio = false;
 
   int64_t sumSq = 0;
   int16_t peak = 0;
