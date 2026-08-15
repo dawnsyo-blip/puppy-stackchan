@@ -144,7 +144,6 @@ PRIVACY_SPEED = 150
 # 的接口硬造出一次 /volume 当年那种轮询（CLAUDE.md 里记过那次教训：碎片化
 # 堆，最后设备反复重启），所以改成了现在这个"固件本地驱动"的架构。
 WARM_WHITE_RGB = (255, 180, 90)       # 呼吸灯/闪烁/渐暗统一用这个暖白色调
-IDLE_LED_DIM_RGB = (40, 28, 14)       # 常态"微弱暖白常亮"——同色相，亮度调低
 HAPPY_LED_PERIOD_MS = 200             # 开心"暖白灯快闪"
 CURIOUS_LED_BREATHE_PERIOD_MS = 1600  # 好奇/思考共用"暖白呼吸灯"
 SORRY_LED_PERIOD_MS = 1500            # 抱歉"缓慢闪烁"
@@ -537,7 +536,8 @@ def play_privacy_animation():
 def play_idle_animation():
     set_expression("idle")
     go_home()
-    set_led_mode("solid", *IDLE_LED_DIM_RGB)
+    # 常态的灯效关掉了（原来是"微弱暖白常亮"）——按要求直接熄灯。
+    set_led(off=True)
 
 def play_curious_animation():
     """好奇：显示表情即可——语音已经由后台流式监听（MicStream）捕捉完毕，
@@ -1528,7 +1528,7 @@ class PuppyEngine:
         if self.state == State.HAPPY:
             set_led_mode("blink", *WARM_WHITE_RGB, period_ms=HAPPY_LED_PERIOD_MS)
         elif self.state == State.IDLE:
-            set_led_mode("solid", *IDLE_LED_DIM_RGB)
+            set_led(off=True)
 
     # ---------- 计时器 ----------
 
