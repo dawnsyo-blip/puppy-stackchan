@@ -1316,6 +1316,20 @@ class PuppyEngine:
         print(f"[唤醒] 捕捉到语音段（{dur:.2f}s）")
         self.record_interaction()
 
+        if self.state == State.PRIVACY:
+            # 隐私状态下摄像头是关的（transition() 进入 PRIVACY 时会把
+            # face_detected 重置成 False，见那边的注释）——不能落到下面
+            # scan_for_face() 那条分支，那是一次多角度转头扫描，会跟隐私
+            # 姿势自己的 move_servo() 打架（表现为"舵机转到一半突然变
+            # 方向"），扫到人脸还会在还没搞清楚老大说了什么之前就直接
+            # enter_happy()，把隐私状态提前打断。直接把这段语音交给正式
+            # 对话流程处理——CURIOUS 阶段的 track_face_once() 只做一次单帧
+            # 追踪、顶多微调 yaw，不会有这种大幅度转头冲突，具体这次到底
+            # 要不要真的进开心，交给 LLM 判断出的意图去决定。
+            print("[唤醒] 隐私状态下听到语音，直接进入对话（不扫描摄像头）")
+            self.run_conversation_turn(segment)
+            return True
+
         if self.face_detected:
             # 最近一次人脸检测/追踪已经确认人还在场——HAPPY 状态下
             # retrack_face() 每 FACE_RETRACK_INTERVAL_SEC 秒都在刷新这个
