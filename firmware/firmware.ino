@@ -447,13 +447,23 @@ std::atomic<int> g_streamPort{0};
 TaskHandle_t g_streamTaskHandle = nullptr;
 
 // 舵机转动本身的机械噪音很容易被 host 端 MicStream 的 RMS 阈值误判成"有人
-// 在说话"（尤其隐私姿势、扫描找人这类幅度比较大的动作）——不管 host 那边
-// 怎么调阈值/事后丢弃，噪音源头离麦克风比嘴巴近得多，宁可错杀不可放过。
-// M5StackChan::Motion::isMoving() 能精确反映舵机当前是不是还在物理转动，
-// loop() 里每帧都会刷新这个标志（见下面），转动期间及停止后一小段冷却时间
-// 内，streamTaskFn() 推流的音频会被替换成静音——噪音从源头就不会进流，
-// 不需要 host 端猜时长再事后补救。
+// 在说话"（尤其隐私姿势、扫描找人这类幅度比较大的动作）。M5StackChan::
+// Motion::isMoving() 能精确反映舵机当前是不是还在物理转动，转动期间及停止
+// 后一小段冷却时间内，streamTaskFn() 推流的音频会被替换成静音，噪音从源头
+// 就不会进流。
+//
+// 但不能不分青红皂白地对着"isMoving()==true"就静音——人脸追踪（好奇/思考
+// 期间的 track_face_once()、开心状态的 retrack_face()）也会频繁小幅度调整
+// yaw，这些调整跟老大正在说话是完全可能同时发生的（追踪本来就是按固定
+// 间隔触发，不看老大是不是正好在说话），第一版不分场景全部静音时，这些追踪
+// 动作会把正在录的真人语音也挖出一段空白，表现为"说话说不全"。所以加了
+// g_currentMoveIsNoisy 这个开关：只有 host 端明确标记"这次移动比较吵、这
+// 期间不指望还在听人说话"的移动（隐私姿势、扫描找人、开心/兴奋/困倦/抱歉
+// 这些反应型动画）才会真的触发静音，见 handleServo() 的 mute 参数和
+// handleHome()；人脸追踪那种"对话进行中顺手微调"的移动默认不带这个标记，
+// 不会静音。
 std::atomic<bool> g_muteStreamForServo{false};
+std::atomic<bool> g_currentMoveIsNoisy{false};
 static const unsigned long SERVO_MUTE_COOLDOWN_MS = 300;
 
 static void streamTaskFn(void* param) {
@@ -781,6 +791,12 @@ void handleServo() {
   yaw = constrain(yaw, -1280, 1280);
   pitch = constrain(pitch, 0, 900);
   speed = constrain(speed, 0, 1000);
+  // mute=1：这次移动交给 host 端标记为"比较吵、这期间不指望还在听人说话"
+  // （反应型动画/扫描/隐私姿势），会触发 g_muteStreamForServo；不传或者
+  // mute!=1（比如人脸追踪的小幅度微调）则不会——每次调用都要显式赋值，不能
+  // 只在 mute=1 时设 true，不然上一次"吵"的移动会一直脏着这个标志，污染
+  // 下一次本该安静的追踪微调。
+  g_currentMoveIsNoisy = (server.hasArg("mute") && server.arg("mute") == "1");
   M5StackChan.Motion.move(yaw, pitch, speed);
   server.send(200, "application/json",
     "{\"ok\":true,\"yaw\":" + String(yaw) +
@@ -835,6 +851,8 @@ void handleStatus() {
 }
 
 void handleHome() {
+  // /home 只在"回正/归位"这类明确不是追踪对话的场合被调用，一律当作吵的。
+  g_currentMoveIsNoisy = true;
   M5StackChan.Motion.goHome();
   server.send(200, "application/json", "{\"ok\":true}");
 }
@@ -1329,12 +1347,13 @@ void loop() {
   server.handleClient();
   updateLed();
 
-  // 舵机噪音静音：见 g_muteStreamForServo 声明处的注释。isMoving() 每帧都查，
-  // 转动期间持续刷新"最后一次观测到在动"的时间戳；转动结束后要再过
+  // 舵机噪音静音：见 g_muteStreamForServo/g_currentMoveIsNoisy 声明处的注释。
+  // 只有"这次移动被标记为吵"且"确实还在物理转动"才静音，isMoving() 每帧都
+  // 查，转动期间持续刷新"最后一次观测到在动"的时间戳；转动结束后要再过
   // SERVO_MUTE_COOLDOWN_MS 才解除静音，给机械振动/回响留一点消散余量。
   {
     static unsigned long lastMovingMs = 0;
-    if (M5StackChan.Motion.isMoving()) {
+    if (M5StackChan.Motion.isMoving() && g_currentMoveIsNoisy) {
       g_muteStreamForServo = true;
       lastMovingMs = millis();
     } else if (g_muteStreamForServo && millis() - lastMovingMs >= SERVO_MUTE_COOLDOWN_MS) {

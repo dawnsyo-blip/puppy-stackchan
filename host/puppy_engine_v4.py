@@ -456,11 +456,17 @@ def set_button(state):
     """调用固件的 /button 控制关键词播报按钮：up/down/off。"""
     api_get(f"/button?state={state}")
 
-def move_servo(yaw=None, pitch=None, speed=None):
+def move_servo(yaw=None, pitch=None, speed=None, mute=False):
+    """mute=True 告诉固件这次移动"比较吵、这期间不指望还在听人说话"（见
+    firmware.ino 的 g_currentMoveIsNoisy）——反应型动画（开心/兴奋/困倦/
+    抱歉/隐私）和扫描找人这类跟对话不同步的大幅度移动应该传 True；人脸
+    追踪那种"对话进行中顺手微调"的小幅度移动必须留 False（默认值），不然
+    固件会把这段时间的真实语音也静音掉，说话说不全。"""
     params = []
     if yaw is not None:   params.append(f"yaw={yaw}")
     if pitch is not None: params.append(f"pitch={pitch}")
     if speed is not None: params.append(f"speed={speed}")
+    if mute: params.append("mute=1")
     if params: api_get(f"/servo?{'&'.join(params)}")
 
 def go_home():
@@ -498,38 +504,38 @@ def capture_frame():
 def play_happy_animation():
     set_expression("happy")
     set_led_mode("solid", *WARM_WHITE_RGB)
-    move_servo(pitch=HAPPY_PITCH, speed=HAPPY_YAW_SPEED)
+    move_servo(pitch=HAPPY_PITCH, speed=HAPPY_YAW_SPEED, mute=True)
     time.sleep(0.2)
     for _ in range(HAPPY_CYCLES):
-        move_servo(yaw=HAPPY_YAW_RANGE, speed=HAPPY_YAW_SPEED)
+        move_servo(yaw=HAPPY_YAW_RANGE, speed=HAPPY_YAW_SPEED, mute=True)
         time.sleep(HAPPY_CYCLE_DELAY)
-        move_servo(yaw=-HAPPY_YAW_RANGE, speed=HAPPY_YAW_SPEED)
+        move_servo(yaw=-HAPPY_YAW_RANGE, speed=HAPPY_YAW_SPEED, mute=True)
         time.sleep(HAPPY_CYCLE_DELAY)
     # 动画结束后回正，确保摄像头对准人
-    move_servo(yaw=0, pitch=450, speed=300)
+    move_servo(yaw=0, pitch=450, speed=300, mute=True)
 
 def play_excited_animation():
     set_expression("excited")
     set_led_mode("rainbow", period_ms=EXCITED_LED_PERIOD_MS)
     for _ in range(EXCITED_CYCLES):
-        move_servo(yaw=EXCITED_YAW_RANGE, pitch=EXCITED_PITCH_HIGH, speed=EXCITED_YAW_SPEED)
+        move_servo(yaw=EXCITED_YAW_RANGE, pitch=EXCITED_PITCH_HIGH, speed=EXCITED_YAW_SPEED, mute=True)
         time.sleep(EXCITED_CYCLE_DELAY)
-        move_servo(yaw=-EXCITED_YAW_RANGE, pitch=EXCITED_PITCH_LOW, speed=EXCITED_YAW_SPEED)
+        move_servo(yaw=-EXCITED_YAW_RANGE, pitch=EXCITED_PITCH_LOW, speed=EXCITED_YAW_SPEED, mute=True)
         time.sleep(EXCITED_CYCLE_DELAY)
-    move_servo(yaw=0, pitch=450, speed=400)
+    move_servo(yaw=0, pitch=450, speed=400, mute=True)
 
 def play_sleepy_animation():
     set_expression("sleepy")
     set_led_mode("fade", *WARM_WHITE_RGB, fade_ms=SLEEPY_LED_FADE_MS)
-    move_servo(yaw=0, speed=200)
+    move_servo(yaw=0, speed=200, mute=True)
     time.sleep(0.2)
     for p in SLEEPY_PITCH_STEPS:
-        move_servo(pitch=p, speed=SLEEPY_SPEED)
+        move_servo(pitch=p, speed=SLEEPY_SPEED, mute=True)
         time.sleep(SLEEPY_STEP_DELAY)
 
 def play_privacy_animation():
     set_expression("privacy")
-    move_servo(yaw=PRIVACY_YAW, pitch=PRIVACY_PITCH, speed=PRIVACY_SPEED)
+    move_servo(yaw=PRIVACY_YAW, pitch=PRIVACY_PITCH, speed=PRIVACY_SPEED, mute=True)
     set_led_mode("fade", *WARM_WHITE_RGB, fade_ms=PRIVACY_LED_FADE_MS)
 
 def play_idle_animation():
@@ -554,7 +560,7 @@ def play_thinking_animation():
 
 def play_sorry_animation():
     set_expression("sorry")
-    move_servo(pitch=SORRY_PITCH, yaw=SORRY_YAW, speed=SORRY_SPEED)
+    move_servo(pitch=SORRY_PITCH, yaw=SORRY_YAW, speed=SORRY_SPEED, mute=True)
     set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
 
 def play_nod_animation():
@@ -1239,7 +1245,7 @@ class PuppyEngine:
         set_expression("curious")
 
         for yaw_pos in SCAN_POSITIONS:
-            move_servo(yaw=yaw_pos, pitch=450, speed=SCAN_SPEED)
+            move_servo(yaw=yaw_pos, pitch=450, speed=SCAN_SPEED, mute=True)
             time.sleep(SCAN_PAUSE)
             found, _ = self.detect_face_once()
             if found:
