@@ -23,12 +23,19 @@
 
 ## HTTP API
 - `/face?expr=<表情>` — 切换表情（neutral/happy/sleepy/curious/sorry/thinking/excited/privacy）
-- `/servo?yaw=N&pitch=N&speed=N` — 控制舵机（yaw 越大越向右转，越小越向左转，
-  见下面"人脸追踪方向"）
+- `/servo?yaw=N&pitch=N&speed=N&mute=1` — 控制舵机（yaw 越大越向右转，越小越
+  向左转，见下面"人脸追踪方向"）。`mute=1` 是可选的"这次移动会有明显噪音，
+  转动期间请静音麦克风推流"声明，见下面"舵机噪音防误触发语音"一节；不传时
+  默认不静音（人脸追踪的小幅度实时微调必须用这个默认值，否则会截断正在说的
+  话）。
 - `/camera` — 拍照返回 JPEG。**这是机身正面朝外的摄像头，拍到的是房间/用户，
   不是屏幕截图**——固件没有截屏接口，没有办法远程看到 LCD 上表情/按钮的实际
   渲染效果，调表情/UI 只能靠实机肉眼看或者让用户拍照确认。
-- `/touch` — 触摸传感器状态
+- `/touch` — 触摸传感器状态，返回 `front/middle/back/pressed/held_ms/
+  double_tap_count/screen_tap_count`。`held_ms`（当前这次连续按住已经持续
+  多久）、`double_tap_count`/`screen_tap_count`（单调递增计数器，头顶双击/
+  屏幕点击各发生一次就 +1）都是固件端权威计算的实时值，host 端不用也不应该
+  自己用时间戳重新推算——见下面"触摸事件：固件是权威真相"一节。
 - `/play?url=<url>` — 播放 WAV 音频
 - `/record?seconds=N` — 录音（一次性、有限时长；puppy_engine_v4.py 不再用它做语音
   唤醒，改用下面的 `/stream`，仅保留给独立测试脚本用）
@@ -212,6 +219,73 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   真正的完整状态切换才会恢复，中间可能是好几轮对话的时间。以后新增任何
   临时借用 LED（或者其它"应该跟随状态持续"的效果）的代码，都要问一句"用完
   之后谁负责把它还回去"。
+- **当前各状态的 LED 常驻效果**（跟`表情映射v7.xlsx`保持同步）：常态
+  （IDLE）是完全关闭、不点亮（`play_idle_animation()` 用 `set_led(off=True)`）；
+  开心（HAPPY）是暖白灯常亮（`set_led_mode("solid", *WARM_WHITE_RGB)`，不是
+  之前的闪烁）。`setup()` 里 `M5StackChan.begin()` 之后立刻加了
+  `M5StackChan.showRgbColor(0, 0, 0)`，保证设备刚开机、host 脚本还没连上时
+  LED 就是暗的，不会残留库自带的默认点亮状态。
+
+## 舵机噪音防误触发语音
+麦克风灵敏度为了能听清小声说话被放大了 5 倍（`mic_cfg.magnification = 5`，
+`firmware.ino` 的 `setup()`），代价是舵机转动的机械噪音也很容易越过
+`MicStream` 的 RMS 阈值（`STREAM_RMS_THRESHOLD`），被 VAD 当成"有人在说话"，
+说完（噪音停止）`STREAM_SILENCE_SECONDS` 后判定"说完了"，送去转成一句莫名其妙
+的空识别或者随便什么误判文本，走到对话分支。这个问题在隐私模式最先暴露（一
+进隐私就转很大角度的舵机），但排查后发现所有会转舵机的动作（开心摇头、追踪
+人脸、扫描找人、兴奋摆动）都有同样的风险。
+- **两个 flag 配合实现"选择性"静音，而不是"舵机在动就静音"**：
+  `g_currentMoveIsNoisy`（host 通过 `/servo?mute=1` 每次显式声明"这次移动
+  有噪音"）AND `Motion::isMoving()`（固件用 `M5StackChan.Motion.isMoving()`
+  查询舵机是否真的还在物理转动）两者同时为真才会把 `g_muteStreamForServo`
+  置真，`streamTaskFn()` 里推流前发现这个 flag 为真就把整个 PCM chunk
+  `memset` 成 0（麦克风本身仍正常读取，只是发出去的数据归零，不影响 I2S
+  时序），转动结束后再加 `SERVO_MUTE_COOLDOWN_MS`（300ms）冷却期防止噪音
+  余振。**为什么不能只用 `isMoving()` 不分青红皂白全静音**：最早这么做过，
+  结果 `track_face_servo()` 那种对话过程中持续做的小幅度追踪微调（跟人说话
+  同时发生）也被静音，表现为"说话无法完全被识别"——真人说话被这些高频小
+  动作打了很多空洞。所以改成 host 端按调用场景显式声明"这次会不会吵"：
+  反应性动画（开心摇头摆尾、隐私姿势、兴奋摆动、扫描找人）等大幅度/预期会
+  响的移动传 `mute=1`；`track_face_servo()` 和 `play_nod_animation()`/
+  `play_shake_animation()`（都发生在对话进行中，随时可能跟真实语音重叠）
+  故意保持默认的不静音。`handleServo()` 每次调用都无条件重新赋值
+  `g_currentMoveIsNoisy`（不是只在传参时才改），避免上一次"吵"的调用把
+  flag 卡在 true 上影响下一次没传 mute 的调用。`/home` 端点固定传
+  `mute=1`（复位动作从不会跟对话重叠）。
+- **隐私模式额外多一层"确认真正静下来"的等待**：舵机停止转动不等于噪音立刻
+  归零、VAD 的滑动窗口也需要时间把噪音判定"翻篇"。`transition()` 进
+  PRIVACY 后调用 `_settle_privacy_mic()`：先轮询 `/status` 直到 yaw/pitch
+  落在隐私姿势目标值 ±20 以内（实测约 1-2s），再等
+  `STREAM_SILENCE_SECONDS + 0.3s`，最后调用 `mic_stream.take_utterance()`
+  把这段时间里滚动缓冲区攒下的、可能包含噪音尾巴的"一段话"直接丢弃，避免
+  刚进隐私就立刻又被拉回对话。
+
+## 触摸事件：固件是权威真相，不要靠 host 轮询重建
+早期 `check_touch()` 自己用一个时间戳（按下时记一次、松开时再算一次差值）
+在 host 端重建"按了多久"，结果隐私模式长按 3 秒经常判定不到——根因是
+`run_conversation_turn()`（STT+LLM+TTS 全程同步阻塞）经常一卡就是好几秒，
+`tick()` 顾不上按时轮询触摸，等终于轮询到"松开"时，`self.state` 可能已经
+被另一条路径（比如语音唤醒）带离了判断长按用的那个状态，长按 3 秒的检测就
+静默失效了。同理，`TouchSensor.wasDoubleClicked()`（头顶双击）、屏幕点击
+这类瞬时 flag 在 M5Unified 的 `Button_Class` 里只在判定成立的那一帧
+（~10ms，对应 loop() 的 ~100Hz）为真，host 大约 1Hz 的轮询节奏直接问"现在
+是不是刚发生"基本会错过。
+- **时长类状态（按了多久）**：交给固件持续维护、host 只读结果。
+  `Button_Class` 本来就在 `getUpdateMsec() - lastChange()` 里连续算着"当前
+  这次连续按住了多久"，`/touch` 直接把它报成 `held_ms` 字段，host 不管什么
+  时候被耽误、什么时候才有空轮询，读到的都是固件此刻的真实值，不会因为
+  轮询延迟算错。
+- **一次性/瞬时事件（点了几次）**：交给固件用单调递增计数器"攒"起来，host
+  只比较数字变没变，不问"现在是不是true"。`loop()` 里 `wasDoubleClicked()`
+  为真就把 `g_headDoubleTapCount++`，屏幕点击同理 `g_screenTapCount++`；
+  host 端的 `check_touch()` 拿当前值跟上次记的值（`self.last_double_tap_
+  count`/`self.last_screen_tap_count`，首次读取只做基准值 priming、不触发
+  事件）比较，只要变了就说明期间发生过至少一次，不会因为轮询跟不上而漏掉，
+  最多是把连续发生的好几次事件合并成一次响应。
+- **以后任何"瞬时状态"或"持续时长"要暴露给慢速轮询的 host，都按这个模式
+  设计**：瞬时 → 固件端单调计数器；时长 → 固件端连续维护、按需只读一个
+  数值，不要在 host 端用采样时间戳重建，采样节奏一旦被别的同步阻塞打乱就
+  会算错或漏判。
 
 ## 编译 / 烧录 / 验证流程
 本机的 `arduino-cli` 不在 PATH 里，可执行文件在
