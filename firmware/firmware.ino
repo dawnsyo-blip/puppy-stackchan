@@ -91,6 +91,17 @@ static const int SUB_DOTS_Y = 213;    // 翻页圆点的 y（超过两行文字�
 // 2=down (pressed-in, flashed briefly before each keyword plays).
 volatile int g_buttonState = 0;
 
+// 头顶双击 / 屏幕点击计数器：host 端只以约 1Hz 轮询 /touch，而
+// TouchSensor.wasDoubleClicked() 这类手势判定只在库内部状态机"判定成立"的
+// 那一次 update() 里为 true（M5StackChan.update() 每帧都在跑，但对应的那
+// 一帧转瞬即逝）——host 轮询频率跟不上，直接问"现在是不是刚双击"大概率会
+// 错过。改成单调递增计数器：loop() 里每次观测到手势成立就 +1，host 端只需
+// 要跟自己上次记的值比较有没有变化，不会因为轮询节奏对不上而漏掉事件（就
+// 算错过好几次 poll，计数器的差值也如实反映到底发生了几次）。二者都只在
+// loop() 所在的主线程里读写，没有并发，不需要原子类型。
+uint32_t g_headDoubleTapCount = 0;
+uint32_t g_screenTapCount = 0;
+
 // UTF-8 line breaking: CJK (3 bytes) = 16px, ASCII = 8px, max line width 292px
 static void buildSubtitle(const String &text) {
   g_subNLines = 0;
@@ -859,13 +870,29 @@ void handleHome() {
 
 void handleTouch() {
   auto intensities = M5StackChan.TouchSensor.getIntensities();
-  String json = "{";
-  json += "\"front\":" + String(intensities[0]);
-  json += ",\"middle\":" + String(intensities[1]);
-  json += ",\"back\":" + String(intensities[2]);
-  json += ",\"pressed\":" + String(M5StackChan.TouchSensor.isPressed() ? "true" : "false");
-  json += "}";
-  server.send(200, "application/json", json);
+  bool pressed = M5StackChan.TouchSensor.isPressed();
+  // held_ms：当前这一次连续按住已经持续了多久，直接读 Button_Class 内部
+  // 一直在维护的状态（每帧刷新，不依赖 host 多久来问一次一次）——host 端
+  // 拿这个直接判断"按满 3 秒了没有"，比 host 自己记按下时刻、事后拿轮询
+  // 到的这一刻减一下要稳：host 万一被别的耗时操作（比如跑完一轮对话）
+  // 卡住几秒没来得及轮询，固件这边这个数值依然精确，不会因为轮询节奏被
+  // 打乱而算错。
+  uint32_t heldMs = pressed
+    ? (M5StackChan.TouchSensor.getUpdateMsec() - M5StackChan.TouchSensor.lastChange())
+    : 0;
+  // double_tap_count/screen_tap_count：见声明处注释，单调递增计数器，
+  // host 端比较差值判断"有没有发生过"，不会因为轮询跟不上手势本身的判定
+  // 节奏而漏掉。
+  static char buf[220];
+  snprintf(buf, sizeof(buf),
+    "{\"front\":%d,\"middle\":%d,\"back\":%d,\"pressed\":%s,\"held_ms\":%lu,"
+    "\"double_tap_count\":%lu,\"screen_tap_count\":%lu}",
+    intensities[0], intensities[1], intensities[2],
+    pressed ? "true" : "false",
+    (unsigned long)heldMs,
+    (unsigned long)g_headDoubleTapCount,
+    (unsigned long)g_screenTapCount);
+  server.send(200, "application/json", buf);
 }
 
 // ============ Audio Handlers ============
@@ -1347,6 +1374,13 @@ void loop() {
   server.handleClient();
   updateLed();
 
+  // 头顶双击计数：M5StackChan.update() 刚刷新过 TouchSensor 的状态机，这里
+  // 检查是不是刚好判定成立"双击"，是的话计数器 +1（见声明处注释，host 端
+  // 靠比较这个值有没有变化来判断"有没有发生过一次新的双击"）。
+  if (M5StackChan.TouchSensor.wasDoubleClicked()) {
+    g_headDoubleTapCount++;
+  }
+
   // 舵机噪音静音：见 g_muteStreamForServo/g_currentMoveIsNoisy 声明处的注释。
   // 只有"这次移动被标记为吵"且"确实还在物理转动"才静音，isMoving() 每帧都
   // 查，转动期间持续刷新"最后一次观测到在动"的时间戳；转动结束后要再过
@@ -1467,6 +1501,7 @@ void loop() {
     avatar.setExpression(Expression::Happy);
     touchExprActive = true;
     touchExprTime = millis();
+    g_screenTapCount++;
     notifyCallback("screen_tap", VOICE_PORT);
   }
   if (t.wasReleased()) {

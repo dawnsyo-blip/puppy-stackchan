@@ -986,7 +986,14 @@ class PuppyEngine:
         # 触摸检测
         self.last_touch_poll = 0
         self.touch_pressed = False
-        self.touch_press_start = 0
+        # 头顶双击 / 屏幕点击是固件端的单调递增计数器（见 firmware.ino 的
+        # g_headDoubleTapCount/g_screenTapCount），host 端记上一次看到的值，
+        # 靠比较有没有变化判断"这段时间里有没有发生过一次新的手势"——不能
+        # 从 0 起算，不然设备没重启、之前测试时点过的次数会在下一次
+        # check_touch() 里被误判成"现在刚发生"；第一次真正拿到读数时只
+        # 校准基线，不当成事件触发。
+        self.last_double_tap_count = None
+        self.last_screen_tap_count = None
 
         # 主循环计数（用于轮流轮询 + 心跳打印）
         self.tick_count = 0
@@ -1042,8 +1049,9 @@ class PuppyEngine:
 
         print("[引擎] 小狗行为引擎 v4 启动！")
         print(f"[引擎] 当前状态: {self.state.value}")
-        print(f"[引擎] （触摸触发暂时只保留隐私状态退出：长按满 {PRIVACY_EXIT_HOLD_SEC}s，"
-              f"其它状态的短按/长按触摸触发已临时关闭）")
+        print("[引擎] 碰一下屏幕 → 扫描找人 → 开心")
+        print("[引擎] 头顶双击 → 兴奋")
+        print(f"[引擎] 隐私状态下长按头顶满 {PRIVACY_EXIT_HOLD_SEC}s → 退出隐私")
         print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应")
         print("[引擎] Ctrl+C 退出\n")
 
@@ -1264,10 +1272,22 @@ class PuppyEngine:
     # ---------- 触摸检测 ----------
 
     def check_touch(self):
-        """检测触摸松开，返回这次按住的秒数（float）；没有发生松开动作时
-        返回 None。不再在这里分类"短按/长按"——调用方（tick()）自己按需要
-        的阈值判断，目前只有隐私状态退出这一处在用（长按满
-        PRIVACY_EXIT_HOLD_SEC 才生效）。"""
+        """查询触摸状态，返回一个 dict：
+        - held_ms：头顶触摸当前这一次连续按住了多久（毫秒），没按住是 0。
+          直接读固件端 Button_Class 每帧都在维护的连续按住时长（见
+          firmware.ino 的 handleTouch()），不是 host 自己记按下时刻再拿
+          当前轮询时刻相减——host 万一被一整轮对话（好几秒）卡住没来得及
+          按时轮询，固件这边的数值依然准确，不会因为轮询节奏被打乱而把
+          "按了 3 秒"错算成更长或更短。
+        - double_tap：自上次查询以来头顶有没有发生过一次新的"短按两次"
+          （比较固件端单调递增计数器 double_tap_count 有没有变化）。
+        - screen_tap：自上次查询以来屏幕有没有被点过一次（同理，比较
+          screen_tap_count）。
+        这两个手势本身在固件内部只在判定成立的那一帧短暂为真，host 端
+        大约 1Hz 的轮询频率直接问"现在是不是刚发生"大概率会错过，所以固件
+        侧改成了单调计数器，host 端只看差值，poll 慢一点也不会漏事件。
+
+        没轮到这次 poll_slot 或者请求失败时返回 None。"""
         now = time.time()
         if now - self.last_touch_poll < TOUCH_POLL_SEC:
             return None
@@ -1277,22 +1297,37 @@ class PuppyEngine:
         if touch is None:
             return None
 
-        pressed = touch.get("pressed", False)
+        held_ms = touch.get("held_ms", 0)
+        double_tap_count = touch.get("double_tap_count", 0)
+        screen_tap_count = touch.get("screen_tap_count", 0)
 
-        # 按下瞬间：记录开始时间
+        if self.last_double_tap_count is None:
+            # 第一次拿到读数：只校准基线，不能把设备之前（这次 host 启动
+            # 之前）积累的计数差当成"刚刚发生"。
+            self.last_double_tap_count = double_tap_count
+            self.last_screen_tap_count = screen_tap_count
+
+        double_tap = double_tap_count != self.last_double_tap_count
+        screen_tap = screen_tap_count != self.last_screen_tap_count
+        self.last_double_tap_count = double_tap_count
+        self.last_screen_tap_count = screen_tap_count
+
+        pressed = held_ms > 0
         if pressed and not self.touch_pressed:
-            self.touch_press_start = now
             print("[触摸] 按下...")
-
-        # 松开瞬间：计算持续时间
-        duration = None
         if not pressed and self.touch_pressed:
-            duration = now - self.touch_press_start
-            print(f"[触摸] 松开（{duration:.1f}s）")
+            print("[触摸] 松开")
+            self.record_interaction()
+        self.touch_pressed = pressed
+
+        if double_tap:
+            print("[触摸] 检测到头顶双击")
+            self.record_interaction()
+        if screen_tap:
+            print("[触摸] 检测到屏幕点击")
             self.record_interaction()
 
-        self.touch_pressed = pressed
-        return duration
+        return {"held_ms": held_ms, "double_tap": double_tap, "screen_tap": screen_tap}
 
     # ---------- 语音唤醒 + 完整对话链路 ----------
 
@@ -1609,20 +1644,37 @@ class PuppyEngine:
         poll_slot = self.tick_count % 2   # 0=触摸 1=人脸
 
         # --- 触摸（最高优先级）---
-        # 其它状态的触摸触发条件暂时先取消（原来的短按→扫描找人、长按1秒→
-        # 兴奋），只留隐私状态这一条退出路径：长按满 PRIVACY_EXIT_HOLD_SEC(3s)
-        # 才生效，用来解决隐私状态太容易被误触退出的问题（之前短按就退出，
-        # 不小心碰一下就会打断）。
-        touch_hold_sec = self.check_touch() if poll_slot == 0 else None
-        if touch_hold_sec is not None and self.state == State.PRIVACY:
-            if touch_hold_sec >= PRIVACY_EXIT_HOLD_SEC:
-                print(f"[触发] 长按 {touch_hold_sec:.1f}s → 退出隐私")
+        # 目前只保留三条触摸触发路径：
+        # 1. 碰一下屏幕 → 开心（跟以前短按头顶→扫描找人是同一套逻辑，只是
+        #    触发方式换成了屏幕）。
+        # 2. 头顶双击 → 兴奋，不看当前是什么状态（跟以前长按1秒→兴奋一样
+        #    不设限制，transition() 自己对"目标状态跟当前一样"是空操作，不
+        #    用在这里额外判断）。
+        # 3. 隐私状态下长按满 PRIVACY_EXIT_HOLD_SEC(3s) → 退出隐私。之前拿
+        #    host 自己记的按下时刻去减轮询到的这一刻算时长，如果这几秒中间
+        #    正好卡在一整轮对话处理里（tick() 被 run_conversation_turn()
+        #    阻塞住），松开的时候再一算，状态可能已经因为别的原因（比如
+        #    语音）离开了隐私，长按就白按了。现在直接读固件端持续维护的
+        #    held_ms，不依赖 host 这边的轮询节奏，更稳。
+        touch = self.check_touch() if poll_slot == 0 else None
+        if touch is not None:
+            if touch["screen_tap"] and self.state in (State.IDLE, State.SLEEPY, State.PRIVACY):
+                print("[触发] 触碰屏幕 → 扫描找人")
                 if self.scan_for_face():
                     self.enter_happy()
-            else:
-                print(f"[触发] 隐私状态下按了 {touch_hold_sec:.1f}s，不足 "
-                      f"{PRIVACY_EXIT_HOLD_SEC}s，忽略")
-            return
+                return
+
+            if touch["double_tap"]:
+                print("[触发] 头顶双击 → 兴奋！")
+                self.transition(State.EXCITED)
+                return
+
+            if self.state == State.PRIVACY and touch["held_ms"] > 0:
+                if touch["held_ms"] >= PRIVACY_EXIT_HOLD_SEC * 1000:
+                    print(f"[触发] 长按 {touch['held_ms']/1000:.1f}s → 退出隐私")
+                    if self.scan_for_face():
+                        self.enter_happy()
+                    return
 
         # --- 语音唤醒（好奇/思考期间已经在处理语音了，不重复检查）---
         if self.state not in (State.CURIOUS, State.THINKING):
