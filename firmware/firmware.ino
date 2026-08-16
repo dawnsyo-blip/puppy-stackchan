@@ -446,6 +446,16 @@ std::atomic<bool> g_streamPauseForOtherAudio{false};
 std::atomic<int> g_streamPort{0};
 TaskHandle_t g_streamTaskHandle = nullptr;
 
+// 舵机转动本身的机械噪音很容易被 host 端 MicStream 的 RMS 阈值误判成"有人
+// 在说话"（尤其隐私姿势、扫描找人这类幅度比较大的动作）——不管 host 那边
+// 怎么调阈值/事后丢弃，噪音源头离麦克风比嘴巴近得多，宁可错杀不可放过。
+// M5StackChan::Motion::isMoving() 能精确反映舵机当前是不是还在物理转动，
+// loop() 里每帧都会刷新这个标志（见下面），转动期间及停止后一小段冷却时间
+// 内，streamTaskFn() 推流的音频会被替换成静音——噪音从源头就不会进流，
+// 不需要 host 端猜时长再事后补救。
+std::atomic<bool> g_muteStreamForServo{false};
+static const unsigned long SERVO_MUTE_COOLDOWN_MS = 300;
+
 static void streamTaskFn(void* param) {
   WiFiClient client;
   static int16_t chunk[1600];
@@ -474,6 +484,13 @@ static void streamTaskFn(void* param) {
       ok = M5.Mic.record(chunk, 1600, RECORD_SAMPLE_RATE);
     }
     if (!ok) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+
+    // 仍然照常读麦克风（保持 I2S 缓冲区正常排空、时序不乱），只是舵机还在
+    // 动/刚停不久的这段时间，发给 host 的这一帧直接换成静音，不让噪音真的
+    // 影响到 VAD 判断。
+    if (g_muteStreamForServo) {
+      memset(chunk, 0, sizeof(chunk));
+    }
 
     size_t off = 0;
     while (off < sizeof(chunk)) {
@@ -1311,6 +1328,19 @@ void loop() {
   M5StackChan.update();
   server.handleClient();
   updateLed();
+
+  // 舵机噪音静音：见 g_muteStreamForServo 声明处的注释。isMoving() 每帧都查，
+  // 转动期间持续刷新"最后一次观测到在动"的时间戳；转动结束后要再过
+  // SERVO_MUTE_COOLDOWN_MS 才解除静音，给机械振动/回响留一点消散余量。
+  {
+    static unsigned long lastMovingMs = 0;
+    if (M5StackChan.Motion.isMoving()) {
+      g_muteStreamForServo = true;
+      lastMovingMs = millis();
+    } else if (g_muteStreamForServo && millis() - lastMovingMs >= SERVO_MUTE_COOLDOWN_MS) {
+      g_muteStreamForServo = false;
+    }
+  }
 
   // WiFi auto-reconnect
   static unsigned long lastWifiCheck = 0;
