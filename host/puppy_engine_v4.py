@@ -1075,11 +1075,50 @@ class PuppyEngine:
         if   new_state == State.HAPPY:    play_happy_animation()
         elif new_state == State.EXCITED:  play_excited_animation()
         elif new_state == State.SLEEPY:   play_sleepy_animation()
-        elif new_state == State.PRIVACY:  play_privacy_animation()
+        elif new_state == State.PRIVACY:
+            play_privacy_animation()
+            self._settle_privacy_mic()
         elif new_state == State.IDLE:     play_idle_animation()
         elif new_state == State.CURIOUS:  play_curious_animation()
         elif new_state == State.THINKING: play_thinking_animation()
         elif new_state == State.SORRY:    play_sorry_animation()
+
+    def _settle_privacy_mic(self):
+        """转进隐私姿势要转动舵机，转动本身的机械噪音很容易被 MicStream 的
+        RMS 阈值误判成"有人在说话"（用户实测反馈：舵机转完以后又莫名其妙
+        重新进了开心——追查下来是这段噪音被当成一次真实的语音触发，绕过了
+        `check_voice_wake()` 里给隐私状态关摄像头那条分支，直接跑完一遍对话
+        流程，SenseVoice 认不出这段噪音里有什么词，`_settle_happy()` 收尾时
+        又刚好还能看到人脸，于是就地满血复活成开心）。
+
+        这里不是瞎猜一个固定时长去等，而是轮询 `/status` 直到舵机真的转到
+        （在容差范围内）隐私姿势的目标角度——`PRIVACY_SPEED` 具体对应多久
+        没有精确文档，猜大概率会猜错。转到位之后还不能立刻处理，因为 VAD
+        要等连续 `STREAM_SILENCE_SECONDS` 秒的安静才会把"这一段"关闭并放进
+        队列——舵机停转的那一刻，噪音触发的那段"话"可能还没被判定为"说完
+        了"，这时候去看队列多半还是空的。等够这段时间后，把 MicStream 队列
+        里可能已经攒着的那一段直接丢弃，不进入对话流程；如果这段时间里真的
+        有人在说话（不是噪音），也不要紧——`check_voice_wake()` 本来就是每
+        个 tick 都在查，丢掉这一段之后，用户接下来说的任何一句新的话依然会
+        被正常捕捉到，不会被永久性地"聋掉"。"""
+        deadline = time.time() + 5.0
+        settled = False
+        while time.time() < deadline:
+            status = get_status()
+            if status:
+                yaw_ok = abs(status.get("yaw", 0) - PRIVACY_YAW) <= 20
+                pitch_ok = abs(status.get("pitch", 0) - PRIVACY_PITCH) <= 20
+                if yaw_ok and pitch_ok:
+                    settled = True
+                    break
+            time.sleep(0.2)
+        if not settled:
+            print("[隐私] 等舵机转到位超时，按最长等待时间处理")
+
+        time.sleep(STREAM_SILENCE_SECONDS + 0.3)
+        discarded = self.mic_stream.take_utterance()
+        if discarded is not None:
+            print("[隐私] 丢弃了一段疑似舵机转动噪音触发的误判语音")
 
     def enter_happy(self):
         """人脸(重新)确认在场、准备进入/停留在 HAPPY 时统一走这里，而不是直接
