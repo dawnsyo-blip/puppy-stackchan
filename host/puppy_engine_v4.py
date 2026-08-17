@@ -75,11 +75,12 @@ FACE_LOST_GRACE_SEC = 20        # 人脸消失后等多久才离开开心
 EXCITED_DURATION_SEC = 6
 
 # --- 触摸触发 ---
-# 隐私状态太容易被误触退出（之前是短按就退出，很容易被不小心碰一下打断）。
-# 现在只保留隐私这一条触摸触发路径，而且要求长按满 3 秒才生效，其它状态
-# 原来的触摸触发（短按→扫描找人、长按1秒→兴奋）暂时先关掉——见 tick() 里
-# 触摸处理那一段的注释。
-PRIVACY_EXIT_HOLD_SEC = 3.0
+# 三条触摸路径：碰屏幕→开心（摸头反应）、头顶双击→兴奋、头顶长按满
+# PRIVACY_HOLD_SEC→进/出隐私（同一个长按动作，按当前是否已经在隐私状态来
+# 决定方向，见 tick() 里触摸处理那一段）。长按用的是"持续按住 N 秒"，跟
+# 双击（两次快速点按，firmware.ino 里 DOUBLE_TAP_WINDOW=800ms 以内）在手势
+# 形态上明显不同，不会互相误触发。
+PRIVACY_HOLD_SEC = 3.0
 
 # --- 面部追踪 ---
 FACE_CHECK_INTERVAL_SEC = 3.0
@@ -116,6 +117,14 @@ HAPPY_YAW_SPEED = 400
 HAPPY_CYCLES = 3
 HAPPY_CYCLE_DELAY = 0.4
 HAPPY_PITCH = 300
+
+# --- 摸头反应动画参数（碰屏幕触发，用开心表情但舵机动作不同：轻微小幅度
+#     抬头，不是完整摇头动画）---
+PET_PITCH_UP = 400      # 默认回正是 450，400 只是轻微抬头，幅度比 HAPPY_PITCH(300) 小很多
+PET_PITCH_DOWN = 450
+PET_SPEED = 300
+PET_CYCLES = 3
+PET_CYCLE_DELAY = 0.3
 
 # --- 兴奋动画参数 ---
 EXCITED_YAW_RANGE = 800
@@ -513,6 +522,18 @@ def play_happy_animation():
         time.sleep(HAPPY_CYCLE_DELAY)
     # 动画结束后回正，确保摄像头对准人
     move_servo(yaw=0, pitch=450, speed=300, mute=True)
+
+def play_pet_animation():
+    """碰一下屏幕的专属反应：用开心的面部表情，但舵机动作是轻微小幅度抬头
+    3 次，不是"进入开心"时的完整摇头动画——这是一次性的"摸摸头"反应，不是
+    状态切换动画，所以不复用 play_happy_animation()。"""
+    set_expression("happy")
+    set_led_mode("solid", *WARM_WHITE_RGB)
+    for _ in range(PET_CYCLES):
+        move_servo(pitch=PET_PITCH_UP, speed=PET_SPEED, mute=True)
+        time.sleep(PET_CYCLE_DELAY)
+        move_servo(pitch=PET_PITCH_DOWN, speed=PET_SPEED, mute=True)
+        time.sleep(PET_CYCLE_DELAY)
 
 def play_excited_animation():
     set_expression("excited")
@@ -986,6 +1007,13 @@ class PuppyEngine:
         # 触摸检测
         self.last_touch_poll = 0
         self.touch_pressed = False
+        # 长按进/出隐私每次连续按住只应该触发一次——不然一次持续 3 秒以上的
+        # 长按会在越过阈值那一刻先触发一次（比如"进入隐私"），手指还没松开、
+        # held_ms 继续增长，下一次轮询看到状态已经是 PRIVACY，又会立刻判定
+        # 成"退出隐私"，同一次按住里进出闪一下。靠这个 flag 记"这一次连续
+        # 按住是否已经处理过"，在 check_touch() 检测到松开（held_ms 归零）
+        # 时重置。
+        self.privacy_hold_fired = False
         # 头顶双击 / 屏幕点击是固件端的单调递增计数器（见 firmware.ino 的
         # g_headDoubleTapCount/g_screenTapCount），host 端记上一次看到的值，
         # 靠比较有没有变化判断"这段时间里有没有发生过一次新的手势"——不能
@@ -1049,9 +1077,9 @@ class PuppyEngine:
 
         print("[引擎] 小狗行为引擎 v4 启动！")
         print(f"[引擎] 当前状态: {self.state.value}")
-        print("[引擎] 碰一下屏幕 → 扫描找人 → 开心")
+        print("[引擎] 碰一下屏幕 → 开心（摸头反应）")
         print("[引擎] 头顶双击 → 兴奋")
-        print(f"[引擎] 隐私状态下长按头顶满 {PRIVACY_EXIT_HOLD_SEC}s → 退出隐私")
+        print(f"[引擎] 头顶长按满 {PRIVACY_HOLD_SEC}s → 进/出隐私")
         print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应")
         print("[引擎] Ctrl+C 退出\n")
 
@@ -1154,6 +1182,20 @@ class PuppyEngine:
         # 地方（比如 speak_keywords() 播报关键词、EXCITED 定时结束）静默切
         # 回开心，LED 可能还停在上一个状态的效果上，这里补一次常亮。
         set_led_mode("solid", *WARM_WHITE_RGB)
+
+    def pet_happy(self):
+        """碰一下屏幕的专属反应：不依赖 scan_for_face() 先找到人脸再进
+        开心——用户正在碰屏幕，人显然就在设备正前方，不需要再转头确认一次。
+        直接进 HAPPY 状态，播放 play_pet_animation()（开心表情 + 轻微抬头
+        3 次，跟 enter_happy() 的完整摇头动画是两个不同的动作）。不设状态
+        限制，跟头顶双击→兴奋一样，从任何状态碰屏幕都会触发。"""
+        old = self.state
+        self.session_active = True
+        self.state = State.HAPPY
+        self.state_enter_time = time.time()
+        if old != State.HAPPY:
+            print(f"[转移] {old.value} → 开心（摸头反应）")
+        play_pet_animation()
 
     def record_interaction(self):
         self.last_interaction = time.time()
@@ -1318,6 +1360,7 @@ class PuppyEngine:
         if not pressed and self.touch_pressed:
             print("[触摸] 松开")
             self.record_interaction()
+            self.privacy_hold_fired = False
         self.touch_pressed = pressed
 
         if double_tap:
@@ -1644,24 +1687,28 @@ class PuppyEngine:
         poll_slot = self.tick_count % 2   # 0=触摸 1=人脸
 
         # --- 触摸（最高优先级）---
-        # 目前只保留三条触摸触发路径：
-        # 1. 碰一下屏幕 → 开心（跟以前短按头顶→扫描找人是同一套逻辑，只是
-        #    触发方式换成了屏幕）。
-        # 2. 头顶双击 → 兴奋，不看当前是什么状态（跟以前长按1秒→兴奋一样
-        #    不设限制，transition() 自己对"目标状态跟当前一样"是空操作，不
-        #    用在这里额外判断）。
-        # 3. 隐私状态下长按满 PRIVACY_EXIT_HOLD_SEC(3s) → 退出隐私。之前拿
-        #    host 自己记的按下时刻去减轮询到的这一刻算时长，如果这几秒中间
-        #    正好卡在一整轮对话处理里（tick() 被 run_conversation_turn()
-        #    阻塞住），松开的时候再一算，状态可能已经因为别的原因（比如
-        #    语音）离开了隐私，长按就白按了。现在直接读固件端持续维护的
-        #    held_ms，不依赖 host 这边的轮询节奏，更稳。
+        # 目前保留三条触摸触发路径：
+        # 1. 碰一下屏幕 → 开心（摸头反应）。不依赖 scan_for_face()、不设
+        #    状态限制——碰屏幕时人显然就在设备正前方，不需要再扫描确认，
+        #    见 pet_happy()。之前这里复用的是"短按→扫描找人"那套逻辑，
+        #    scan_for_face() 找不到人脸时会静默失败、既不报错也不进开心，
+        #    这是"碰屏幕没反应"的根因；现在改成直接触发，不再依赖摄像头。
+        # 2. 头顶双击 → 兴奋，不看当前是什么状态（transition() 自己对
+        #    "目标状态跟当前一样"是空操作，不用在这里额外判断）。
+        # 3. 头顶长按满 PRIVACY_HOLD_SEC(3s) → 进/出隐私，按当前是否已经在
+        #    隐私状态决定方向。这一条之前只写了"隐私状态下长按→退出"，根本
+        #    没有"非隐私状态长按→进入"这个分支，所以长按头顶从来没能触发过
+        #    隐私——不是跟双击手势冲突，是这条路径压根没实现。长按（持续
+        #    按住 3 秒）和双击（两次快速点按，firmware.ino 里
+        #    DOUBLE_TAP_WINDOW=800ms 以内）手势形态差异明显，不会互相误判。
+        #    用 held_ms 而不是 host 自己记时间戳：host 万一被一整轮对话
+        #    （好几秒）卡住没来得及轮询，固件端这个值依然精确，不依赖轮询
+        #    节奏。
         touch = self.check_touch() if poll_slot == 0 else None
         if touch is not None:
-            if touch["screen_tap"] and self.state in (State.IDLE, State.SLEEPY, State.PRIVACY):
-                print("[触发] 触碰屏幕 → 扫描找人")
-                if self.scan_for_face():
-                    self.enter_happy()
+            if touch["screen_tap"]:
+                print("[触发] 触碰屏幕 → 开心（摸头反应）")
+                self.pet_happy()
                 return
 
             if touch["double_tap"]:
@@ -1669,12 +1716,16 @@ class PuppyEngine:
                 self.transition(State.EXCITED)
                 return
 
-            if self.state == State.PRIVACY and touch["held_ms"] > 0:
-                if touch["held_ms"] >= PRIVACY_EXIT_HOLD_SEC * 1000:
+            if touch["held_ms"] >= PRIVACY_HOLD_SEC * 1000 and not self.privacy_hold_fired:
+                self.privacy_hold_fired = True
+                if self.state == State.PRIVACY:
                     print(f"[触发] 长按 {touch['held_ms']/1000:.1f}s → 退出隐私")
                     if self.scan_for_face():
                         self.enter_happy()
-                    return
+                else:
+                    print(f"[触发] 长按 {touch['held_ms']/1000:.1f}s → 进入隐私")
+                    self.transition(State.PRIVACY)
+                return
 
         # --- 语音唤醒（好奇/思考期间已经在处理语音了，不重复检查）---
         if self.state not in (State.CURIOUS, State.THINKING):
