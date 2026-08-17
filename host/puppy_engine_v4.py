@@ -203,12 +203,24 @@ STREAM_SILENCE_SECONDS = 1.0       # 连续这么久 RMS 都低于阈值，判�
 STREAM_PREROLL_SECONDS = 0.4       # 判定"开始说话"的那一刻往前多留一点余量
                                     # （因为是按 0.5s 一段判定的，真正开口的
                                     # 时刻很可能比"这一段整体超过阈值"稍早）
-STREAM_RMS_THRESHOLD = 450         # 语音触发阈值——沿用旧方案(/volume 方案)
-                                    # 校准出的数值：安静环境基线约 280-367，
-                                    # 说话时能冲到 778 左右，麦克风硬件和增益
-                                    # 都没变，只是采样方式从"偶尔采 1 秒"改成
-                                    # "连续按 0.5 秒一段"，量级应该还适用；如果
-                                    # 实机测下来触发不灵/太灵，从这个值开始调。
+STREAM_RMS_THRESHOLD = 600         # 语音触发阈值。原始校准值是 450（安静环境
+                                    # 基线约 280-367，说话时能冲到 778 左右），
+                                    # 但实测环境噪音会偶尔冲上 450 触发一次
+                                    # "假语音"——check_voice_wake() 一旦判定
+                                    # 有语音就同步跑完整个对话链路（STT+LLM+
+                                    # TTS+播放，好几秒起步），这几秒里 tick()
+                                    # 完全被占住，连带把当时可能正在进行的
+                                    # 长按头顶（进/出隐私）也读不到了。抬高到
+                                    # 600（离说话时的 778 还有富余，不会明显
+                                    # 影响拾音灵敏度），给环境噪音多留一点
+                                    # 缓冲区；如果之后实测还是有环境噪音能冲
+                                    # 上 600、或者反而说话变得不够灵敏，从这个
+                                    # 值继续调——固件端的物理麦克风增益
+                                    # （setup() 里的 mic_cfg.magnification=5）
+                                    # 是专门为了让小声说话也能被听清才调高的，
+                                    # 不要为了压环境噪音去调低它，两个问题分开
+                                    # 处理：物理增益负责"听得到"，这个阈值负责
+                                    # "判断是不是真的有人在说话"。
 # --- 完整对话链路 ---
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
 BUTTON_PRESS_MS = 200            # 每个关键词播放前，按钮"按下"状态维持的时长
@@ -973,7 +985,8 @@ class MicStream:
             return
         segment = bytes(self._buffer[lo:hi])
         dur = len(segment) / self._bytes_per_sample / self.sample_rate
-        print(f"[流式监听] 捕捉到一段语音，时长 {dur:.2f}s")
+        rms = _pcm_rms(segment)
+        print(f"[流式监听] 捕捉到一段语音，时长 {dur:.2f}s，RMS={rms:.0f}")
         self._utterance_queue.put(segment)
 
 
@@ -1727,8 +1740,15 @@ class PuppyEngine:
                     self.transition(State.PRIVACY)
                 return
 
-        # --- 语音唤醒（好奇/思考期间已经在处理语音了，不重复检查）---
-        if self.state not in (State.CURIOUS, State.THINKING):
+        # --- 语音唤醒（好奇/思考期间已经在处理语音了，不重复检查；头顶正被
+        #     按住时也跳过——check_voice_wake() 一旦捕捉到语音段就会同步跑完
+        #     整个对话链路，好几秒起步，这几秒里 tick() 完全被占住，正在
+        #     进行中的长按（进/出隐私）会因此错过后续轮询，等对话链路跑完
+        #     再来看 held_ms，用户多半已经松手了。self.touch_pressed 由
+        #     check_touch() 维护，不要求本轮 tick 恰好轮到触摸这个 poll_slot
+        #     也能读到最近一次的按住状态，最多滞后一个轮询周期，长按持续
+        #     3 秒以上，这点滞后不影响判断）---
+        if self.state not in (State.CURIOUS, State.THINKING) and not self.touch_pressed:
             if self.check_voice_wake():
                 return
 
