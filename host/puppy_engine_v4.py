@@ -243,6 +243,11 @@ STREAM_RMS_THRESHOLD = 600         # 语音触发阈值。原始校准值是 450
 # --- 完整对话链路 ---
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
 BUTTON_PRESS_MS = 200            # 每个关键词播放前，按钮"按下"状态维持的时长
+KEYWORD_MAX_CHARS = 10           # 单个关键词允许的最大字符数——SYSTEM_PROMPT 要求
+                                  # 每个关键词 1-3 个字，词库里最长的合法例外是英文
+                                  # "love you"(8 字符)，这里留了点余量；LLM 偶尔不
+                                  # 遵守这条规则，会把没拆开的整句话塞进 keywords
+                                  # 数组的某一项，见 sanitize_keywords()
 
 # --- 字幕：语音段识别出结果后，把识别到的文字显示出来，方便用户确认输入
 #     内容，一直保留到 LLM 回复出来、即将执行下一步动作时才清空。改成流式
@@ -376,6 +381,10 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"人"
   的词，各占 keywords 数组里的一项）。你说的每一句话，不管是简单回应还是
   复杂回应，都只能通过关键词表达，不能输出完整语句——这是这只小狗表达
   自己的唯一方式，类似 AAC（辅助沟通）设备，不是在写一句正常的话。
+  错误示范（发生过，绝对不要这样）：
+  {"type": "qa_complex", "keywords": ["今天天气很好，还伴有微风"]}
+  ——这是把整句话原样塞进了 keywords 数组的一项里，等于完全没有拆分成
+  关键词，念出来会变成小狗说了一整句完整的话。
 - 优先从下面的词库里选，但不局限于词库，需要时可以用词库外的词（权重从高
   到低排列）：
   需求词（权重最高）：外面、出门、玩、水、零食、飞盘、球球、拔河、罐罐、
@@ -817,6 +826,26 @@ def ask_llm(user_text, api_key):
         pass
 
     return reply_text, intent, data
+
+
+def sanitize_keywords(keywords):
+    """qa_complex 的关键词是 AAC 按钮式的短词/短语，SYSTEM_PROMPT 明确要求
+    每个 1-3 个字、绝对不能是完整句子——但 LLM 不是每次都遵守，偶尔会把没
+    拆开的一整句话直接塞进 keywords 数组的某一项里。这种违规在 host 端解析
+    JSON 时完全合法（就是个正常的字符串数组），不会被 ask_llm() 的异常处理
+    拦下来，一路传到 speak_keywords()，把这一项当成"一个关键词"合成语音
+    播放——表现出来就是"小狗突然说了一整句完整的话"而不是关键词风格的短促
+    回应。这里做最后一道防线：超过 KEYWORD_MAX_CHARS 的直接丢弃，不做
+    截断（截断出来的半截句子听起来更奇怪，不如跳过这一个，用剩下合规的
+    关键词照常回应）；如果全部超长（比如就一个词、还刚好是句子），保留
+    第一个并截断，总比什么都不说要好。"""
+    cleaned = [kw for kw in keywords if kw and len(kw) <= KEYWORD_MAX_CHARS]
+    if cleaned:
+        return cleaned
+    if keywords and keywords[0]:
+        print(f"[对话] 关键词全部超长（疑似 LLM 没拆句子），截断保底: {keywords[0][:KEYWORD_MAX_CHARS]}")
+        return [keywords[0][:KEYWORD_MAX_CHARS]]
+    return []
 
 
 # ╔══════════════════════════════════════════════╗
@@ -1807,6 +1836,9 @@ class PuppyEngine:
                    # "小狗"后面），机械按词性重排反而会破坏这个顺序，所以这版
                    # 直接信任 LLM 给出的顺序。
                 keywords = data.get("keywords") or [reply_text[:6]]
+                # 过滤掉 LLM 偶尔违规塞进来的完整句子，只丢词不重排，不影响
+                # 上面说的"信任 LLM 给出的顺序"。
+                keywords = sanitize_keywords(keywords)
                 print(f"[对话] 复杂回应，播报关键词: {keywords}")
                 self._settle_happy(track_ok)
                 self.speak_keywords(keywords)
