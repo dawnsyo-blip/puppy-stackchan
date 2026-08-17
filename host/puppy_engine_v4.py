@@ -36,6 +36,7 @@ import time
 import sys
 import json
 import base64
+import random
 import asyncio
 import tempfile
 import threading
@@ -202,11 +203,28 @@ SCAN_PAUSE = 1.0
 # 风格，不用整句 TTS 旁白），整个过程是一次同步阻塞的交互（跟
 # run_conversation_turn() 一样），tick() 主循环观察不到中间的子阶段，见
 # PuppyEngine.play_game_hide_seek()。
-GAME_SCAN_STEPS = 12             # 扫描步数，从 GAME_SCAN_YAW_MIN 到 MAX 均匀分布
 GAME_SCAN_YAW_MIN = -800         # 复用 EXCITED_YAW_RANGE/PRIVACY_YAW 同量级的
 GAME_SCAN_YAW_MAX = 800          # 安全幅度，不是设计稿里没验证过的 100~900
+GAME_SCAN_YAW_JITTER = 120       # 每次扫描起点/终点在这个范围内随机抖动一点，
+                                  # 不要每次路径都一模一样，同时不会因为抖动
+                                  # 太大而漏掉边缘区域
+# 扫描用"之"字形覆盖两个不同的俯仰角度（抬头一遍、低头一遍），而不是原来
+# 固定在单一水平面扫——之前只扫一个 pitch，会导致右下角/桌面以下这类不在
+# 那个水平带里的东西永远拍不到。300/500 都是这个项目里已经用过、验证过
+# 安全的既有数值（HAPPY_PITCH=300、EXCITED_PITCH_HIGH=500），不是新猜的角度；
+# 具体哪个数值对应"抬头"哪个对应"低头"没有实机验证过（这份表情映射表里
+# pitch 数值和"抬头/低头"文字描述在别处也有过对不上的先例），如果实机看
+# 起来方向反了，直接把这个列表顺序倒过来就行，不影响其它逻辑。
+GAME_SCAN_PITCH_LEVELS = [300, 500]
+GAME_SCAN_STEPS_PER_LEVEL = 6     # 每个俯仰层扫几步，两层加起来共 12 步，
+                                  # 跟改版前单层 12 步的总耗时量级一致
 GAME_SCAN_PAUSE_SEC = 1.0        # 每步转头后停留多久再拍照（等舵机到位+防抖）
-GAME_SCAN_PITCH = 400            # 扫描时的 pitch，略微抬头照顾桌面/台面高度
+GAME_SCAN_SPEED_MIN = 150        # 扫描起步速度，比常规的 SCAN_SPEED(300) 更
+                                  # 从容——不能一下子转太快就找到，也给人多一点
+                                  # 悬念
+GAME_SCAN_SPEED_MAX = 450        # 扫描末段的最快速度，仍然低于这个项目里
+                                  # 用过的最快值（EXCITED_YAW_SPEED=500，兴奋
+                                  # 摇摆），确保"从慢到快"最终也落在安全范围内
 GAME_SCAN_TIMEOUT_SEC = 60       # 扫描总耗时上限，超过就算超时没找到
 GAME_HIST_THRESHOLD = 0.35       # 颜色直方图相关度阈值——初始猜测值，需要
                                   # 实机测试调整，误报多就调高，漏检多就调低
@@ -219,11 +237,23 @@ GAME_COUNTDOWN_NUMBERS = ["5", "4", "3", "2", "1"]  # 倒计时报的数字，�
                                   # 就是给人留出的藏东西时间，不需要额外阻塞等待
 GAME_COUNTDOWN_GAP_SEC = 1.0     # 倒计时数字之间的间隔，比默认的
                                   # KEYWORD_GAP_SEC(0.5s) 更从容，像真的在数数
+GAME_REJECTION_WINDOW_SEC = 3.0  # 念完识别到的物品关键词后，留这么久给人
+                                  # 说"不是这个"之类的否定/重来指令，见
+                                  # is_registration_rejection()
 
 # --- 游戏 LED（对照表情映射v7.xlsx 里没有的新增行）---
 GAME_COUNTDOWN_LED_RGB = (0, 100, 255)
 GAME_COUNTDOWN_LED_PERIOD_MS = 2000
 GAME_SCAN_LED_PERIOD_MS = 3000
+
+# --- 游戏固定词汇 TTS 预热 ---
+# "小狗""看""开始"和倒计时数字这几个词，内容从来不随游戏而变，没必要每次
+# 触发游戏都现合成一次——TTS 合成是一次网络往返，几百毫秒到一两秒不等，
+# 用户反馈"从听到邀请到说出'小狗 看'中间等太久"，这段网络延迟是主因之一。
+# PuppyEngine.__init__() 后台预热合成好并缓存路径（_prewarm_game_tts()），
+# _game_speak_keywords() 优先用缓存，只有缓存未命中（预热还没跑完，或者是
+# LLM 生成的动态关键词，比如识别到的物品/位置）才现合成。
+GAME_FIXED_PHRASES = ["小狗", "看", "开始"] + GAME_COUNTDOWN_NUMBERS
 
 # --- 视觉大模型（Qwen-VL，通过阿里云 DashScope 的 OpenAI 兼容端点）---
 # 用途有三处：①注册阶段把拍到的物品压缩成 1 个关键词念出来（比如"橘子"）
@@ -859,6 +889,24 @@ def is_calling_puppy(text):
     return len(cleaned) <= 8 and cleaned.count("小狗") >= 2
 
 
+GAME_REJECTION_PATTERNS = [
+    "不是这个", "不是那个", "不对", "看错了", "认错了",
+    "换一个", "换个", "重新来", "重新看", "不是这样", "不是它",
+]
+
+
+def is_registration_rejection(text):
+    """判断这句话是不是在否定捉迷藏游戏刚识别到的物品、要求重新看一次
+    （比如"不是这个""看错了""换一个"）。直接走关键词匹配，不经过 LLM 语义
+    分类——这类否定短语说法有限，且只在游戏注册阶段一个很窄的窗口期内才会
+    去检查，没必要为了这个再多等一次网络往返（跟 is_calling_puppy() 同样
+    的设计取舍）。"""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    return any(p in cleaned for p in GAME_REJECTION_PATTERNS)
+
+
 def ask_llm(user_text, api_key):
     """调用 DeepSeek，返回 (reply_text, intent, parsed_data)。失败时 intent='other'。"""
     if not api_key:
@@ -1293,6 +1341,12 @@ class PuppyEngine:
             print("[引擎] 没有 Qwen-VL API key，捉迷藏游戏会退化成只用颜色直方图判断")
         self.game_ref_hist = None
         self.game_ref_desc = None
+        # 捉迷藏游戏固定词汇（"小狗""看""开始"、倒计时数字）的 TTS 预热缓存，
+        # 见 GAME_FIXED_PHRASES 和 _prewarm_game_tts()。后台线程跑，不拖慢
+        # 引擎启动；万一游戏在预热完成前就被触发，_game_tts() 会自动退化成
+        # 现合成，不影响正确性。
+        self._game_tts_cache = {}
+        threading.Thread(target=self._prewarm_game_tts, daemon=True).start()
 
         ensure_audio_server()
 
@@ -2152,6 +2206,28 @@ class PuppyEngine:
         stop_play()
         self.transition(State.IDLE)
 
+    def _prewarm_game_tts(self):
+        """后台预热合成 GAME_FIXED_PHRASES 里的固定词汇，缓存到
+        self._game_tts_cache，见常量定义处的说明。任何一个词合成失败就跳过
+        （_game_tts() 缓存未命中时会自动退化成现合成，不是致命问题）。"""
+        for i, phrase in enumerate(GAME_FIXED_PHRASES):
+            wav_path = tts_to_wav(phrase, f"game_fixed_{i}")
+            if wav_path:
+                self._game_tts_cache[phrase] = wav_path
+        print(f"[游戏] 固定词汇 TTS 预热完成（{len(self._game_tts_cache)}/{len(GAME_FIXED_PHRASES)}）")
+
+    def _game_tts(self, text, stem):
+        """跟 tts_to_wav() 一样合成一个词的音频，但固定词汇优先用
+        _prewarm_game_tts() 预热好的缓存，跳过一次网络合成——这是用户反馈
+        "从听到邀请到说出'小狗 看'中间等太久"之后加的，TTS 合成本身是一次
+        网络往返，几百毫秒到一两秒不等，而这几个词内容从来不变，没必要
+        每次触发游戏都重新合成。缓存未命中（预热还没跑完，或者是 LLM 生成
+        的动态关键词，比如识别到的物品/位置）就照常现合成。"""
+        cached = self._game_tts_cache.get(text)
+        if cached is not None:
+            return cached
+        return tts_to_wav(text, stem)
+
     def _game_wait_for_playback(self, timeout=PLAY_TIMEOUT):
         """跟 wait_for_playback() 一样轮询 /status 的 playing 字段等自然
         播完，但用 _game_check_abort() 代替 handle_touch_trigger()——游戏
@@ -2183,7 +2259,7 @@ class PuppyEngine:
             return True
         set_button("up")
         time.sleep(BUTTON_PRESS_MS / 1000)
-        next_wav = tts_to_wav(keywords[0], "game_kw_0")
+        next_wav = self._game_tts(keywords[0], "game_kw_0")
         for i in range(len(keywords)):
             set_button("down")
             time.sleep(BUTTON_PRESS_MS / 1000)
@@ -2197,7 +2273,7 @@ class PuppyEngine:
                         return False
                 set_led(off=True)
             if i + 1 < len(keywords):
-                next_wav = tts_to_wav(keywords[i + 1], f"game_kw_{i + 1}")
+                next_wav = self._game_tts(keywords[i + 1], f"game_kw_{i + 1}")
             time.sleep(gap_sec)
         set_button("off")
         return True
@@ -2205,39 +2281,78 @@ class PuppyEngine:
     def _game_register_phase(self):
         """阶段一：看物品并记住——按钮播报"小狗 看"，看的时候（含实际拍照
         那一刻）LED 绿色提示正在用摄像头；拍完提取颜色直方图，再调 Qwen-VL
-        把识别结果压缩成一个关键词念出来（比如"橘子"）；最后点两下头、按
-        按钮说"开始"，示意进入倒计时。VLM 不可用时跳过关键词播报，不影响
-        游戏继续（后面扫描阶段会退化成只靠颜色直方图判断）。"""
-        print("[游戏] 阶段：看物品")
-        set_expression("curious")
-        set_led_mode("solid", *THINKING_GREEN_RGB)
-        if not self._game_speak_keywords(["小狗", "看"], led_rgb=THINKING_GREEN_RGB):
-            return False
-
-        set_led(*THINKING_GREEN_RGB)  # 保证拍照这一刻确实是绿灯，不受限于
-                                       # 上面关键词播放间隙里"灭灯"的时序
-        img, jpeg_bytes = capture_frame_with_bytes()
-        set_led(off=True)
-        if img is None:
-            print("[游戏] 拍照失败，取消游戏")
-            self.transition(State.SORRY)
-            time.sleep(1.5)
-            self.transition(State.IDLE)
-            return False
-
-        self.game_ref_hist = extract_color_hist(img)
-        self.game_ref_desc = call_vision_llm(jpeg_bytes, GAME_OBJECT_DESC_PROMPT, self.qwen_api_key)
-        print(f"[游戏] 物品描述: {self.game_ref_desc or '（VLM 不可用，仅用颜色直方图判断）'}")
-        if self.game_ref_desc:
-            desc_keywords = sanitize_keywords(self.game_ref_desc.split())
-            if desc_keywords and not self._game_speak_keywords(desc_keywords):
+        把识别结果压缩成一个关键词念出来（比如"橘子"）。念完给一个窗口期
+        （_game_listen_for_rejection()），人可以说"不是这个"之类的话让小狗
+        重新看一次——不这样的话，认错物品只能眼睁睁看着流程走到倒计时才能
+        发现。确认（或者超时没人反对）以后，点两下头、按按钮说"开始"，示意
+        进入倒计时。全程用 set_expression("thinking") 表示"正在专心记这个
+        东西"；VLM 不可用时跳过关键词播报和否定窗口的语义检查基础（没有
+        识别结果可以被否定），不影响游戏继续（后面扫描阶段会退化成只靠
+        颜色直方图判断）。"""
+        set_expression("thinking")
+        while True:
+            print("[游戏] 阶段：看物品")
+            set_led_mode("solid", *THINKING_GREEN_RGB)
+            if not self._game_speak_keywords(["小狗", "看"], led_rgb=THINKING_GREEN_RGB):
                 return False
+
+            set_led(*THINKING_GREEN_RGB)  # 保证拍照这一刻确实是绿灯，不受限于
+                                           # 上面关键词播放间隙里"灭灯"的时序
+            img, jpeg_bytes = capture_frame_with_bytes()
+            set_led(off=True)
+            if img is None:
+                print("[游戏] 拍照失败，取消游戏")
+                self.transition(State.SORRY)
+                time.sleep(1.5)
+                self.transition(State.IDLE)
+                return False
+
+            self.game_ref_hist = extract_color_hist(img)
+            self.game_ref_desc = call_vision_llm(jpeg_bytes, GAME_OBJECT_DESC_PROMPT, self.qwen_api_key)
+            print(f"[游戏] 物品描述: {self.game_ref_desc or '（VLM 不可用，仅用颜色直方图判断）'}")
+            if self.game_ref_desc:
+                desc_keywords = sanitize_keywords(self.game_ref_desc.split())
+                if desc_keywords and not self._game_speak_keywords(desc_keywords):
+                    return False
+
+            outcome = self._game_listen_for_rejection(GAME_REJECTION_WINDOW_SEC)
+            if outcome == "abort":
+                return False
+            if outcome == "reject":
+                print("[游戏] 人说不是这个，重新看一次")
+                continue
+            break
 
         set_expression("happy")
         play_nod_animation()
         if not self._game_speak_keywords(["开始"]):
             return False
         return True
+
+    def _game_listen_for_rejection(self, timeout):
+        """给用户一个窗口期，说"不是这个"之类的话可以让小狗重新看一次。
+        窗口开始前先丢弃一次可能残留在 MicStream 队列里的旧语音段（比如
+        "小狗 看"/识别结果播报期间麦克风被静音，恢复推流后短暂积攒的噪音），
+        避免误判成这次的否定指令。识别到语音后调用 self.transcribe()——跟
+        正常对话链路共用同一个 SenseVoice 模型和 self._asr_lock，不会真的
+        并发调用。跟 _game_check_abort() 一样只做信号判断，不影响 MicStream
+        本身的持续录制。返回 "abort"/"reject"/None 三选一，None 表示窗口期
+        内没有收到否定指令，可以正常往下走。"""
+        self.mic_stream.take_utterance()  # 丢弃窗口开始前可能残留的旧语音段
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._game_check_abort():
+                self._game_abort()
+                return "abort"
+            segment = self.mic_stream.take_utterance()
+            if segment is not None:
+                wav_bytes = pcm_to_wav_bytes(segment, sample_rate=self.mic_stream.sample_rate)
+                text = self.transcribe(wav_bytes, "game_reject_check.wav")
+                print(f"[游戏] 确认窗口期间听到:「{text}」")
+                if is_registration_rejection(text):
+                    return "reject"
+            time.sleep(0.1)
+        return None
 
     def _game_countdown_phase(self):
         """阶段二：倒计时——低头闭眼，按钮报数"5 4 3 2 1"，报数本身就是给
@@ -2251,18 +2366,24 @@ class PuppyEngine:
         return self._game_speak_keywords(GAME_COUNTDOWN_NUMBERS, gap_sec=GAME_COUNTDOWN_GAP_SEC)
 
     def _game_scan_phase(self):
-        """阶段三：扫描搜索——转头扫描房间（转动角度限制在 GAME_SCAN_YAW_MIN/
-        MAX 的安全范围内），每一步拍照算颜色直方图相关度，超过阈值就算初筛
-        命中；有物品描述的话再调一次 VLM 精确确认，没有就直接采信颜色匹配
-        结果。找到/超时/中途长按打断，三条路径都在这个方法里收尾。"""
+        """阶段三：扫描搜索——按 _game_build_scan_plan() 生成的"之"字形路径
+        转头扫描房间（俯仰分两层，覆盖原来固定单一水平面扫不到的低处/高处，
+        比如桌面以下、右下角这类之前漏检的区域），每一个"取景点"拍照算
+        颜色直方图相关度，超过阈值就算初筛命中；有物品描述的话再调一次 VLM
+        精确确认，没有就直接采信颜色匹配结果。转动速度随扫描进度从慢到快
+        （GAME_SCAN_SPEED_MIN → MAX），故意不是一开始就用最快速度扫完，
+        找到/超时/中途长按打断，三条路径都在这个方法里收尾。"""
         print("[游戏] 阶段：扫描搜索")
         set_expression("curious")
         set_led_mode("rainbow", period_ms=GAME_SCAN_LED_PERIOD_MS)
 
+        plan = self._game_build_scan_plan()
+        total_points = len(plan)
+
         found = False
         found_jpeg_bytes = None
         scan_start = time.time()
-        for step in range(GAME_SCAN_STEPS):
+        for step, point in enumerate(plan):
             if time.time() - scan_start > GAME_SCAN_TIMEOUT_SEC:
                 print("[游戏] 扫描超时")
                 break
@@ -2270,15 +2391,19 @@ class PuppyEngine:
                 self._game_abort()
                 return
 
-            target_yaw = self._game_scan_yaw(step)
-            move_servo(yaw=target_yaw, pitch=GAME_SCAN_PITCH, speed=SCAN_SPEED, mute=True)
+            progress = step / max(1, total_points - 1)
+            speed = int(GAME_SCAN_SPEED_MIN + (GAME_SCAN_SPEED_MAX - GAME_SCAN_SPEED_MIN) * progress)
+            move_servo(yaw=point["yaw"], pitch=point["pitch"], speed=speed, mute=True)
             time.sleep(GAME_SCAN_PAUSE_SEC)
+
+            if not point["capture"]:
+                continue  # 途径点（比如两层之间的回正点），只是路过，不拍照判断
 
             img, jpeg_bytes = capture_frame_with_bytes()
             if img is None:
                 continue
             corr = compare_hist(self.game_ref_hist, extract_color_hist(img))
-            print(f"[游戏] 扫描 yaw={target_yaw} 颜色相关度={corr:.2f}")
+            print(f"[游戏] 扫描 yaw={point['yaw']} pitch={point['pitch']} speed={speed} 颜色相关度={corr:.2f}")
             if corr <= GAME_HIST_THRESHOLD:
                 continue
 
@@ -2294,14 +2419,36 @@ class PuppyEngine:
             self._game_on_timeout()
 
     @staticmethod
-    def _game_scan_yaw(step):
-        """第 step 步（0-based）该转到的 yaw，从 GAME_SCAN_YAW_MIN 到 MAX
-        线性均匀分布，覆盖扫描找人参数（SCAN_POSITIONS）同一量级的安全
-        转动范围。"""
-        if GAME_SCAN_STEPS <= 1:
-            return 0
-        span = GAME_SCAN_YAW_MAX - GAME_SCAN_YAW_MIN
-        return int(GAME_SCAN_YAW_MIN + step * span / (GAME_SCAN_STEPS - 1))
+    def _game_build_scan_plan():
+        """生成一次扫描的完整路径：按 GAME_SCAN_PITCH_LEVELS 依次抬头/低头
+        （具体哪个数值对应哪个方向没有实机验证，见常量定义处的说明），每层
+        的 yaw 方向跟上一层相反，扫成"之"字形，而不是原来固定在单一水平面
+        左右来回扫——那样会漏掉不在那个水平带里的区域（比如桌面以下）。
+        每层的起点/终点各自在 GAME_SCAN_YAW_JITTER 范围内随机抖动一点，
+        不要每次路径都一模一样；层与层之间插一个 yaw 回正的过渡点（不拍照，
+        capture=False），既是"中途回正的途径点"，也让俯仰变化更自然（先转平
+        再变俯仰，不是斜着一步到位）。返回一串 {"yaw", "pitch", "capture"}
+        字典，按顺序执行。"""
+        plan = []
+        for level_idx, pitch in enumerate(GAME_SCAN_PITCH_LEVELS):
+            left_to_right = (level_idx % 2 == 0)
+            jitter_start = random.uniform(0, GAME_SCAN_YAW_JITTER)
+            jitter_end = random.uniform(0, GAME_SCAN_YAW_JITTER)
+            if left_to_right:
+                start, end = GAME_SCAN_YAW_MIN + jitter_start, GAME_SCAN_YAW_MAX - jitter_end
+            else:
+                start, end = GAME_SCAN_YAW_MAX - jitter_start, GAME_SCAN_YAW_MIN + jitter_end
+
+            for step in range(GAME_SCAN_STEPS_PER_LEVEL):
+                t = step / max(1, GAME_SCAN_STEPS_PER_LEVEL - 1)
+                yaw = start + (end - start) * t
+                yaw = int(max(GAME_SCAN_YAW_MIN, min(GAME_SCAN_YAW_MAX, yaw)))
+                plan.append({"yaw": yaw, "pitch": pitch, "capture": True})
+
+            if level_idx < len(GAME_SCAN_PITCH_LEVELS) - 1:
+                plan.append({"yaw": 0, "pitch": pitch, "capture": False})
+
+        return plan
 
     def _game_confirm_with_vlm(self, jpeg_bytes):
         """颜色直方图初筛命中后，调 VLM 精确确认画面里是不是真的是那个物品。
