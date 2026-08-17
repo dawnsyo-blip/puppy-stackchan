@@ -70,7 +70,14 @@ PLAY_TIMEOUT = 30               # /play 本身现在是非阻塞的（固件后�
 API_RETRY_DELAY_SEC = 2.0       # API 请求失败（连不上/超时）后，等这么久再重试一次，
                                  # 不要立刻重试，避免在设备本来就吃紧时继续加压
 
-MAIN_LOOP_INTERVAL_SEC = 0.5    # 主循环 tick() 间隔
+MAIN_LOOP_INTERVAL_SEC = 0.2    # 主循环 tick() 间隔——原来是 0.5s，从触摸到
+                                 # 反应动作激活的延迟主要就取决于这个数字（见
+                                 # TOUCH_POLL_SEC 旁边的说明）。调低以后其它
+                                 # 轮询没有跟着变频繁：人脸检测仍然由自己的
+                                 # FACE_CHECK_INTERVAL_SEC/FACE_RETRACK_
+                                 # INTERVAL_SEC 内部节流（这两个值没变），
+                                 # tick() 只是"有资格检查"的时机变密了，实际
+                                 # 发不发请求还是那两个值说了算。
 
 # --- 计时器（秒） ---
 IDLE_TO_SLEEPY_SEC = 180
@@ -188,7 +195,15 @@ SCAN_SPEED = 300
 SCAN_PAUSE = 1.0
 
 # --- 触摸检测 ---
-TOUCH_POLL_SEC = 0.5
+# 从"手指碰到传感器"到"反应动作真正开始"的延迟，上限基本就是
+# MAIN_LOOP_INTERVAL_SEC + TOUCH_POLL_SEC 这两个数字之和（HTTP 往返本身只有
+# 30-50ms，可以忽略）：check_touch() 已经不再受 poll_slot 轮流限制、每个
+# tick 都会调用，但它内部还有这个独立节流——一起从 0.5s 降到 0.2s，把最坏情况
+# 延迟从原来最多 ~1s 压到 ~0.4s。之所以敢往下调：/touch 早就是
+# handleTouch() 那种零堆分配的静态缓冲区实现（历史上 /volume 那次教训是
+# malloc()+高频轮询的组合拳，不是单纯"轮询快"本身的问题），提高到 5Hz 左右
+# 不会重蹈那次覆辙。
+TOUCH_POLL_SEC = 0.2
 
 # --- 语音唤醒（方案B：TCP 流式监听，取代方案A的 /volume 轮询 + /record
 #     间歇录音）---
@@ -358,7 +373,7 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"老�
   简单复读。如果发现自己选的词和问题原句几乎一样，说明大概率是偷懒没有
   真的回答，回去重想。
 - **每一个关键词本身必须是单个词/短语（1-3个字为主），绝对不能是完整的
-  主谓宾句子**（比如不能写"老大叫我"这种，应该拆成"老大"和"叫"两个独立
+  主谓宾句子**（比如不能写"人叫我"这种，应该拆成"人"和"叫"两个独立
   的词，各占 keywords 数组里的一项）。你说的每一句话，不管是简单回应还是
   复杂回应，都只能通过关键词表达，不能输出完整语句——这是这只小狗表达
   自己的唯一方式，类似 AAC（辅助沟通）设备，不是在写一句正常的话。
@@ -367,7 +382,7 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"老�
   需求词（权重最高）：外面、出门、玩、水、零食、飞盘、球球、拔河、罐罐、
   牛奶、睡觉、尿尿、噗噗
   时间词：今天、明天、现在、刚才、结束
-  对象词：老大、小猫、咪咪、耶耶、边边、大黄
+  对象词：人、小猫、咪咪、耶耶、边边、大黄
   地点词：外面、厨房、阳台、房间
   状态词：开心、怕怕、累、饿、痛痛
   情感词：love you、爱你
@@ -383,7 +398,7 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"老�
 - 不用动名词组合（说"飞盘"，不说"玩飞盘"）。
 - 不要重复意思相近的动词。
 - 最迫切/最重要的词放最前面。
-- 指代对象（老大、咪咪等）或地点（外面、厨房）放在前面。
+- 指代对象（人、咪咪等）或地点（外面、厨房）放在前面。
 - 允许重复同一个词表达强烈情感，比如"外面 外面 外面"。
 
 示例：
@@ -1406,13 +1421,15 @@ class PuppyEngine:
 
     # ---------- 扫描找人 ----------
 
-    def scan_for_face(self):
-        """转头扫描找人脸。"""
+    def scan_for_face(self, pitch=450):
+        """转头扫描找人脸。pitch 默认是回正角度 450，开机迎接（见 run()）会传
+        一个抬起来的值（HAPPY_PITCH）进来，让设备开机时主动抬头去找人，而不是
+        用默认的平视角度扫。"""
         print("[扫描] 转头找人...")
         set_expression("curious")
 
         for yaw_pos in SCAN_POSITIONS:
-            move_servo(yaw=yaw_pos, pitch=450, speed=SCAN_SPEED, mute=True)
+            move_servo(yaw=yaw_pos, pitch=pitch, speed=SCAN_SPEED, mute=True)
             time.sleep(SCAN_PAUSE)
             found, _ = self.detect_face_once()
             if found:
@@ -1662,13 +1679,13 @@ class PuppyEngine:
 
         # "小狗小狗"是在叫名字，不是在提问——不走 LLM 意图分类（会被
         # SYSTEM_PROMPT 的四路分支之一误吞、走成复杂回应念一串关键词），
-        # 直接触发"小开心"：开心表情 + 轻微抬头 3 次，动作播完保持在开心
-        # 表情/状态上，不需要像 _settle_happy() 那样再看 track_ok 决定要不要
-        # 重新扫描——道理跟碰屏幕触发小开心一样，用户显然就在附近正对着它
-        # 说话，不需要摄像头再确认一次。
+        # 直接进完整的"开心"（跟被动检测到人脸/碰屏幕扫描找到人是同一个
+        # enter_happy()，会播完整摇头动画，不是"小开心"那个轻微抬头的反应
+        # 动作）。不需要像 _settle_happy() 那样再看 track_ok 决定要不要重新
+        # 扫描——用户显然就在附近正对着它说话，不需要摄像头再确认一次。
         if is_calling_puppy(user_text):
-            print(f"[对话] 识别到呼唤「{user_text}」→ 小开心")
-            self.enter_xiaokaixin(reason="呼唤反应")
+            print(f"[对话] 识别到呼唤「{user_text}」→ 开心")
+            self.enter_happy()
             return
 
         # 识别结果一出来就立刻显示在字幕框里，方便用户确认小狗听到的是什么；
@@ -1953,7 +1970,16 @@ class PuppyEngine:
         # 录音→识别→LLM→分支应对的整个过程才返回，tick() 观察不到这两个状态。
 
     def run(self):
-        play_idle_animation()
+        # 开机迎接：主动抬头扫描找人，而不是像以前那样直接进常态被动等待
+        # ——如果开机时人已经在设备前面，应该立刻被看到、进入人脸追踪，不用
+        # 等第一次 IDLE 状态下的被动 check_face()（最多要等 FACE_CHECK_
+        # INTERVAL_SEC 才轮到）。找到人就直接进开心（自带完整的追踪逻辑，
+        # 见 enter_happy()）；没找到就跟原来一样落回常态。
+        print("[引擎] 开机迎接：抬头找人...")
+        if self.scan_for_face(pitch=HAPPY_PITCH):
+            self.enter_happy()
+        else:
+            play_idle_animation()
         time.sleep(1)
 
         hb_interval = 30
