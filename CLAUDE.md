@@ -502,17 +502,31 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
 值还是 450，其它调用方不用改）。
 
 ## 捉迷藏找物品游戏
-`puppy_engine_v4.py` 里的一个新游戏模式：人拿一个物品给小狗看一眼 → 小狗
-低头等人藏好 → 倒计时结束后转头扫描房间找。语音触发（LLM 意图分类新增
-`game_hide_seek` 一条，`SYSTEM_PROMPT` 规则第 5 条），触发后调用
-`PuppyEngine.play_game_hide_seek()`。
+`puppy_engine_v4.py` 里的一个新游戏模式：听到"我们玩捉迷藏吧"先开心点头
+回应 → 按钮播报"小狗 看"（看的时候LED绿灯，拍照记住物品，VLM 识别结果也
+按关键词念出来，比如"橘子"）→ 点两下头、按钮说"开始" → 低头闭眼按钮报数
+"5 4 3 2 1"（报数本身就是留给人藏东西的时间）→ 转头扫描房间找。语音触发
+（LLM 意图分类新增 `game_hide_seek` 一条，`SYSTEM_PROMPT` 规则第 5 条），
+触发后调用 `PuppyEngine.play_game_hide_seek()`。
+- **游戏里所有播报都走跟 `speak_keywords()` 同一套"按钮按一下+关键词 TTS
+  同步播放"的 AAC 风格**（`_game_speak_keywords()`），不用整句 TTS 旁白
+  ——这版是从"游戏旁白可以整句话说"改过来的：既然对话回应必须靠关键词表达
+  是这只小狗"表达自己的唯一方式"，游戏里的播报没道理破例，所以"小狗 看"、
+  识别到的物品/位置、倒计时数字、"开始"，全部统一成关键词+按钮动画。
+  `_game_speak_keywords()` 不能直接复用 `speak_keywords()`——那个内部调用
+  `self.wait_for_playback()`，会走 `handle_touch_trigger()` 的完整手势分发
+  （碰屏幕→小开心等），游戏进行中触发这些会跟游戏状态冲突，所以另外写了一份
+  只响应长按中止信号的版本。
 - **整个游戏是一次同步阻塞的交互，从 `_run_conversation_turn_body()` 的
   `game_hide_seek` 分支进来**，架构上跟对话链路本身占住 `tick()` 好几秒是
   同一种模式，不是新引入的阻塞写法。`self.state` 全程停在新增的
   `State.GAME_HIDE_SEEK`，不经过 `transition()` 的常规状态分发表（那张表
   是给"进入即播放一次性动画"的状态设计的）——直接改 `self.state`，游戏内部
-  每个子阶段（注册/倒计时/扫描）自己精细控制表情/LED/舵机，只有游戏结束
-  （找到/超时/长按中止）那一刻统一调 `self.transition(State.IDLE)` 收尾。
+  每个子阶段自己精细控制表情/LED/舵机；找到/没找到复用标准的 `State.EXCITED`/
+  `State.SORRY`（走 `transition()`，播放它们各自现成的动画），游戏彻底结束
+  时复用 `_settle_happy(False)`（强制走"重新扫描找人脸"分支——游戏期间头
+  转了一圈，追踪肯定已经丢了，这跟对话结束时"追踪丢失过，重新扫描"是同一
+  个收尾逻辑）恢复到常态并保持人脸追踪，不是简单丢回 IDLE。
 - **游戏进行中只接受长按头顶这一个"中止游戏"信号**，不接受碰屏幕/双击这些
   正常状态下的触摸手势（那些语义在游戏语境下会冲突，比如摸屏幕平时是
   "小开心"，游戏里用户很可能只是想确认"已经藏好了"）——所以不走
@@ -522,19 +536,32 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   （`extract_color_hist()`/`compare_hist()`，阈值 `GAME_HIST_THRESHOLD`）做
   便宜的粗筛，每个扫描步都能算一次；粗筛命中后如果有物品的文字描述，再调
   一次视觉大模型精确确认（`call_vision_llm()`，通义千问 Qwen-VL，走阿里云
-  DashScope 的 OpenAI 兼容端点）。**VLM 是可选增强，不是硬依赖**——API key
-  从 `.env` 的 `DASHSCOPE_API_KEY` 读取（`load_env_key()`，跟
-  `DEEPSEEK_API_KEY` 共用同一套解析逻辑），没配置这个 key、或者调用失败/
-  超时，`call_vision_llm()` 统一返回 `None`，游戏会自动降级成只用颜色直方图
-  判断，不会因为没有 VLM 就整个玩不了。
+  DashScope 的 OpenAI 兼容端点）。同一个 `call_vision_llm()` 还用来把"这是
+  什么"（注册阶段）和"大概在哪"（找到之后）压缩成 AAC 风格的关键词——直接
+  让 Qwen-VL 一次调用完成"看图+给出关键词风格文字"，不需要再链式调用
+  DeepSeek 做二次压缩（Qwen-VL 本身就有文本生成能力，prompt 里直接要求它
+  输出短词）。**VLM 是可选增强，不是硬依赖**——API key 从 `.env` 的
+  `DASHSCOPE_API_KEY` 读取（`load_env_key()`，跟 `DEEPSEEK_API_KEY` 共用
+  同一套解析逻辑），没配置这个 key、或者调用失败/超时/key 本身无效，
+  `call_vision_llm()` 统一返回 `None`，三处调用点（识别物品、精确确认、
+  识别位置）都设计成能各自优雅降级，不会因为 VLM 不可用就整个玩不了。
+- **调试 Qwen-VL key 未生效的教训**：`DASHSCOPE_API_KEY` 变量名、`.env` 格式
+  （无多余空格/引号/换行）都正确，直接 curl 测过 DashScope 的
+  `compatible-mode/v1/chat/completions` 端点，返回的是
+  `401 invalid_api_key`——网络能通、端点/模型名没写错，是这把 key 本身
+  没有通过阿里云那边的校验（不是网络代理拦截，本机代理只拦截到 StackChan
+  设备的局域网请求，不影响这类外网 HTTPS 调用）。以后遇到"VLM 好像没生效"，
+  先怀疑 key 是否真的是对应服务商签发的、有没有被这个服务商的 API 接受，
+  不要先怀疑代码里的调用逻辑——`call_vision_llm()` 对所有失败都是静默降级
+  （只打日志，不抛异常），表现上跟"没配置 key"一模一样，容易被误判成"代码
+  没接上"。
 - `GAME_HIST_THRESHOLD`（初始 0.35）和扫描相关的 `GAME_SCAN_*` 系列参数都
   没有实机验证过，需要拿真实物品测过再调——误报多就调高阈值，漏检多就调低；
   `GAME_SCAN_YAW_MIN/MAX` 用的是 `±800`，跟 `EXCITED_YAW_RANGE`/
   `PRIVACY_YAW` 同一量级的已验证安全幅度。
-- 游戏里的语音旁白（"好呀，把东西拿给我看一眼吧！"之类）用 `_game_say()`
-  直接合成整句 TTS 播放，**不受"回应只能用 AAC 关键词表达"那条规则约束**
-  ——那条规则针对的是回答用户问题的场景（`qa_simple`/`qa_complex`），游戏
-  旁白是流程引导，性质不同。
+- 倒计时的"闭眼"复用 `set_expression("privacy")`——这是这个项目里唯一真正
+  "闭上眼睛"的表情（`sleepy` 只是眯眼），只是借用视觉效果，不涉及真正进入
+  隐私状态。
 - 这个功能还没有更新 `表情映射v7.xlsx`（新状态没有对应行）——目前只在
   `CLAUDE.md` 记录，如果以后要保持表格权威性，需要手动补一行。
 
