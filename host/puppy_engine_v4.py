@@ -86,11 +86,8 @@ FACE_LOST_GRACE_SEC = 20        # 人脸消失后等多久才离开开心
 EXCITED_DURATION_SEC = 6
 
 # --- 触摸触发 ---
-# 三条触摸路径：碰屏幕→开心（摸头反应）、头顶双击→兴奋、头顶长按满
-# PRIVACY_HOLD_SEC→进/出隐私（同一个长按动作，按当前是否已经在隐私状态来
-# 决定方向，见 tick() 里触摸处理那一段）。长按用的是"持续按住 N 秒"，跟
-# 双击（两次快速点按，firmware.ino 里 DOUBLE_TAP_WINDOW=800ms 以内）在手势
-# 形态上明显不同，不会互相误触发。
+# 具体判断/处理逻辑见 PuppyEngine.handle_touch_trigger()。长按满这个时长
+# 进/出隐私（同一个动作，按当前是否已经在隐私状态决定方向）。
 PRIVACY_HOLD_SEC = 3.0
 
 # --- 面部追踪 ---
@@ -165,7 +162,9 @@ PRIVACY_SPEED = 150
 # 的接口硬造出一次 /volume 当年那种轮询（CLAUDE.md 里记过那次教训：碎片化
 # 堆，最后设备反复重启），所以改成了现在这个"固件本地驱动"的架构。
 WARM_WHITE_RGB = (255, 180, 90)       # 呼吸灯/闪烁/渐暗/常亮统一用这个暖白色调
-CURIOUS_LED_BREATHE_PERIOD_MS = 1600  # 好奇/思考共用"暖白呼吸灯"
+THINKING_GREEN_RGB = (0, 200, 0)      # 好奇（识别语音）/思考共用的绿色呼吸灯，
+                                       # 跟字幕是同一个"正在处理"窗口的两个信号
+CURIOUS_LED_BREATHE_PERIOD_MS = 1600  # 好奇/思考共用的呼吸灯周期
 SORRY_LED_PERIOD_MS = 1500            # 抱歉"缓慢闪烁"
 EXCITED_LED_PERIOD_MS = 300           # 兴奋"彩虹快闪"（具体颜色表内置在固件里）
 SLEEPY_LED_FADE_MS = 5000             # 困倦"渐暗至熄灭"
@@ -599,17 +598,17 @@ def play_idle_animation():
 
 def play_curious_animation():
     """好奇：显示表情即可——语音已经由后台流式监听（MicStream）捕捉完毕，
-    这里不用再等录音。"""
+    这里不用再等录音。绿色呼吸灯暗示"正在识别/思考"，跟字幕是同一个窗口的
+    两个信号（见 _run_conversation_turn_body() 的 try/finally）。"""
     set_expression("curious")
-    set_led_mode("breathe", *WARM_WHITE_RGB, period_ms=CURIOUS_LED_BREATHE_PERIOD_MS)
+    set_led_mode("breathe", *THINKING_GREEN_RGB, period_ms=CURIOUS_LED_BREATHE_PERIOD_MS)
 
 def play_thinking_animation():
-    """思考：显示表情即可，持续时长就是 STT+LLM 实际处理耗时。LED 呼吸灯
-    延续好奇状态的效果（表情映射表里"思考"这行写的也是"保持暖白呼吸灯"），
-    这里重新调一次只是为了保证独立进入 THINKING 时也一定是对的，不依赖
-    "一定是从好奇过来的"这个假设。"""
+    """思考：显示表情即可，持续时长就是 STT+LLM 实际处理耗时。LED 绿色呼吸灯
+    延续好奇状态的效果，这里重新调一次只是为了保证独立进入 THINKING 时也
+    一定是对的，不依赖"一定是从好奇过来的"这个假设。"""
     set_expression("thinking")
-    set_led_mode("breathe", *WARM_WHITE_RGB, period_ms=CURIOUS_LED_BREATHE_PERIOD_MS)
+    set_led_mode("breathe", *THINKING_GREEN_RGB, period_ms=CURIOUS_LED_BREATHE_PERIOD_MS)
 
 def play_sorry_animation():
     set_expression("sorry")
@@ -1080,6 +1079,7 @@ class PuppyEngine:
         # 校准基线，不当成事件触发。
         self.last_double_tap_count = None
         self.last_screen_tap_count = None
+        self.last_single_tap_count = None
 
         # 主循环计数（用于轮流轮询 + 心跳打印）
         self.tick_count = 0
@@ -1137,9 +1137,9 @@ class PuppyEngine:
         print(f"[引擎] 当前状态: {self.state.value}")
         print("[引擎] 碰一下屏幕 → 小开心（摸头反应）")
         print("[引擎] 头顶双击 → 兴奋")
-        print(f"[引擎] 头顶长按满 {PRIVACY_HOLD_SEC}s → 进/出隐私")
-        print("[引擎] 呼唤\"小狗小狗\" → 小开心")
-        print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应")
+        print(f"[引擎] 头顶长按满 {PRIVACY_HOLD_SEC}s → 进/出隐私（隐私状态下头顶单击也能 → 兴奋，退出隐私）")
+        print("[引擎] 呼唤\"小狗小狗\" → 开心")
+        print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应（隐私状态下忽略语音）")
         print("[引擎] Ctrl+C 退出\n")
 
     # ---------- 状态转移 ----------
@@ -1274,20 +1274,65 @@ class PuppyEngine:
         elif self.state == State.PRIVACY:
             set_led_mode("fade", *WARM_WHITE_RGB, fade_ms=PRIVACY_LED_FADE_MS)
         elif self.state in (State.CURIOUS, State.THINKING):
-            set_led_mode("breathe", *WARM_WHITE_RGB, period_ms=CURIOUS_LED_BREATHE_PERIOD_MS)
+            set_led_mode("breathe", *THINKING_GREEN_RGB, period_ms=CURIOUS_LED_BREATHE_PERIOD_MS)
         elif self.state == State.SORRY:
             set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
         else:  # IDLE
             set_led(off=True)
+
+    def enter_excited_from_touch(self):
+        """从触摸手势进兴奋。如果是从隐私状态触发的（头顶双击、或隐私状态下
+        头顶单击），先把舵机转到正对人脸再开始兴奋动画——隐私姿势本身刻意
+        把头转开（PRIVACY_YAW/PITCH），不这样处理的话兴奋的摇摆动作会从一个
+        背对着人的诡异角度开始；其它状态触发时头本来就大致朝前，不需要这
+        一步。"""
+        if self.state == State.PRIVACY:
+            self._face_person_before_excited()
+        self.transition(State.EXCITED)
+
+    def _face_person_before_excited(self):
+        """隐私状态下摄像头是关的，不知道人具体在哪——先回正（比停留在隐私
+        姿势转开的角度好）。隐私姿势（PRIVACY_YAW=800）离回正角度很远，不能
+        瞎猜一个固定时长就去拍照确认人脸，跟 _settle_privacy_mic() 一样直接
+        轮询 /status 确认舵机真的转到位了（有限等待，超时就按当前角度继续，
+        不会卡死）。到位后拍一帧确认人脸位置，找到的话再用 track_face_
+        servo() 微调一次朝向人脸。"""
+        go_home()
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            status = get_status()
+            if status:
+                yaw_ok = abs(status.get("yaw", 0) - 0) <= 30
+                pitch_ok = abs(status.get("pitch", 0) - 450) <= 30
+                if yaw_ok and pitch_ok:
+                    break
+            time.sleep(0.15)
+        found, face_x = self.detect_face_once()
+        if found:
+            self.face_detected = True
+            self.face_confirm_count = FACE_CONFIRM_FRAMES
+            self.last_face_seen_time = time.time()
+            self.record_interaction()
+            self.track_face_servo(face_x)
 
     def handle_touch_trigger(self, touch):
         """处理一次 check_touch() 返回的手势——不止 tick() 一处需要处理触摸
         手势，讲话过程中（speak_keywords() 逐个念关键词）也要能对触摸立刻
         反应、打断当前播放，两处共用同一份判断和处理逻辑，不应该各写一份。
         返回 True 表示这次 touch 里确实有手势被处理了（调用方应该视情况
-        提前返回/中止正在做的事）。"""
+        提前返回/中止正在做的事）。
+
+        隐私状态下退出方式被收紧成只有两种，都必须是头顶手势——长按（下面
+        held_ms 分支）和头顶单击（single_tap）；碰屏幕、头顶双击这两个在别的
+        状态下有效的手势，在隐私状态下故意不生效（`and self.state !=
+        State.PRIVACY` 这个门槛），碰屏幕/双击如果也能拉出隐私，就不是"只有
+        触摸头顶才能退出"了。单击反过来只在隐私状态下才算数——这是隐私
+        专属的退出手势，不打算做成常规状态下也能用的全局触发。"""
+        is_screen_trigger = touch["screen_tap"] and self.state != State.PRIVACY
+        is_double_tap_trigger = touch["double_tap"] and self.state != State.PRIVACY
+        is_privacy_single_tap = touch["single_tap"] and self.state == State.PRIVACY
         is_trigger = (
-            touch["screen_tap"] or touch["double_tap"]
+            is_screen_trigger or is_double_tap_trigger or is_privacy_single_tap
             or (touch["held_ms"] >= PRIVACY_HOLD_SEC * 1000 and not self.privacy_hold_fired)
         )
         if not is_trigger:
@@ -1299,13 +1344,13 @@ class PuppyEngine:
         # 关心调用方是从 tick() 还是从 wait_for_playback() 进来的。
         stop_play()
 
-        if touch["screen_tap"]:
+        if is_screen_trigger:
             print("[触发] 触碰屏幕 → 小开心（摸头反应）")
             # 不需要在这里另外点一次触摸反馈灯——enter_xiaokaixin() 播放的
             # play_xiaokaixin_animation() 里已经会把 LED 设成暖白常亮，效果跟触摸
             # 反馈灯完全一样，重复调一次没有任何可观察的区别。
             self.enter_xiaokaixin()
-        elif touch["double_tap"]:
+        elif is_double_tap_trigger:
             print("[触发] 头顶双击 → 兴奋！")
             # 双击是个瞬时手势，press/release 边沿那套触摸反馈灯（见
             # check_touch()）不一定能可靠地在双击的两次快速点按之间抓到；
@@ -1316,14 +1361,30 @@ class PuppyEngine:
             # 没反应；restore_state_led() 保证不管是不是空操作，最终都会
             # 落回兴奋该有的彩虹快闪，不会卡在这次反馈用的暖白上。
             set_led_mode("solid", *WARM_WHITE_RGB)
-            self.transition(State.EXCITED)
+            self.enter_excited_from_touch()
+            self.restore_state_led()
+        elif is_privacy_single_tap:
+            print("[触发] 隐私状态下头顶单击 → 兴奋！")
+            set_led_mode("solid", *WARM_WHITE_RGB)
+            self.enter_excited_from_touch()
             self.restore_state_led()
         else:
             self.privacy_hold_fired = True
             if self.state == State.PRIVACY:
                 print(f"[触发] 长按 {touch['held_ms']/1000:.1f}s → 退出隐私")
+                # 反向动作：进隐私时 LED 是暖白渐暗到熄灭（fade），退出这里
+                # 就用 fade_in 从熄灭渐亮回暖白，同一个 fade_ms，视觉上是
+                # 完全对称的反向过程。
+                set_led_mode("fade_in", *WARM_WHITE_RGB, fade_ms=PRIVACY_LED_FADE_MS)
                 if self.scan_for_face():
                     self.enter_happy()
+                else:
+                    # 之前这里没有 else 分支：扫描失败时 self.state 会一直
+                    # 停留在 PRIVACY（尽管 scan_for_face() 失败时已经把表情
+                    # 切成了 idle、舵机回正），内部状态和外部表现不一致——
+                    # 下次触发 tick() 里任何"if self.state == State.PRIVACY"
+                    # 的分支时会用一个其实已经不对的状态判断。显式落回 IDLE。
+                    self.transition(State.IDLE)
             else:
                 print(f"[触发] 长按 {touch['held_ms']/1000:.1f}s → 进入隐私")
                 self.transition(State.PRIVACY)
@@ -1459,7 +1520,11 @@ class PuppyEngine:
           （比较固件端单调递增计数器 double_tap_count 有没有变化）。
         - screen_tap：自上次查询以来屏幕有没有被点过一次（同理，比较
           screen_tap_count）。
-        这两个手势本身在固件内部只在判定成立的那一帧短暂为真，host 端
+        - single_tap：自上次查询以来头顶有没有发生过一次新的单击（比较
+          single_tap_count）。固件端用的是 Button_Class 自带的
+          wasSingleClicked()，只在双击判定窗口过去、确认不会再来第二下之后
+          才为真，不会被双击的第一下提前触发。
+        这些手势本身在固件内部只在判定成立的那一帧短暂为真，host 端
         大约 1Hz 的轮询频率直接问"现在是不是刚发生"大概率会错过，所以固件
         侧改成了单调计数器，host 端只看差值，poll 慢一点也不会漏事件。
 
@@ -1476,17 +1541,21 @@ class PuppyEngine:
         held_ms = touch.get("held_ms", 0)
         double_tap_count = touch.get("double_tap_count", 0)
         screen_tap_count = touch.get("screen_tap_count", 0)
+        single_tap_count = touch.get("single_tap_count", 0)
 
         if self.last_double_tap_count is None:
             # 第一次拿到读数：只校准基线，不能把设备之前（这次 host 启动
             # 之前）积累的计数差当成"刚刚发生"。
             self.last_double_tap_count = double_tap_count
             self.last_screen_tap_count = screen_tap_count
+            self.last_single_tap_count = single_tap_count
 
         double_tap = double_tap_count != self.last_double_tap_count
         screen_tap = screen_tap_count != self.last_screen_tap_count
+        single_tap = single_tap_count != self.last_single_tap_count
         self.last_double_tap_count = double_tap_count
         self.last_screen_tap_count = screen_tap_count
+        self.last_single_tap_count = single_tap_count
 
         pressed = held_ms > 0
         if pressed and not self.touch_pressed:
@@ -1516,8 +1585,16 @@ class PuppyEngine:
         if screen_tap:
             print("[触摸] 检测到屏幕点击")
             self.record_interaction()
+        if single_tap:
+            print("[触摸] 检测到头顶单击")
+            self.record_interaction()
 
-        return {"held_ms": held_ms, "double_tap": double_tap, "screen_tap": screen_tap}
+        return {
+            "held_ms": held_ms,
+            "double_tap": double_tap,
+            "screen_tap": screen_tap,
+            "single_tap": single_tap,
+        }
 
     # ---------- 语音唤醒 + 完整对话链路 ----------
 
@@ -1587,18 +1664,13 @@ class PuppyEngine:
         self.record_interaction()
 
         if self.state == State.PRIVACY:
-            # 隐私状态下摄像头是关的（transition() 进入 PRIVACY 时会把
-            # face_detected 重置成 False，见那边的注释）——不能落到下面
-            # scan_for_face() 那条分支，那是一次多角度转头扫描，会跟隐私
-            # 姿势自己的 move_servo() 打架（表现为"舵机转到一半突然变
-            # 方向"），扫到人脸还会在还没搞清楚人说了什么之前就直接
-            # enter_happy()，把隐私状态提前打断。直接把这段语音交给正式
-            # 对话流程处理——CURIOUS 阶段的 track_face_once() 只做一次单帧
-            # 追踪、顶多微调 yaw，不会有这种大幅度转头冲突，具体这次到底
-            # 要不要真的进开心，交给 LLM 判断出的意图去决定。
-            print("[唤醒] 隐私状态下听到语音，直接进入对话（不扫描摄像头）")
-            self.run_conversation_turn(segment)
-            return True
+            # 隐私状态下不接受语音唤醒——退出隐私只认触摸头顶（长按/单击，
+            # 见 handle_touch_trigger()）。这段语音（不管是真的在说话还是
+            # 环境噪音误触发）直接丢弃，不进对话流程；MicStream 的滚动
+            # 缓冲/VAD 本身继续正常跑，不受影响，只是 host 端不理会这次
+            # take_utterance() 的结果。
+            print("[唤醒] 隐私状态下忽略语音（只有触摸头顶能退出隐私）")
+            return False
 
         if self.face_detected:
             # 最近一次人脸检测/追踪已经确认人还在场——HAPPY 状态下
@@ -1669,91 +1741,100 @@ class PuppyEngine:
 
         set_led(off=True)
         self.transition(State.THINKING)
-        wav_bytes = pcm_to_wav_bytes(pcm_bytes, sample_rate=self.mic_stream.sample_rate)
-        user_text = self.transcribe(wav_bytes, "question.wav")
-        print(f"[对话] 识别结果: 「{user_text}」")
-        if not user_text:
-            print("[对话] 没识别到内容")
-            self._settle_happy(track_ok)
-            return
+        # 字幕只应该在"识别语音以及思考"这段时间出现（见 play_curious_
+        # animation()/play_thinking_animation() 的绿色呼吸灯也是同一个窗口），
+        # 用完必须清掉，不能留到后面盖住关键词按钮之类的动画。这段 try 从
+        # THINKING 开始一路包到函数结束，不管从哪个分支 return（没识别到
+        # 内容、识别到"小狗小狗"、LLM 调用失败、四路意图分支……），finally
+        # 保证只要进了这个 try 就一定会清一次字幕，不用在每个 return 前都
+        # 手动补一次——以前就是漏了"没识别到内容"和"小狗小狗"这两条 return
+        # 路径的字幕清理，导致字幕偶尔会一直卡在屏幕上，把关键词按钮的动画
+        # 挡住。
+        try:
+            wav_bytes = pcm_to_wav_bytes(pcm_bytes, sample_rate=self.mic_stream.sample_rate)
+            user_text = self.transcribe(wav_bytes, "question.wav")
+            print(f"[对话] 识别结果: 「{user_text}」")
+            if not user_text:
+                print("[对话] 没识别到内容")
+                self._settle_happy(track_ok)
+                return
 
-        # "小狗小狗"是在叫名字，不是在提问——不走 LLM 意图分类（会被
-        # SYSTEM_PROMPT 的四路分支之一误吞、走成复杂回应念一串关键词），
-        # 直接进完整的"开心"（跟被动检测到人脸/碰屏幕扫描找到人是同一个
-        # enter_happy()，会播完整摇头动画，不是"小开心"那个轻微抬头的反应
-        # 动作）。不需要像 _settle_happy() 那样再看 track_ok 决定要不要重新
-        # 扫描——用户显然就在附近正对着它说话，不需要摄像头再确认一次。
-        if is_calling_puppy(user_text):
-            print(f"[对话] 识别到呼唤「{user_text}」→ 开心")
-            self.enter_happy()
-            return
+            # "小狗小狗"是在叫名字，不是在提问——不走 LLM 意图分类（会被
+            # SYSTEM_PROMPT 的四路分支之一误吞、走成复杂回应念一串关键词），
+            # 直接进完整的"开心"（跟被动检测到人脸/碰屏幕扫描找到人是同一个
+            # enter_happy()，会播完整摇头动画，不是"小开心"那个轻微抬头的反应
+            # 动作）。不需要像 _settle_happy() 那样再看 track_ok 决定要不要重新
+            # 扫描——用户显然就在附近正对着它说话，不需要摄像头再确认一次。
+            if is_calling_puppy(user_text):
+                print(f"[对话] 识别到呼唤「{user_text}」→ 开心")
+                self.enter_happy()
+                return
 
-        # 识别结果一出来就立刻显示在字幕框里，方便用户确认小狗听到的是什么；
-        # 一直留到 LLM 回复出来、即将执行下一步动作时才清空（见下面 join 后）。
-        set_subtitle(user_text, dur_ms=SUBTITLE_DUR_MS)
+            # 识别结果一出来就立刻显示在字幕框里，方便用户确认小狗听到的是
+            # 什么；留到 LLM 回复出来或者本函数结束（靠上面的 finally）才清空。
+            set_subtitle(user_text, dur_ms=SUBTITLE_DUR_MS)
 
-        # 等 DeepSeek 回复期间设备是空闲的（不像 CURIOUS 时被 /record 占满），
-        # 用后台线程发 LLM 请求，主线程每隔 FACE_TRACK_INTERVAL_SEC 追踪一次。
-        llm_result = {}
-        def _call_llm():
-            llm_result["value"] = ask_llm(user_text, self.deepseek_api_key)
-        llm_thread = threading.Thread(target=_call_llm, daemon=True)
-        llm_thread.start()
-        last_track = time.time()
-        while llm_thread.is_alive():
-            if time.time() - last_track >= FACE_TRACK_INTERVAL_SEC:
-                last_track = time.time()
-                if not self.track_face_once():
-                    track_ok = False
-            time.sleep(0.2)
-        llm_thread.join()
-        reply_text, intent, data = llm_result.get("value", (None, "other", {}))
-        # LLM 到这里已经有结果了（或者失败），用户提问的字幕不管接下来是失败
-        # 兜底还是正常回应都不再需要，统一在这里清空。
-        set_subtitle("")
+            # 等 DeepSeek 回复期间设备是空闲的（不像 CURIOUS 时被 /record 占满），
+            # 用后台线程发 LLM 请求，主线程每隔 FACE_TRACK_INTERVAL_SEC 追踪一次。
+            llm_result = {}
+            def _call_llm():
+                llm_result["value"] = ask_llm(user_text, self.deepseek_api_key)
+            llm_thread = threading.Thread(target=_call_llm, daemon=True)
+            llm_thread.start()
+            last_track = time.time()
+            while llm_thread.is_alive():
+                if time.time() - last_track >= FACE_TRACK_INTERVAL_SEC:
+                    last_track = time.time()
+                    if not self.track_face_once():
+                        track_ok = False
+                time.sleep(0.2)
+            llm_thread.join()
+            reply_text, intent, data = llm_result.get("value", (None, "other", {}))
 
-        if reply_text is None:
-            print("[对话] LLM 调用失败")
-            self._settle_happy(track_ok)
-            return
+            if reply_text is None:
+                print("[对话] LLM 调用失败")
+                self._settle_happy(track_ok)
+                return
 
-        print(f"[对话] 回复:「{reply_text}」 意图: {intent}")
-        self.record_interaction()
+            print(f"[对话] 回复:「{reply_text}」 意图: {intent}")
+            self.record_interaction()
 
-        if intent == "qa_simple":
-            answer = data.get("answer", "no")
-            self._settle_happy(track_ok)
-            if answer == "yes":
-                print("[对话] 简单回应: 点头 (yes)")
-                play_nod_animation()
-            else:
-                print("[对话] 简单回应: 摇头 (no)")
-                play_shake_animation()
+            if intent == "qa_simple":
+                answer = data.get("answer", "no")
+                self._settle_happy(track_ok)
+                if answer == "yes":
+                    print("[对话] 简单回应: 点头 (yes)")
+                    play_nod_animation()
+                else:
+                    print("[对话] 简单回应: 摇头 (no)")
+                    play_shake_animation()
 
-        elif intent == "praise":
-            print("[对话] 表扬 → 兴奋")
-            self.transition(State.EXCITED)
+            elif intent == "praise":
+                print("[对话] 表扬 → 兴奋")
+                self.transition(State.EXCITED)
 
-        elif intent == "scold":
-            print("[对话] 责备 → 抱歉")
-            self.transition(State.SORRY)
+            elif intent == "scold":
+                print("[对话] 责备 → 抱歉")
+                self.transition(State.SORRY)
 
-        elif intent == "privacy":
-            print("[对话] 人示意去休息/独处 → 隐私")
-            self.transition(State.PRIVACY)
+            elif intent == "privacy":
+                print("[对话] 人示意去休息/独处 → 隐私")
+                self.transition(State.PRIVACY)
 
-        else:  # qa_complex / other：逐个念关键词。数量是 2-4 个，不固定，
-               # 顺序（迫切程度/指代对象和地点在前等）由 SYSTEM_PROMPT 里的
-               # 规则直接约束 LLM 输出，这里不再做任何重排——早期版本用
-               # jieba 词性标注做过"名词全部排到动词前面"的后处理，但新
-               # 关键词词库里状态词/情感词等不是单纯名词动词二分，而且现在
-               # 顺序本身就带着语义（比如"小狗 想 零食"里"想"必须紧跟在
-               # "小狗"后面），机械按词性重排反而会破坏这个顺序，所以这版
-               # 直接信任 LLM 给出的顺序。
-            keywords = data.get("keywords") or [reply_text[:6]]
-            print(f"[对话] 复杂回应，播报关键词: {keywords}")
-            self._settle_happy(track_ok)
-            self.speak_keywords(keywords)
+            else:  # qa_complex / other：逐个念关键词。数量是 2-4 个，不固定，
+                   # 顺序（迫切程度/指代对象和地点在前等）由 SYSTEM_PROMPT 里的
+                   # 规则直接约束 LLM 输出，这里不再做任何重排——早期版本用
+                   # jieba 词性标注做过"名词全部排到动词前面"的后处理，但新
+                   # 关键词词库里状态词/情感词等不是单纯名词动词二分，而且现在
+                   # 顺序本身就带着语义（比如"小狗 想 零食"里"想"必须紧跟在
+                   # "小狗"后面），机械按词性重排反而会破坏这个顺序，所以这版
+                   # 直接信任 LLM 给出的顺序。
+                keywords = data.get("keywords") or [reply_text[:6]]
+                print(f"[对话] 复杂回应，播报关键词: {keywords}")
+                self._settle_happy(track_ok)
+                self.speak_keywords(keywords)
+        finally:
+            set_subtitle("")
 
     def _settle_happy(self, track_ok):
         """对话收尾时决定要不要重新扫描找人：整轮对话期间 track_face_once()
@@ -1875,23 +1956,7 @@ class PuppyEngine:
         poll_slot = self.tick_count % 2   # 1 时才轮到人脸检测（do_face_check）
 
         # --- 触摸（最高优先级）---
-        # 三条触摸触发路径的实际判断/处理逻辑都在 handle_touch_trigger() 里
-        # （讲话过程中 wait_for_playback() 也要用同一份逻辑，不能各写一份）：
-        # 1. 碰一下屏幕 → 开心（摸头反应）。不依赖 scan_for_face()、不设
-        #    状态限制——碰屏幕时人显然就在设备正前方，不需要再扫描确认。
-        #    之前这里复用的是"短按→扫描找人"那套逻辑，scan_for_face() 找
-        #    不到人脸时会静默失败、既不报错也不进开心，这是"碰屏幕没反应"
-        #    的根因；现在改成直接触发，不再依赖摄像头。
-        # 2. 头顶双击 → 兴奋，不看当前是什么状态。
-        # 3. 头顶长按满 PRIVACY_HOLD_SEC(3s) → 进/出隐私，按当前是否已经在
-        #    隐私状态决定方向。之前只写了"隐私状态下长按→退出"，没有"非
-        #    隐私状态长按→进入"的分支，所以长按头顶从来没能触发过隐私——
-        #    不是跟双击手势冲突，是这条路径压根没实现。长按（持续按住 3
-        #    秒）和双击（两次快速点按，firmware.ino 里
-        #    DOUBLE_TAP_WINDOW=800ms 以内）手势形态差异明显，不会互相误判。
-        #    用 held_ms 而不是 host 自己记时间戳：host 万一被一整轮对话
-        #    （好几秒）卡住没来得及轮询，固件端这个值依然精确，不依赖轮询
-        #    节奏。
+        # 判断/处理逻辑都在 handle_touch_trigger() 里，见那边的文档字符串。
         touch = self.check_touch()
         if touch is not None and self.handle_touch_trigger(touch):
             return

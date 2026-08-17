@@ -329,7 +329,7 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   数值，不要在 host 端用采样时间戳重建，采样节奏一旦被别的同步阻塞打乱就
   会算错或漏判。
 
-## 触摸触发映射（handle_touch_trigger() 的三条路径）
+## 触摸触发映射（handle_touch_trigger()）
 判断/处理逻辑集中在 `PuppyEngine.handle_touch_trigger(touch)` 一个方法里
 ——不止 `tick()` 调用它，讲话过程中（`wait_for_playback()`）也要用同一套
 判断，两处不能各写一份，见下面"讲话时触摸立刻打断"一节。
@@ -408,6 +408,20 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   延迟还嫌大，先确认是不是这两个数字还能再降，而不是又去找别的"结构性"
   原因——目前已知的结构性瓶颈（轮流轮询、慢 tick 拖累下一轮）都已经解决，
   剩下的就是纯粹的轮询间隔取舍。
+- **隐私状态退出被收紧成"只认头顶触摸"**：语音唤醒不再能退出隐私
+  （`check_voice_wake()` 在 PRIVACY 状态下直接丢弃这段语音、返回 False）；
+  碰屏幕、头顶双击这两个在别的状态下有效的手势，在 PRIVACY 状态下也故意
+  不生效（`handle_touch_trigger()` 里都加了 `and self.state != State.
+  PRIVACY`），只剩长按（进/出对称）和头顶单击（`single_tap`，仅隐私状态下
+  生效，触发兴奋）两条路径。单击用的是 M5Unified `Button_Class` 自带的
+  `wasSingleClicked()`（固件新增 `g_headSingleTapCount` 计数器 + `/touch`
+  的 `single_tap_count` 字段）——这个判定本身就要等双击判定窗口过去、确认
+  不会再来第二下才为真，跟双击天然不会互相误判，不需要额外去重。从隐私
+  状态进兴奋（单击或双击触发）时，`enter_excited_from_touch()` 会先
+  `_face_person_before_excited()` 转回正对人脸再开始兴奋动画——隐私姿势
+  本身刻意把头转开，不这样处理动作会从背对人的角度开始。长按退出隐私时
+  新增了反向 LED（`fade_in` 模式，固件里 `FADE_OUT` 的镜像实现，从熄灭
+  渐亮回基色）。
 
 ## 讲话时触摸立刻打断
 "小狗讲话时摸一下就立刻打断"这个需求，卡在一个硬限制上：ESP32 的

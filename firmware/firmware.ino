@@ -101,6 +101,11 @@ volatile int g_buttonState = 0;
 // loop() 所在的主线程里读写，没有并发，不需要原子类型。
 uint32_t g_headDoubleTapCount = 0;
 uint32_t g_screenTapCount = 0;
+// wasSingleClicked()：Button_Class 自带的"确认是单击、不是双击的前半段"判定
+// （只在双击判定窗口过去、确定不会再来第二下之后才为真），用来给"短按头顶"
+// 这个手势计数，跟双击共用同一个物理传感器但不会互相误判——双击的第一下不
+// 会被提前当成单击触发。
+uint32_t g_headSingleTapCount = 0;
 
 // UTF-8 line breaking: CJK (3 bytes) = 16px, ASCII = 8px, max line width 292px
 static void buildSubtitle(const String &text) {
@@ -716,13 +721,13 @@ void handleFace() {
 // 最后设备反复重启）。这里改成固件自己在本地用 updateLed() 持续驱动效果
 // （从 loop() 里非阻塞地调用，不用 delay()），host 端只在状态切换时调一次
 // /led 告诉固件"从现在起用哪种模式"，之后固件自己接管，不需要持续发请求。
-enum class LedMode { OFF, SOLID, BLINK, BREATHE, RAINBOW, FADE_OUT };
+enum class LedMode { OFF, SOLID, BLINK, BREATHE, RAINBOW, FADE_OUT, FADE_IN };
 LedMode g_ledMode = LedMode::OFF;
-uint8_t g_ledR = 0, g_ledG = 0, g_ledB = 0;      // BLINK/BREATHE/FADE_OUT 的基色
+uint8_t g_ledR = 0, g_ledG = 0, g_ledB = 0;      // BLINK/BREATHE/FADE_OUT/FADE_IN 的基色
 uint32_t g_ledPeriodMs = 200;                     // BLINK/BREATHE/RAINBOW 的周期
-uint32_t g_ledFadeMs = 2000;                      // FADE_OUT 的总时长
+uint32_t g_ledFadeMs = 2000;                      // FADE_OUT/FADE_IN 的总时长
 uint32_t g_ledModeStartMs = 0;                    // 本次模式的起始 millis()，动画相位从这里算
-bool g_ledFadeReachedOff = false;                 // FADE_OUT 到底以后只需要真正调一次熄灭
+bool g_ledFadeSettled = false;                    // FADE_OUT/FADE_IN 到终点以后只需要真正调一次
 unsigned long g_ledLastUpdateMs = 0;              // 节流：不用每次 loop() 都重算颜色
 
 static const uint8_t LED_RAINBOW_COLORS[][3] = {
@@ -760,12 +765,26 @@ static void updateLed() {
     }
     case LedMode::FADE_OUT: {
       if (t >= g_ledFadeMs) {
-        if (!g_ledFadeReachedOff) {
+        if (!g_ledFadeSettled) {
           M5StackChan.showRgbColor(0, 0, 0);
-          g_ledFadeReachedOff = true;
+          g_ledFadeSettled = true;
         }
       } else {
         float frac = 1.0f - (float)t / (float)g_ledFadeMs;
+        M5StackChan.showRgbColor((uint8_t)(g_ledR * frac), (uint8_t)(g_ledG * frac), (uint8_t)(g_ledB * frac));
+      }
+      break;
+    }
+    case LedMode::FADE_IN: {
+      // FADE_OUT 的反向：从熄灭渐亮到基色，到终点以后停在基色常亮，不用
+      // 另外的 SOLID 调用衔接。
+      if (t >= g_ledFadeMs) {
+        if (!g_ledFadeSettled) {
+          M5StackChan.showRgbColor(g_ledR, g_ledG, g_ledB);
+          g_ledFadeSettled = true;
+        }
+      } else {
+        float frac = (float)t / (float)g_ledFadeMs;
         M5StackChan.showRgbColor((uint8_t)(g_ledR * frac), (uint8_t)(g_ledG * frac), (uint8_t)(g_ledB * frac));
       }
       break;
@@ -792,12 +811,13 @@ void handleLed() {
   g_ledPeriodMs = (uint32_t)periodMs;
   g_ledFadeMs = (uint32_t)fadeMs;
   g_ledModeStartMs = millis();
-  g_ledFadeReachedOff = false;
+  g_ledFadeSettled = false;
 
   if (mode == "blink") g_ledMode = LedMode::BLINK;
   else if (mode == "breathe") g_ledMode = LedMode::BREATHE;
   else if (mode == "rainbow") g_ledMode = LedMode::RAINBOW;
   else if (mode == "fade") g_ledMode = LedMode::FADE_OUT;
+  else if (mode == "fade_in") g_ledMode = LedMode::FADE_IN;
   else { g_ledMode = LedMode::SOLID; M5StackChan.showRgbColor(r, g, b); }
 
   // 用 static 缓冲区 + snprintf 拼 JSON，不用 String 拼接——这个接口现在每次
@@ -905,15 +925,16 @@ void handleTouch() {
   // double_tap_count/screen_tap_count：见声明处注释，单调递增计数器，
   // host 端比较差值判断"有没有发生过"，不会因为轮询跟不上手势本身的判定
   // 节奏而漏掉。
-  static char buf[220];
+  static char buf[240];
   snprintf(buf, sizeof(buf),
     "{\"front\":%d,\"middle\":%d,\"back\":%d,\"pressed\":%s,\"held_ms\":%lu,"
-    "\"double_tap_count\":%lu,\"screen_tap_count\":%lu}",
+    "\"double_tap_count\":%lu,\"screen_tap_count\":%lu,\"single_tap_count\":%lu}",
     intensities[0], intensities[1], intensities[2],
     pressed ? "true" : "false",
     (unsigned long)heldMs,
     (unsigned long)g_headDoubleTapCount,
-    (unsigned long)g_screenTapCount);
+    (unsigned long)g_screenTapCount,
+    (unsigned long)g_headSingleTapCount);
   server.send(200, "application/json", buf);
 }
 
@@ -1459,6 +1480,9 @@ void loop() {
   // 靠比较这个值有没有变化来判断"有没有发生过一次新的双击"）。
   if (M5StackChan.TouchSensor.wasDoubleClicked()) {
     g_headDoubleTapCount++;
+  }
+  if (M5StackChan.TouchSensor.wasSingleClicked()) {
+    g_headSingleTapCount++;
   }
 
   // 舵机噪音静音：见 g_muteStreamForServo/g_currentMoveIsNoisy 声明处的注释。
