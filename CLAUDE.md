@@ -225,6 +225,25 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   之前的闪烁）。`setup()` 里 `M5StackChan.begin()` 之后立刻加了
   `M5StackChan.showRgbColor(0, 0, 0)`，保证设备刚开机、host 脚本还没连上时
   LED 就是暗的，不会残留库自带的默认点亮状态。
+- **"用完就还回去"这条规矩现在有一个统一的还回去的地方**：
+  `PuppyEngine.restore_state_led()` 按 `self.state` 把 LED 设回该状态对应的
+  常驻效果（覆盖全部 8 个状态，不再是只处理 HAPPY/IDLE 两种的临时拼凑）。
+  `speak_keywords()` 念完关键词、`check_touch()` 里头顶触摸松开时都改成调
+  这一个方法，而不是各自重复写一遍"如果是 HAPPY 就……如果是 IDLE 就……"。
+  以后新增"临时借用 LED"的地方，也应该找机会结束时调 `restore_state_led()`
+  而不是照抄一段新的分支判断。
+- **头顶触摸传感器"感受到触摸"时点亮暖白灯，给用户一个"确实碰到了"的即时
+  反馈**：`check_touch()` 检测到按下沿（`pressed` 从 False 变 True）时调
+  `set_led_mode("solid", *WARM_WHITE_RGB)`，检测到松开沿时调
+  `restore_state_led()` 还回去。这条路径最需要反馈的场景是头顶长按进/出
+  隐私——要按满 `PRIVACY_HOLD_SEC`(3s) 才有下一步反应，中间这几秒完全没有
+  任何提示的话，用户分不清"按对了在等"还是"设备根本没感应到"。用
+  `set_led_mode` 而不是一次性 `/led?r=&g=&b=`：固件 `updateLed()` 每帧都会
+  按当前 `g_ledMode` 重算颜色，如果当前正处于呼吸/闪烁/渐暗这类持续模式，
+  一次性设色马上就会被下一帧覆盖掉，必须真正切换模式才压得住。这条只挂在
+  头顶触摸传感器（`TouchSensor.isPressed()`/`held_ms`）上，不含屏幕触摸——
+  碰屏幕本身会立刻触发表情+舵机动作（见"碰屏幕→开心"），反馈已经很明显，
+  不需要再叠加一次 LED 提示。
 
 ## 舵机噪音防误触发语音
 麦克风灵敏度为了能听清小声说话被放大了 5 倍（`mic_cfg.magnification = 5`，
@@ -327,6 +346,22 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   又调回去。`MicStream._emit_utterance()` 现在会把每段捕捉到的语音的 RMS
   一起打印出来，环境噪音又触发误判时可以直接看日志里的数值，比凭感觉猜
   这个阈值该调到多少更准。
+- **触摸响应"特别慢"：根因是主循环轮询节奏被人脸检测的耗时拖垮，不是触摸
+  本身检测得慢**。`tick()` 原来用 `poll_slot = tick_count % 2` 把触摸和人脸
+  检测轮流分到两轮，本意是避免同一轮里对 StackChan 连打好几个请求（教训见
+  下面"其它注意事项"），但 `check_touch()` 自己已经有 `TOUCH_POLL_SEC` 节流，
+  不需要再靠轮流限流——之前那么做等于平白把触摸检测频率砍掉一半，还搭上一个
+  更大的坑：`run()` 主循环里不管 `tick()` 本身耗时多久，每轮都无脑
+  `time.sleep(MAIN_LOOP_INTERVAL_SEC)`；人脸检测那一轮要打 `/camera`（下载
+  一张 JPEG）再跑一次 mediapipe 推理，单次可能花大半秒到一两秒，这段耗时会
+  直接叠加在那 0.5s 睡眠之上，使得下一次真正轮到检测触摸的时机被进一步推
+  迟。现在改成两处：①`check_touch()` 从 `poll_slot` 轮流里摘出来，每个
+  tick 都调用（靠自己的节流控制实际请求频率，不额外增加设备负载）；
+  ②`run()` 记录 `tick()` 实际耗时，只睡够"凑满一个完整间隔"还欠的那部分
+  （`max(0, MAIN_LOOP_INTERVAL_SEC - elapsed)`），一次慢 tick 不再连带拖慢
+  下一轮。人脸检测本身仍然按 `poll_slot==1` 轮流+各自的 `FACE_CHECK_
+  INTERVAL_SEC`/`FACE_RETRACK_INTERVAL_SEC` 内部节流，没有变得更频繁，请求
+  总量没有增加，只是不再拖累触摸的响应速度。
 
 ## 编译 / 烧录 / 验证流程
 本机的 `arduino-cli` 不在 PATH 里，可执行文件在

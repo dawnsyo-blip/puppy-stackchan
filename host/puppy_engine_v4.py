@@ -1210,6 +1210,27 @@ class PuppyEngine:
             print(f"[转移] {old.value} → 开心（摸头反应）")
         play_pet_animation()
 
+    def restore_state_led(self):
+        """把 LED 恢复成当前状态本该有的常驻效果——任何"临时借用" LED 的地方
+        （摸头触摸反馈灯、speak_keywords() 念关键词期间的暖白灯）用完之后都
+        必须显式调这个还回去，不能假设别的地方会自己恢复。CLAUDE.md"LED
+        系统"一节记过教训：这里漏掉哪个状态分支，就会导致 LED 卡在错误效果
+        上，直到下一次完整的状态切换才会纠正过来。"""
+        if self.state == State.HAPPY:
+            set_led_mode("solid", *WARM_WHITE_RGB)
+        elif self.state == State.EXCITED:
+            set_led_mode("rainbow", period_ms=EXCITED_LED_PERIOD_MS)
+        elif self.state == State.SLEEPY:
+            set_led_mode("fade", *WARM_WHITE_RGB, fade_ms=SLEEPY_LED_FADE_MS)
+        elif self.state == State.PRIVACY:
+            set_led_mode("fade", *WARM_WHITE_RGB, fade_ms=PRIVACY_LED_FADE_MS)
+        elif self.state in (State.CURIOUS, State.THINKING):
+            set_led_mode("breathe", *WARM_WHITE_RGB, period_ms=CURIOUS_LED_BREATHE_PERIOD_MS)
+        elif self.state == State.SORRY:
+            set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
+        else:  # IDLE
+            set_led(off=True)
+
     def record_interaction(self):
         self.last_interaction = time.time()
 
@@ -1370,10 +1391,23 @@ class PuppyEngine:
         pressed = held_ms > 0
         if pressed and not self.touch_pressed:
             print("[触摸] 按下...")
+            # 点亮暖白灯，让人能马上确认"传感器确实感受到了这次触摸"——头顶
+            # 长按要按满 PRIVACY_HOLD_SEC(3s) 才会有下一步反应，中间这几秒
+            # 完全没反馈的话，用户很难判断是"按对了在等"还是"根本没碰到"。
+            # 用 set_led_mode 而不是一次性的 /led?r=&g=&b=：固件的 updateLed()
+            # 每帧都会按当前 g_ledMode 重算颜色，如果当前状态本来就是呼吸/
+            # 闪烁/渐暗这类持续模式，一次性设色马上就会被下一帧的模式覆盖掉，
+            # 必须用 mode 参数真正切换掉当前模式才压得住。
+            set_led_mode("solid", *WARM_WHITE_RGB)
         if not pressed and self.touch_pressed:
             print("[触摸] 松开")
             self.record_interaction()
             self.privacy_hold_fired = False
+            # 松手了，把"借用"的反馈灯还给当前状态本该有的常驻效果——不能
+            # 假设手势处理分支（双击进兴奋、长按进/出隐私）一定会重设 LED，
+            # 比如只是碰了一下又很快松开、没达到任何手势阈值，就得靠这里
+            # 兜底恢复，否则 LED 会一直卡在触摸反馈的暖白常亮上。
+            self.restore_state_led()
         self.touch_pressed = pressed
 
         if double_tap:
@@ -1673,11 +1707,7 @@ class PuppyEngine:
                 next_wav = tts_to_wav(keywords[i + 1], f"kw_{i + 1}")
             time.sleep(KEYWORD_GAP_SEC)
         set_button("off")
-
-        if self.state == State.HAPPY:
-            set_led_mode("solid", *WARM_WHITE_RGB)
-        elif self.state == State.IDLE:
-            set_led(off=True)
+        self.restore_state_led()
 
     # ---------- 计时器 ----------
 
@@ -1693,11 +1723,16 @@ class PuppyEngine:
         self.tick_count += 1
         print(f"[循环] tick #{self.tick_count}, 状态={self.state.value}")
 
-        # 触摸/人脸两者轮流，每一轮 tick 只发起其中一种会打 HTTP 请求的轮询，
-        # 避免同一轮里对 StackChan 连打好几个请求。语音唤醒不算在这个轮转
-        # 里——check_voice_wake() 现在只是查一下后台流式监听线程的内存队列，
-        # 不发请求，每个 tick 都查一次没有额外开销，还能让语音触发反应更快。
-        poll_slot = self.tick_count % 2   # 0=触摸 1=人脸
+        # 人脸检测（会打 /camera，还要跑一次 mediapipe 推理，单次可能要大半秒）
+        # 每隔一个 tick 才轮到，避免跟别的轮询请求挤在同一轮里。触摸不跟着
+        # 一起轮流了——check_touch() 自己已经有 TOUCH_POLL_SEC 节流，不需要
+        # 再靠 poll_slot 额外限流，之前把它也放进轮流里，等于把摸屏幕/长按的
+        # 检测频率平白无故砍掉一半，碰上人脸检测那一轮恰好较慢（/camera 请求
+        # 慢，见下面 run() 里 tick 耗时相关的说明）时尤其明显，"碰一下屏幕"
+        # 摸头反应会感觉迟钝。语音唤醒也不算在轮转里——check_voice_wake()
+        # 现在只是查一下后台流式监听线程的内存队列，不发请求，每个 tick 都
+        # 查一次没有额外开销，还能让语音触发反应更快。
+        poll_slot = self.tick_count % 2   # 1 时才轮到人脸检测（do_face_check）
 
         # --- 触摸（最高优先级）---
         # 目前保留三条触摸触发路径：
@@ -1717,7 +1752,7 @@ class PuppyEngine:
         #    用 held_ms 而不是 host 自己记时间戳：host 万一被一整轮对话
         #    （好几秒）卡住没来得及轮询，固件端这个值依然精确，不依赖轮询
         #    节奏。
-        touch = self.check_touch() if poll_slot == 0 else None
+        touch = self.check_touch()
         if touch is not None:
             if touch["screen_tap"]:
                 print("[触发] 触碰屏幕 → 开心（摸头反应）")
@@ -1822,6 +1857,7 @@ class PuppyEngine:
 
         try:
             while True:
+                tick_start = time.time()
                 self.tick()
 
                 now = time.time()
@@ -1833,7 +1869,15 @@ class PuppyEngine:
                     )
                     last_hb = now
 
-                time.sleep(MAIN_LOOP_INTERVAL_SEC)
+                # tick() 本身可能已经花了不少时间（人脸检测那一轮要打
+                # /camera 再跑一次 mediapipe 推理，单次可能大半秒到一两秒）；
+                # 如果不管这个耗时、无脑再睡满 MAIN_LOOP_INTERVAL_SEC，一次
+                # 慢 tick 就会让下一轮触摸/语音检测的实际间隔翻倍甚至更多，
+                # 表现为"碰一下屏幕/长按头顶反应特别迟钝"——只睡够"凑满一个
+                # 完整间隔"还欠的那部分，tick() 已经耗时超过一个间隔就不再
+                # 补睡。
+                elapsed = time.time() - tick_start
+                time.sleep(max(0.0, MAIN_LOOP_INTERVAL_SEC - elapsed))
 
         except KeyboardInterrupt:
             print("\n[引擎] Ctrl+C，归位中...")
