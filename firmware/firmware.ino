@@ -394,6 +394,20 @@ bool micActive = false;
 bool speakerActive = false;
 uint8_t* g_playBuf = nullptr;
 
+// /play 原来是阻塞到播完才返回的 handler——ESP32 的 WebServer 单线程，播放
+// 期间（可能好几秒）整个设备完全不响应任何其它请求，包括 /touch，导致"讲话
+// 时摸一下立刻打断"这种交互根本做不到：host 端发出的 stop 请求要等当前这次
+// /play 的 handler 自己跑完才轮得到处理，那时候都已经播完了，等于打断永远
+// 迟到。改成跟 /stream 一样的后台 FreeRTOS 任务模式：handlePlay() 只负责
+// 校验参数、启动 playTaskFn()、立刻返回；真正的下载+解析+分块播放放到后台
+// 任务里做，g_playShouldStop 由 handlePlay() 的 stop=1 分支或需要打断播放的
+// 地方直接置位，playTaskFn() 的下载/播放循环里频繁检查这个 flag，检测到就
+// 立刻调 M5.Speaker.stop() 硬切断，不等手头这一小段播完。
+std::atomic<bool> g_playTaskRunning{false};
+std::atomic<bool> g_playShouldStop{false};
+TaskHandle_t g_playTaskHandle = nullptr;
+static char g_playUrl[256];
+
 // ============ Lip Sync ============
 bool g_lipSyncActive = false;
 int16_t* g_lipData = nullptr;
@@ -842,23 +856,31 @@ void handleCamera() {
 }
 
 void handleStatus() {
+  // 原来是 String 拼接（每次 += 都可能触发一次重新分配），只在偶尔调用一次
+  // 的场合没问题。现在 host 端等语音播完（wait_for_playback()）要按几百
+  // 毫秒的间隔反复轮询这个接口的 playing 字段，虽然单次播放持续的时间不长，
+  // 但累积起来已经够得上 CLAUDE.md 里 /volume 那次教训描述的"持续高频调用"
+  // 量级了，所以照同样的模式改成静态缓冲区 + snprintf，零堆分配（IP 地址
+  // 那个 WiFi.localIP().toString() 除外，它本身在库内部分配、且只是几个
+  // 字节的小对象，不是当年 /volume 那种量级，不在这次修的范围内）。
   float voltage = M5StackChan.getBatteryVoltage();
   float current = M5StackChan.getBatteryCurrent();
   auto angles = M5StackChan.Motion.getCurrentAngles();
-  String json = "{";
-  json += "\"battery_v\":" + String(voltage, 2);
-  json += ",\"battery_ma\":" + String(current, 2);
-  json += ",\"yaw\":" + String(angles.x);
-  json += ",\"pitch\":" + String(angles.y);
-  json += ",\"camera\":" + String(cameraReady ? "true" : "false");
-  json += ",\"camera_err\":\"" + cameraError + "\"";
-  json += ",\"mic_streaming\":" + String(g_streamTaskRunning ? "true" : "false");
-  json += ",\"expr\":\"" + currentExprName + "\"";
-  json += ",\"uptime_s\":" + String(millis() / 1000);
-  json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
-  json += ",\"rssi\":" + String(WiFi.RSSI());
-  json += "}";
-  server.send(200, "application/json", json);
+  static char buf[400];
+  snprintf(buf, sizeof(buf),
+    "{\"battery_v\":%.2f,\"battery_ma\":%.2f,\"yaw\":%d,\"pitch\":%d,"
+    "\"camera\":%s,\"camera_err\":\"%s\",\"mic_streaming\":%s,\"playing\":%s,"
+    "\"expr\":\"%s\",\"uptime_s\":%lu,\"ip\":\"%s\",\"rssi\":%d}",
+    voltage, current, (int)angles.x, (int)angles.y,
+    cameraReady ? "true" : "false",
+    cameraError.c_str(),
+    g_streamTaskRunning ? "true" : "false",
+    g_playTaskRunning ? "true" : "false",
+    currentExprName.c_str(),
+    (unsigned long)(millis() / 1000),
+    WiFi.localIP().toString().c_str(),
+    (int)WiFi.RSSI());
+  server.send(200, "application/json", buf);
 }
 
 void handleHome() {
@@ -1000,31 +1022,35 @@ void handleRecord() {
   lastRecordEnd = millis();
 }
 
-void handlePlay() {
-  if (!server.hasArg("url")) {
-    server.send(400, "application/json", "{\"error\":\"url parameter required. Usage: /play?url=http://host/file.wav\"}");
-    return;
-  }
+// 后台播放任务：下载 WAV、解析、分块喂给扬声器。跟原来 handlePlay() 里的
+// 逻辑几乎一样，只是搬到了单独的 FreeRTOS 任务里跑，并且在下载循环和"等
+// 上一块播完"的等待循环里都会检查 g_playShouldStop，检测到就立刻
+// M5.Speaker.stop() 硬切断——不是"播完手头这一块再停"，是真正意义上的立刻
+// 打断。任何退出路径（正常播完/下载失败/格式不对/被打断）最终都要走到
+// finishPlayTask()，保证 g_playTaskRunning 一定会被清掉，不然 handlePlay()
+// 会一直以为播放还没结束。
+static void finishPlayTask() {
+  g_playTaskRunning = false;
+  g_playTaskHandle = nullptr;
+  vTaskDelete(nullptr);
+}
 
-  String url = server.arg("url");
-
+static void playTaskFn(void* param) {
   HTTPClient http;
-  http.begin(url);
+  http.begin(g_playUrl);
   http.setTimeout(10000);
   int httpCode = http.GET();
   if (httpCode != 200) {
     http.end();
-    server.send(502, "application/json",
-      "{\"error\":\"fetch failed\",\"url\":\"" + url + "\",\"code\":" + String(httpCode) + "}");
-    return;
+    Serial.printf("[play] fetch failed: url=%s code=%d\n", g_playUrl, httpCode);
+    finishPlayTask();
   }
 
   size_t len = http.getSize();
   if (len < 44 || len > 2000000) {
     http.end();
-    server.send(400, "application/json",
-      "{\"error\":\"bad size\",\"size\":" + String(len) + ",\"max\":2000000}");
-    return;
+    Serial.printf("[play] bad size: %u\n", (unsigned)len);
+    finishPlayTask();
   }
 
   if (g_playBuf) { free(g_playBuf); g_playBuf = nullptr; }
@@ -1033,8 +1059,8 @@ void handlePlay() {
   if (!wavBuf) { wavBuf = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_8BIT); }
   if (!wavBuf) {
     http.end();
-    server.send(500, "application/json", "{\"error\":\"malloc failed\",\"bytes\":" + String(len) + "}");
-    return;
+    Serial.printf("[play] malloc failed: %u bytes\n", (unsigned)len);
+    finishPlayTask();
   }
   g_playBuf = wavBuf;
 
@@ -1056,7 +1082,7 @@ void handlePlay() {
   // for why this is required, not just an optimization.
   g_streamPauseForOtherAudio = true;
 
-  while (read < len && (millis() - lastProgress < 10000)) {
+  while (read < len && (millis() - lastProgress < 10000) && !g_playShouldStop) {
     size_t avail = stream->available();
     if (avail > 0) {
       size_t toRead = min(avail, len - read);
@@ -1108,7 +1134,11 @@ void handlePlay() {
       bool last = (cap >= playEnd);
       if (pending >= CHUNK_BYTES || (last && pending > 0)) {
         unsigned long w = millis();
-        while (M5.Speaker.isPlaying(0) >= 2 && millis() - w < 3000) { updateLipSync(); delay(1); }
+        while (M5.Speaker.isPlaying(0) >= 2 && millis() - w < 3000 && !g_playShouldStop) {
+          updateLipSync();
+          delay(1);
+        }
+        if (g_playShouldStop) break;
         M5.Speaker.playRaw((const int16_t*)(wavBuf + playedUpTo),
                            pending / sizeof(int16_t), sampleRate, false, 1, 0, false);
         playedUpTo += pending;
@@ -1123,18 +1153,68 @@ void handlePlay() {
     updateLipSync();
   }
   http.end();
-  g_streamPauseForOtherAudio = false;  // let the mic-streaming task resume
 
-  if (!started || playEnd == 0) {
-    free(wavBuf); g_playBuf = nullptr;
-    g_lipSyncActive = false;
-    server.send(400, "application/json", "{\"error\":\"not a WAV or no data chunk\"}");
+  if (g_playShouldStop) {
+    // 立刻硬切断——已经喂进 DMA 缓冲区的那一小段也不让它放完，这才是"立刻
+    // 打断"应有的样子，不是"播完手头这一块再停"。
+    M5.Speaker.stop();
+    Serial.println("[play] stopped early (interrupted)");
+  } else if (!started || playEnd == 0) {
+    Serial.println("[play] not a WAV or no data chunk");
+  }
+
+  g_streamPauseForOtherAudio = false;  // let the mic-streaming task resume
+  g_lipSyncActive = false;
+  free(wavBuf);
+  g_playBuf = nullptr;
+  finishPlayTask();
+}
+
+// 正常情况下 host 端会等上一次播放真正结束（自然播完或者被打断）以后才发
+// 下一个 /play，这里只是防御性兜底：万一真的有新请求在旧任务还没退出时就
+// 到达，必须先让旧任务停下来、清空 g_playTaskRunning，再去 free/realloc
+// g_playBuf——不然旧任务还在用这块内存的时候被这里 free 掉，就是一次
+// use-after-free。有限时间等待（而不是无限等），避免极端情况下卡死整个
+// HTTP handler。
+void stopPlayTaskAndWait(unsigned long timeoutMs = 500) {
+  if (!g_playTaskRunning) return;
+  g_playShouldStop = true;
+  unsigned long start = millis();
+  while (g_playTaskRunning && millis() - start < timeoutMs) {
+    delay(2);
+  }
+}
+
+void handlePlay() {
+  if (server.hasArg("stop")) {
+    // 只负责置位，不等待——host 端打断讲话要的就是这个 handler 尽快返回，
+    // 好让 loop() 继续处理下一个请求；播放任务会在自己的循环里很快（下一次
+    // 检查 g_playShouldStop 的间隔顶多几毫秒）发现并停下，真正停没停用
+    // /status 的 playing 字段确认。
+    g_playShouldStop = true;
+    server.send(200, "application/json", "{\"ok\":true,\"stopping\":true}");
     return;
   }
 
-  server.send(200, "application/json",
-    "{\"ok\":true,\"streamed\":true,\"bytes\":" + String(len) +
-    ",\"rate\":" + String(sampleRate) + "}");
+  if (!server.hasArg("url")) {
+    server.send(400, "application/json", "{\"error\":\"url parameter required. Usage: /play?url=http://host/file.wav\"}");
+    return;
+  }
+
+  String url = server.arg("url");
+  if (url.length() >= sizeof(g_playUrl)) {
+    server.send(400, "application/json", "{\"error\":\"url too long\"}");
+    return;
+  }
+
+  stopPlayTaskAndWait();
+
+  snprintf(g_playUrl, sizeof(g_playUrl), "%s", url.c_str());
+  g_playShouldStop = false;
+  g_playTaskRunning = true;
+  xTaskCreatePinnedToCore(playTaskFn, "playAudio", 8192, nullptr, 1, &g_playTaskHandle, 0);
+
+  server.send(200, "application/json", "{\"ok\":true,\"started\":true}");
 }
 
 // Start/stop continuous mic PCM streaming to host via TCP (for real-time
@@ -1508,7 +1588,12 @@ void loop() {
     screenWasTouched = false;
   }
 
-  updateLipSync();
+  // playTaskFn() 现在在自己的后台任务里调用 updateLipSync()（跟原来
+  // handlePlay() 阻塞式播放时一样，边喂数据边更新口型）——播放任务运行期间
+  // 这里就不要再调一次，两个线程同时读写 g_lipSyncActive/g_lipData 等全局
+  // 状态、还都在调 avatar.setMouthOpenRatio() 会有竞态。播放任务不在跑的
+  // 时候（没有别的地方在维护口型）才轮到 loop() 这里兜底调用。
+  if (!g_playTaskRunning) updateLipSync();
 
   // Reset touch expression after 3 seconds
   if (touchExprActive && (millis() - touchExprTime > 3600000)) {

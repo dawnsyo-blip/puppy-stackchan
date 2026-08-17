@@ -36,7 +36,15 @@
   多久）、`double_tap_count`/`screen_tap_count`（单调递增计数器，头顶双击/
   屏幕点击各发生一次就 +1）都是固件端权威计算的实时值，host 端不用也不应该
   自己用时间戳重新推算——见下面"触摸事件：固件是权威真相"一节。
-- `/play?url=<url>` — 播放 WAV 音频
+- `/play?url=<url>` — 播放 WAV 音频；`/play?stop=1` — 立刻打断当前播放。
+  **非阻塞**——下载+解析+分块播放全部搬进了固件的后台 FreeRTOS 任务
+  （`firmware.ino` 的 `playTaskFn()`，模式跟 `/stream` 的 `streamTaskFn()`
+  一样），`handlePlay()` 只负责校验参数、启动任务、立刻返回，不会像原来那样
+  阻塞到播完才响应（那样的话讲话期间设备完全不响应 `/touch`，"讲话时摸一下
+  立刻打断"根本做不到）。host 端因此不能再假设"HTTP 响应回来=播完了"，要靠
+  轮询 `/status` 的 `playing` 字段判断是否还在播，见下面"讲话时触摸立刻
+  打断"一节和 `puppy_engine_v4.py` 的 `wait_for_playback()`。
+- `/status` 现在多一个 `playing` 字段（当前是否有播放任务在跑）。
 - `/record?seconds=N` — 录音（一次性、有限时长；puppy_engine_v4.py 不再用它做语音
   唤醒，改用下面的 `/stream`，仅保留给独立测试脚本用）
 - `/stream?port=N` / `/stream?stop=1` — 语音唤醒的核心：StackChan 主动连到
@@ -240,10 +248,12 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   任何提示的话，用户分不清"按对了在等"还是"设备根本没感应到"。用
   `set_led_mode` 而不是一次性 `/led?r=&g=&b=`：固件 `updateLed()` 每帧都会
   按当前 `g_ledMode` 重算颜色，如果当前正处于呼吸/闪烁/渐暗这类持续模式，
-  一次性设色马上就会被下一帧覆盖掉，必须真正切换模式才压得住。这条只挂在
-  头顶触摸传感器（`TouchSensor.isPressed()`/`held_ms`）上，不含屏幕触摸——
-  碰屏幕本身会立刻触发表情+舵机动作（见"碰屏幕→开心"），反馈已经很明显，
-  不需要再叠加一次 LED 提示。
+  一次性设色马上就会被下一帧覆盖掉，必须真正切换模式才压得住。这条基础
+  版只挂在头顶触摸传感器（`TouchSensor.isPressed()`/`held_ms`）的按下沿/
+  松开沿上，不含屏幕触摸——碰屏幕本身会立刻触发"小开心"的表情+舵机动作，
+  反馈已经很明显，不需要再叠加一次 LED 提示；头顶双击→兴奋这条瞬时手势另外
+  在 `handle_touch_trigger()` 里单独点了一次反馈灯，见上面"触摸触发映射"
+  一节，因为它不总能被这里的按下沿可靠捕捉到。
 
 ## 舵机噪音防误触发语音
 麦克风灵敏度为了能听清小声说话被放大了 5 倍（`mic_cfg.magnification = 5`，
@@ -306,16 +316,30 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   数值，不要在 host 端用采样时间戳重建，采样节奏一旦被别的同步阻塞打乱就
   会算错或漏判。
 
-## 触摸触发映射（tick() 里的三条路径）
-- **碰屏幕 → 开心（摸头反应）**：`pet_happy()`，不设状态限制、也不依赖
-  `scan_for_face()`。之前这条复用的是"短按→扫描找人"那套逻辑，
+## 触摸触发映射（handle_touch_trigger() 的三条路径）
+判断/处理逻辑集中在 `PuppyEngine.handle_touch_trigger(touch)` 一个方法里
+——不止 `tick()` 调用它，讲话过程中（`wait_for_playback()`）也要用同一套
+判断，两处不能各写一份，见下面"讲话时触摸立刻打断"一节。
+- **碰屏幕 → "小开心"（摸头反应）**：`enter_xiaokaixin()`，不设状态限制、
+  也不依赖 `scan_for_face()`。之前这条复用的是"短按→扫描找人"那套逻辑，
   `scan_for_face()` 转头找不到人脸时会静默失败、既不报错也不进开心——这才
   是"碰屏幕没反应"的根因，不是触摸事件本身没测到。碰屏幕时用户显然就在
-  设备正前方，不需要再靠摄像头确认一次。舵机动作是 `play_pet_animation()`
-  （轻微小幅度抬头 3 次，`PET_PITCH_UP/DOWN`），跟"进入开心"状态本身的完整
-  摇头动画（`play_happy_animation()`）是两个不同的动作，即使当前已经是
-  HAPPY 状态、摸一下屏幕也会再触发一次这个反应动画。
-- **头顶双击 → 兴奋**：不设状态限制。
+  设备正前方，不需要再靠摄像头确认一次。**"小开心"**是这个反应动作的
+  正式名字：开心表情 + 轻微小幅度抬头 3 次（`play_xiaokaixin_animation()`,
+  `XIAOKAIXIN_PITCH_UP/DOWN`），跟"进入开心"状态本身的完整摇头动画
+  （`play_happy_animation()`）是两个不同的动作，动作播完保持在开心表情/
+  状态上；即使当前已经是 HAPPY 状态、摸一下屏幕也会再触发一次这个反应
+  动画。除了碰屏幕，听到呼唤"小狗小狗"（见下面"'小狗小狗'呼唤"一节）也会
+  触发同一个"小开心"，两条路径共用 `enter_xiaokaixin()`，用 `reason` 参数
+  区分转移日志里的说明文字（"摸头反应" vs "呼唤反应"）。
+- **头顶双击 → 兴奋**：不设状态限制。双击本身是瞬时手势，`check_touch()`
+  里 press/release 边沿驱动的触摸反馈灯（下面"触摸反馈灯"一节）不一定能
+  可靠地在两次快速点按之间抓到，所以 `handle_touch_trigger()` 在双击分支
+  里额外显式点一次暖白灯确认"感应到了"，再进兴奋状态的彩虹快闪；如果已经
+  在 EXCITED 状态（`transition()` 对"目标状态跟当前一样"是空操作，不会
+  重播彩虹快闪），不加这个兜底的话双击会显得毫无反应，所以这里点完暖白灯
+  以后还会强制调一次 `restore_state_led()` 确保最终落回彩虹快闪、不卡在
+  反馈用的暖白上。
 - **头顶长按满 `PRIVACY_HOLD_SEC`(3s) → 进/出隐私**：按当前是否已经在
   PRIVACY 状态决定方向（同一个 held_ms 判断，不是两套独立逻辑）。这条之前
   只写了"隐私状态下长按→退出"，压根没有"非隐私状态长按→进入"的分支，所以
@@ -362,6 +386,73 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   下一轮。人脸检测本身仍然按 `poll_slot==1` 轮流+各自的 `FACE_CHECK_
   INTERVAL_SEC`/`FACE_RETRACK_INTERVAL_SEC` 内部节流，没有变得更频繁，请求
   总量没有增加，只是不再拖累触摸的响应速度。
+
+## 讲话时触摸立刻打断
+"小狗讲话时摸一下就立刻打断"这个需求，卡在一个硬限制上：ESP32 的
+`WebServer` 单线程，`/play` 原来的实现是阻塞到整段 WAV 播完才返回
+`handleClient()`——播放期间（qa_complex 逐个念关键词，每个词可能占用
+好几秒）设备完全不会处理任何其它 HTTP 请求，包括 `/touch`。host 端就算
+拿到触摸信号也没用：想发一个"stop"请求过去，这个请求要排队等当前这次
+`/play` 的 handler 自己跑完才轮得到处理，那时候都已经播完了，"打断"永远
+迟到。唯一的解法是让 `/play` 也变成非阻塞的，跟 `/stream` 一样的架构。
+- **固件端**：`handlePlay()` 现在只做参数校验、把下载+解析+分块播放这一整
+  套逻辑丢给后台 FreeRTOS 任务 `playTaskFn()`（`xTaskCreatePinnedToCore`，
+  跟 `streamTaskFn()` 同一个模式），立刻返回。`g_playShouldStop`
+  这个原子 flag 由 `handlePlay()` 的 `?stop=1` 分支置位，`playTaskFn()`
+  的下载循环和"等上一块播完"的等待循环里都频繁检查它，一旦发现就调
+  `M5.Speaker.stop()` 立刻硬切断——不是"播完手头这一小段再停"，是真正
+  意义上的立刻打断。`g_i2sMutex`/`g_streamPauseForOtherAudio` 这套麦克风/
+  喇叭互斥协议原本就是为"多个线程可能同时想用 I2S 外设"设计的（见
+  `streamTaskFn()` 声明处的注释），`playTaskFn()` 只是又多了一个使用方，
+  机制不用改。`loop()` 里原来兜底调用的 `updateLipSync()` 现在改成
+  `if (!g_playTaskRunning) updateLipSync();`——播放任务运行期间它自己会在
+  循环里调这个函数，主线程不能再重复调一遍，否则两个线程同时读写
+  `g_lipSyncActive`/`g_lipData` 这些全局状态、还都在调
+  `avatar.setMouthOpenRatio()`，是一个数据竞争。`/status` 新增 `playing`
+  字段，host 端靠轮询它判断"是不是还在播"，不能再假设"HTTP 响应回来=
+  播完了"。**这次顺带把 `handleStatus()` 也从 `String` 拼接改成了静态
+  缓冲区 + `snprintf`**（跟 `handleTouch()`/`handleVolume()` 一样的零堆
+  分配模式）——host 现在等语音播完要按几百毫秒的间隔反复轮询这个接口，
+  虽然单次播放持续时间不长，但累积起来已经够得上 CLAUDE.md 里 `/volume`
+  那次教训描述的"持续高频调用"量级，不提前修的话迟早会在这里重演一次同样
+  的堆碎片化问题。
+- **host 端**：`play_wav_file()` 拆成了 `start_play()`（发 `/play?url=`，
+  只负责启动，几乎立刻返回）和 `stop_play()`（发 `/play?stop=1`）。
+  `PuppyEngine.wait_for_playback()` 轮询 `/status` 的 `playing` 字段等
+  自然播完，轮询间隙顺带 `check_touch()`；一旦 `handle_touch_trigger()`
+  判定这次触摸是个真手势（不是空按），就返回 `False` 告诉调用方"没播完，
+  是被打断的"。`speak_keywords()` 逐个关键词播放那里改成
+  `if start_play(...) and not self.wait_for_playback(): ...中止剩下的
+  关键词...`——被打断时不再继续念下一个词，也不再调
+  `restore_state_led()`（`handle_touch_trigger()` 已经把 LED 设成新状态
+  该有的样子，这里再设一次反而可能把它盖掉）。
+- **`handle_touch_trigger()` 不管当前是不是正在讲话，处理任何一个手势前都
+  无条件先发一次 `stop_play()`**：`/play?stop=1` 在没有播放任务时只是个
+  空操作，没有副作用，不需要先判断"是不是真的在放"，这样 `tick()` 里的
+  正常触摸处理和 `wait_for_playback()` 里的打断处理可以走同一份代码，不用
+  为"当前是不是在播放"这件事另外分支。
+- 目前只有 `speak_keywords()`（qa_complex 逐个念关键词）会真正播放音频，
+  是全系统唯一需要"讲话时被打断"这件事的地方；`play_nod_animation()`/
+  `play_shake_animation()`（qa_simple 的点头/摇头）不播放音频，不涉及这
+  一套。
+
+## "小狗小狗"呼唤
+`is_calling_puppy(text)`（`puppy_engine_v4.py`）判断 STT 识别结果是不是在
+叫名字（"小狗小狗"这种呼唤语），不是在问一个提到了"小狗"这个词的问题。
+先剥掉标点/空格只留中文字符（SenseVoice 识别结果可能带"小狗小狗！""小狗，
+小狗～"这类变体，直接做字符串相等判断会漏掉大部分实际说法），再要求剩下
+的内容很短（`<=8` 个字，避免"小狗你说小狗喜不喜欢吃肉"这种长句子里恰好
+出现两次"小狗"被误判）且至少出现两次"小狗"。
+- **不走 LLM 语义分类**：`_run_conversation_turn_body()` 里这个判断插在
+  STT 识别结果出来之后、送进 LLM 之前——直接拦截，不再走 `ask_llm()`。这是
+  刻意的：SYSTEM_PROMPT 的四路意图分类（qa_simple/qa_complex/praise/scold）
+  对"小狗小狗"这种没有实际问题内容的招呼语没有天然归属，让 LLM 去猜大概率
+  会猜成 qa_complex（开放式问题）念一串不相干的关键词，而不是我们想要的
+  "小开心"反应；直接拦截还省了一次网络往返。
+  触发后直接调 `self.enter_xiaokaixin(reason="呼唤反应")` 然后 `return`，
+  不会像 qa_simple/qa_complex 那样调 `_settle_happy(track_ok)`——道理跟碰
+  屏幕触发"小开心"一样，用户显然就在附近正对着它说话，不需要摄像头再确认
+  一次人脸位置。
 
 ## 编译 / 烧录 / 验证流程
 本机的 `arduino-cli` 不在 PATH 里，可执行文件在

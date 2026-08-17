@@ -30,6 +30,7 @@ SenseVoiceSmall / fsmn-vad 模型首次运行会自动从 ModelScope 下载并�
 退出: Ctrl+C
 """
 
+import re
 import requests
 import time
 import sys
@@ -62,7 +63,10 @@ COMPUTER_IP = "192.168.137.1"   # 电脑在热点网络上的 IP（StackChan 用
                                  # 也是 /stream 推流要连过来的地址）
 AUDIO_SERVER_PORT = 8080
 TIMEOUT = 5                     # 普通请求（/face、/servo、/touch）超时
-PLAY_TIMEOUT = 30               # /play 是阻塞调用（播完才返回），要给够时间
+PLAY_TIMEOUT = 30               # /play 本身现在是非阻塞的（固件后台任务播放，
+                                 # 见 firmware.ino 的 playTaskFn()），这个超时是
+                                 # PuppyEngine.wait_for_playback() 轮询等自然
+                                 # 播完的兜底上限，不是单次 HTTP 请求的超时
 API_RETRY_DELAY_SEC = 2.0       # API 请求失败（连不上/超时）后，等这么久再重试一次，
                                  # 不要立刻重试，避免在设备本来就吃紧时继续加压
 
@@ -118,13 +122,14 @@ HAPPY_CYCLES = 3
 HAPPY_CYCLE_DELAY = 0.4
 HAPPY_PITCH = 300
 
-# --- 摸头反应动画参数（碰屏幕触发，用开心表情但舵机动作不同：轻微小幅度
-#     抬头，不是完整摇头动画）---
-PET_PITCH_UP = 400      # 默认回正是 450，400 只是轻微抬头，幅度比 HAPPY_PITCH(300) 小很多
-PET_PITCH_DOWN = 450
-PET_SPEED = 300
-PET_CYCLES = 3
-PET_CYCLE_DELAY = 0.3
+# --- "小开心"动画参数：用开心表情，但舵机动作是轻微小幅度抬头，不是完整
+#     摇头动画——碰屏幕、以及听到"小狗小狗"呼唤都会触发这个动作（见
+#     enter_xiaokaixin()/play_xiaokaixin_animation()）---
+XIAOKAIXIN_PITCH_UP = 400      # 默认回正是 450，400 只是轻微抬头，幅度比 HAPPY_PITCH(300) 小很多
+XIAOKAIXIN_PITCH_DOWN = 450
+XIAOKAIXIN_SPEED = 300
+XIAOKAIXIN_CYCLES = 3
+XIAOKAIXIN_CYCLE_DELAY = 0.3
 
 # --- 兴奋动画参数 ---
 EXCITED_YAW_RANGE = 800
@@ -535,17 +540,17 @@ def play_happy_animation():
     # 动画结束后回正，确保摄像头对准人
     move_servo(yaw=0, pitch=450, speed=300, mute=True)
 
-def play_pet_animation():
-    """碰一下屏幕的专属反应：用开心的面部表情，但舵机动作是轻微小幅度抬头
-    3 次，不是"进入开心"时的完整摇头动画——这是一次性的"摸摸头"反应，不是
-    状态切换动画，所以不复用 play_happy_animation()。"""
+def play_xiaokaixin_animation():
+    """"小开心"：用开心的面部表情，但舵机动作是轻微小幅度抬头 3 次，不是
+    "进入开心"时的完整摇头动画——碰屏幕、以及听到"小狗小狗"呼唤都会触发这个
+    反应，是一次性的动作，不是状态切换动画，所以不复用 play_happy_animation()。"""
     set_expression("happy")
     set_led_mode("solid", *WARM_WHITE_RGB)
-    for _ in range(PET_CYCLES):
-        move_servo(pitch=PET_PITCH_UP, speed=PET_SPEED, mute=True)
-        time.sleep(PET_CYCLE_DELAY)
-        move_servo(pitch=PET_PITCH_DOWN, speed=PET_SPEED, mute=True)
-        time.sleep(PET_CYCLE_DELAY)
+    for _ in range(XIAOKAIXIN_CYCLES):
+        move_servo(pitch=XIAOKAIXIN_PITCH_UP, speed=XIAOKAIXIN_SPEED, mute=True)
+        time.sleep(XIAOKAIXIN_CYCLE_DELAY)
+        move_servo(pitch=XIAOKAIXIN_PITCH_DOWN, speed=XIAOKAIXIN_SPEED, mute=True)
+        time.sleep(XIAOKAIXIN_CYCLE_DELAY)
 
 def play_excited_animation():
     set_expression("excited")
@@ -690,15 +695,26 @@ def ensure_audio_server():
     print(f"  [音频服务器] http://{COMPUTER_IP}:{AUDIO_SERVER_PORT}/")
 
 
-def play_wav_file(path):
-    """让 StackChan 通过 /play 下载并播放本地音频文件（阻塞到播完）。"""
+def start_play(path):
+    """让 StackChan 通过 /play 开始下载并播放本地音频文件。/play 现在是
+    非阻塞的（固件把下载+播放放进了后台 FreeRTOS 任务，见 firmware.ino 的
+    playTaskFn()），这个调用只负责启动，几乎立刻返回——不等播完。等自然
+    播完、或者中途被触摸打断，要靠 PuppyEngine.wait_for_playback() 轮询
+    /status 的 playing 字段。"""
     filename = Path(path).name
     play_url = f"http://{COMPUTER_IP}:{AUDIO_SERVER_PORT}/{filename}"
-    r = api_get(f"/play?url={play_url}", timeout=PLAY_TIMEOUT)
+    r = api_get(f"/play?url={play_url}", timeout=TIMEOUT)
     ok = r is not None and r.status_code == 200
     if not ok:
-        print(f"  [播放] 失败: {r.status_code if r else '无响应'}")
+        print(f"  [播放] 启动失败: {r.status_code if r else '无响应'}")
     return ok
+
+def stop_play():
+    """叫停当前正在播放的音频（如果有的话）。固件端 g_playShouldStop 置位后
+    立刻 M5.Speaker.stop() 硬切断，不是"播完手头这一块再停"；如果这时候
+    根本没有播放任务在跑，固件那边只是个空操作，调用方不需要先判断"是不是
+    真的在放"再决定要不要调这个。"""
+    api_get("/play?stop=1")
 
 
 def tts_to_wav(text, out_stem):
@@ -722,6 +738,20 @@ def tts_to_wav(text, out_stem):
     except Exception as e:
         print(f"  [TTS] 合成失败: {e}")
         return None
+
+
+def is_calling_puppy(text):
+    """判断识别结果是不是在叫它的名字（"小狗小狗"这种呼唤语），不是在问
+    一个提到了"小狗"这个词的问题。直接走固定判断、不经过 LLM 语义分类：
+    这是一句字面意义上的招呼语，不需要 LLM 来"理解"，省一次网络往返，也
+    不会被 SYSTEM_PROMPT 的四路意图分类（qa_simple/qa_complex/praise/scold）
+    意外吞掉、走成复杂回应。
+    先剥掉标点/空格/语气词只留中文字符（SenseVoice 识别结果可能带
+    "小狗小狗！""小狗，小狗～"这类变体），再要求剩下的内容很短（避免"小狗
+    你说小狗喜不喜欢吃肉"这种长句子里恰好出现两次"小狗"被误判）且至少出现
+    两次"小狗"。"""
+    cleaned = re.sub(r"[^一-鿿]", "", text or "")
+    return len(cleaned) <= 8 and cleaned.count("小狗") >= 2
 
 
 def ask_llm(user_text, api_key):
@@ -1090,9 +1120,10 @@ class PuppyEngine:
 
         print("[引擎] 小狗行为引擎 v4 启动！")
         print(f"[引擎] 当前状态: {self.state.value}")
-        print("[引擎] 碰一下屏幕 → 开心（摸头反应）")
+        print("[引擎] 碰一下屏幕 → 小开心（摸头反应）")
         print("[引擎] 头顶双击 → 兴奋")
         print(f"[引擎] 头顶长按满 {PRIVACY_HOLD_SEC}s → 进/出隐私")
+        print("[引擎] 呼唤\"小狗小狗\" → 小开心")
         print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应")
         print("[引擎] Ctrl+C 退出\n")
 
@@ -1196,19 +1227,22 @@ class PuppyEngine:
         # 回开心，LED 可能还停在上一个状态的效果上，这里补一次常亮。
         set_led_mode("solid", *WARM_WHITE_RGB)
 
-    def pet_happy(self):
-        """碰一下屏幕的专属反应：不依赖 scan_for_face() 先找到人脸再进
-        开心——用户正在碰屏幕，人显然就在设备正前方，不需要再转头确认一次。
-        直接进 HAPPY 状态，播放 play_pet_animation()（开心表情 + 轻微抬头
-        3 次，跟 enter_happy() 的完整摇头动画是两个不同的动作）。不设状态
-        限制，跟头顶双击→兴奋一样，从任何状态碰屏幕都会触发。"""
+    def enter_xiaokaixin(self, reason="摸头反应"):
+        """"小开心"：碰屏幕、或者听到"小狗小狗"呼唤，都走这里——两条触发
+        路径都不依赖 scan_for_face() 先找到人脸再进开心，用户正在碰屏幕/
+        正在叫它，人显然就在设备正前方，不需要再转头确认一次。直接进 HAPPY
+        状态，播放 play_xiaokaixin_animation()（开心表情 + 轻微抬头 3 次，
+        跟 enter_happy() 的完整摇头动画是两个不同的动作），动作播完保持在
+        开心表情/状态上。不设状态限制，跟头顶双击→兴奋一样，从任何状态
+        触发都会执行。reason 只影响转移日志里的说明文字，方便区分是哪条
+        路径触发的。"""
         old = self.state
         self.session_active = True
         self.state = State.HAPPY
         self.state_enter_time = time.time()
         if old != State.HAPPY:
-            print(f"[转移] {old.value} → 开心（摸头反应）")
-        play_pet_animation()
+            print(f"[转移] {old.value} → 开心（{reason}）")
+        play_xiaokaixin_animation()
 
     def restore_state_led(self):
         """把 LED 恢复成当前状态本该有的常驻效果——任何"临时借用" LED 的地方
@@ -1230,6 +1264,55 @@ class PuppyEngine:
             set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
         else:  # IDLE
             set_led(off=True)
+
+    def handle_touch_trigger(self, touch):
+        """处理一次 check_touch() 返回的手势——不止 tick() 一处需要处理触摸
+        手势，讲话过程中（speak_keywords() 逐个念关键词）也要能对触摸立刻
+        反应、打断当前播放，两处共用同一份判断和处理逻辑，不应该各写一份。
+        返回 True 表示这次 touch 里确实有手势被处理了（调用方应该视情况
+        提前返回/中止正在做的事）。"""
+        is_trigger = (
+            touch["screen_tap"] or touch["double_tap"]
+            or (touch["held_ms"] >= PRIVACY_HOLD_SEC * 1000 and not self.privacy_hold_fired)
+        )
+        if not is_trigger:
+            return False
+
+        # 触摸手势优先级最高：不管当前是不是正在讲话，先无条件叫停播放，
+        # 再处理手势本身——firmware 端 /play?stop=1 在没有播放任务时只是个
+        # 空操作，没有副作用，不需要先判断"是不是真的在放"，也不需要在这里
+        # 关心调用方是从 tick() 还是从 wait_for_playback() 进来的。
+        stop_play()
+
+        if touch["screen_tap"]:
+            print("[触发] 触碰屏幕 → 小开心（摸头反应）")
+            # 不需要在这里另外点一次触摸反馈灯——enter_xiaokaixin() 播放的
+            # play_xiaokaixin_animation() 里已经会把 LED 设成暖白常亮，效果跟触摸
+            # 反馈灯完全一样，重复调一次没有任何可观察的区别。
+            self.enter_xiaokaixin()
+        elif touch["double_tap"]:
+            print("[触发] 头顶双击 → 兴奋！")
+            # 双击是个瞬时手势，press/release 边沿那套触摸反馈灯（见
+            # check_touch()）不一定能可靠地在双击的两次快速点按之间抓到；
+            # 这里显式点一次暖白灯确认"感应到了"，再进兴奋状态本该有的彩虹
+            # 快闪。如果已经在 EXCITED 状态（transition() 对"目标状态跟
+            # 当前一样"是空操作，不会重播彩虹快闪），不加这个兜底的话，
+            # 双击既不会有暖白反馈、也不会有任何其它可见变化，感觉像完全
+            # 没反应；restore_state_led() 保证不管是不是空操作，最终都会
+            # 落回兴奋该有的彩虹快闪，不会卡在这次反馈用的暖白上。
+            set_led_mode("solid", *WARM_WHITE_RGB)
+            self.transition(State.EXCITED)
+            self.restore_state_led()
+        else:
+            self.privacy_hold_fired = True
+            if self.state == State.PRIVACY:
+                print(f"[触发] 长按 {touch['held_ms']/1000:.1f}s → 退出隐私")
+                if self.scan_for_face():
+                    self.enter_happy()
+            else:
+                print(f"[触发] 长按 {touch['held_ms']/1000:.1f}s → 进入隐私")
+                self.transition(State.PRIVACY)
+        return True
 
     def record_interaction(self):
         self.last_interaction = time.time()
@@ -1576,6 +1659,18 @@ class PuppyEngine:
             print("[对话] 没识别到内容")
             self._settle_happy(track_ok)
             return
+
+        # "小狗小狗"是在叫名字，不是在提问——不走 LLM 意图分类（会被
+        # SYSTEM_PROMPT 的四路分支之一误吞、走成复杂回应念一串关键词），
+        # 直接触发"小开心"：开心表情 + 轻微抬头 3 次，动作播完保持在开心
+        # 表情/状态上，不需要像 _settle_happy() 那样再看 track_ok 决定要不要
+        # 重新扫描——道理跟碰屏幕触发小开心一样，用户显然就在附近正对着它
+        # 说话，不需要摄像头再确认一次。
+        if is_calling_puppy(user_text):
+            print(f"[对话] 识别到呼唤「{user_text}」→ 小开心")
+            self.enter_xiaokaixin(reason="呼唤反应")
+            return
+
         # 识别结果一出来就立刻显示在字幕框里，方便用户确认小狗听到的是什么；
         # 一直留到 LLM 回复出来、即将执行下一步动作时才清空（见下面 join 后）。
         set_subtitle(user_text, dur_ms=SUBTITLE_DUR_MS)
@@ -1659,6 +1754,26 @@ class PuppyEngine:
             else:
                 self.transition(State.IDLE)
 
+    def wait_for_playback(self, timeout=PLAY_TIMEOUT):
+        """轮询 /status 的 playing 字段直到这次播放自然结束；期间如果检测到
+        触摸手势，交给 handle_touch_trigger() 处理（它会自己先叫停播放），
+        这里只要发现"手势被处理了"就提前返回 False——告诉调用方"没播完，是
+        被触摸打断的"，调用方（比如 speak_keywords()）应该据此中止自己接
+        下来的流程（剩下的关键词不用再念了），不要不管三七二十一接着播下
+        一个。返回 True 表示这次播放正常播完，没有被打断。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            touch = self.check_touch()
+            if touch is not None and self.handle_touch_trigger(touch):
+                return False
+            status = get_status()
+            if status is not None and not status.get("playing", False):
+                return True
+            time.sleep(0.1)
+        print("[播放] 等待播放结束超时，强制停止")
+        stop_play()
+        return False
+
     def speak_keywords(self, keywords):
         """依次合成并播放每个关键词，关键词之间间隔 KEYWORD_GAP_SEC。不再用字幕
         提示——思考一结束就让屏幕右下角的爪印按钮出现，之后每念一个关键词前
@@ -1701,7 +1816,15 @@ class PuppyEngine:
             wav_path = next_wav
             if wav_path:
                 set_led(*WARM_WHITE_RGB)
-                play_wav_file(wav_path)
+                if start_play(wav_path) and not self.wait_for_playback():
+                    # 被触摸打断——handle_touch_trigger() 已经处理完这次
+                    # 手势（叫停了播放、切到了新状态），这里只需要把还没念
+                    # 完的关键词和按钮 UI 一起收掉，不能继续念下去，也不能
+                    # 再调 restore_state_led()：手势处理时已经把 LED 设成
+                    # 新状态该有的样子了，这里再设一次反而可能把它盖掉。
+                    print("[播放] 讲话被触摸打断，剩下的关键词不念了")
+                    set_button("off")
+                    return
                 set_led(off=True)
             if i + 1 < len(keywords):
                 next_wav = tts_to_wav(keywords[i + 1], f"kw_{i + 1}")
@@ -1735,45 +1858,26 @@ class PuppyEngine:
         poll_slot = self.tick_count % 2   # 1 时才轮到人脸检测（do_face_check）
 
         # --- 触摸（最高优先级）---
-        # 目前保留三条触摸触发路径：
+        # 三条触摸触发路径的实际判断/处理逻辑都在 handle_touch_trigger() 里
+        # （讲话过程中 wait_for_playback() 也要用同一份逻辑，不能各写一份）：
         # 1. 碰一下屏幕 → 开心（摸头反应）。不依赖 scan_for_face()、不设
-        #    状态限制——碰屏幕时人显然就在设备正前方，不需要再扫描确认，
-        #    见 pet_happy()。之前这里复用的是"短按→扫描找人"那套逻辑，
-        #    scan_for_face() 找不到人脸时会静默失败、既不报错也不进开心，
-        #    这是"碰屏幕没反应"的根因；现在改成直接触发，不再依赖摄像头。
-        # 2. 头顶双击 → 兴奋，不看当前是什么状态（transition() 自己对
-        #    "目标状态跟当前一样"是空操作，不用在这里额外判断）。
+        #    状态限制——碰屏幕时人显然就在设备正前方，不需要再扫描确认。
+        #    之前这里复用的是"短按→扫描找人"那套逻辑，scan_for_face() 找
+        #    不到人脸时会静默失败、既不报错也不进开心，这是"碰屏幕没反应"
+        #    的根因；现在改成直接触发，不再依赖摄像头。
+        # 2. 头顶双击 → 兴奋，不看当前是什么状态。
         # 3. 头顶长按满 PRIVACY_HOLD_SEC(3s) → 进/出隐私，按当前是否已经在
-        #    隐私状态决定方向。这一条之前只写了"隐私状态下长按→退出"，根本
-        #    没有"非隐私状态长按→进入"这个分支，所以长按头顶从来没能触发过
-        #    隐私——不是跟双击手势冲突，是这条路径压根没实现。长按（持续
-        #    按住 3 秒）和双击（两次快速点按，firmware.ino 里
+        #    隐私状态决定方向。之前只写了"隐私状态下长按→退出"，没有"非
+        #    隐私状态长按→进入"的分支，所以长按头顶从来没能触发过隐私——
+        #    不是跟双击手势冲突，是这条路径压根没实现。长按（持续按住 3
+        #    秒）和双击（两次快速点按，firmware.ino 里
         #    DOUBLE_TAP_WINDOW=800ms 以内）手势形态差异明显，不会互相误判。
         #    用 held_ms 而不是 host 自己记时间戳：host 万一被一整轮对话
         #    （好几秒）卡住没来得及轮询，固件端这个值依然精确，不依赖轮询
         #    节奏。
         touch = self.check_touch()
-        if touch is not None:
-            if touch["screen_tap"]:
-                print("[触发] 触碰屏幕 → 开心（摸头反应）")
-                self.pet_happy()
-                return
-
-            if touch["double_tap"]:
-                print("[触发] 头顶双击 → 兴奋！")
-                self.transition(State.EXCITED)
-                return
-
-            if touch["held_ms"] >= PRIVACY_HOLD_SEC * 1000 and not self.privacy_hold_fired:
-                self.privacy_hold_fired = True
-                if self.state == State.PRIVACY:
-                    print(f"[触发] 长按 {touch['held_ms']/1000:.1f}s → 退出隐私")
-                    if self.scan_for_face():
-                        self.enter_happy()
-                else:
-                    print(f"[触发] 长按 {touch['held_ms']/1000:.1f}s → 进入隐私")
-                    self.transition(State.PRIVACY)
-                return
+        if touch is not None and self.handle_touch_trigger(touch):
+            return
 
         # --- 语音唤醒（好奇/思考期间已经在处理语音了，不重复检查；头顶正被
         #     按住时也跳过——check_voice_wake() 一旦捕捉到语音段就会同步跑完
