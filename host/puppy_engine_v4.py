@@ -35,6 +35,7 @@ import requests
 import time
 import sys
 import json
+import base64
 import asyncio
 import tempfile
 import threading
@@ -193,6 +194,46 @@ SCAN_POSITIONS = [0, -500, 0, 500, 0]
 SCAN_SPEED = 300
 SCAN_PAUSE = 1.0
 
+# --- 游戏：捉迷藏找物品 ---
+# 玩法：人把一个物品拿给小狗"看"一眼（拍照记颜色特征 + 可选 VLM 文字描述），
+# 小狗低头等人藏好，倒计时结束后转头扫描房间，用颜色直方图相关度粗筛+可选
+# 视觉大模型精确确认判断有没有找到。整个过程是一次同步阻塞的交互（跟
+# run_conversation_turn() 一样），tick() 主循环观察不到中间的子阶段，见
+# PuppyEngine.play_game_hide_seek()。
+GAME_REGISTER_WAIT_SEC = 3.0     # 说完"拿给我看一眼"之后，等这么久再拍参考照
+GAME_COUNTDOWN_SECONDS = 10      # 倒计时数到几
+GAME_SCAN_STEPS = 12             # 扫描步数，从 GAME_SCAN_YAW_MIN 到 MAX 均匀分布
+GAME_SCAN_YAW_MIN = -800         # 复用 EXCITED_YAW_RANGE/PRIVACY_YAW 同量级的
+GAME_SCAN_YAW_MAX = 800          # 安全幅度，不是设计稿里没验证过的 100~900
+GAME_SCAN_PAUSE_SEC = 1.0        # 每步转头后停留多久再拍照（等舵机到位+防抖）
+GAME_SCAN_PITCH = 400            # 扫描时的 pitch，略微抬头照顾桌面/台面高度
+GAME_SCAN_TIMEOUT_SEC = 60       # 扫描总耗时上限，超过就算超时没找到
+GAME_HIST_THRESHOLD = 0.35       # 颜色直方图相关度阈值——初始猜测值，需要
+                                  # 实机测试调整，误报多就调高，漏检多就调低
+GAME_VLM_TIMEOUT_SEC = 10        # 每次 VLM 调用的超时
+GAME_FOUND_CELEBRATE_SEC = 2.0   # 找到后庆祝动画+旁白播完，停留多久再回常态
+GAME_TIMEOUT_LINGER_SEC = 3.0    # 超时抱歉表情停留多久再回常态
+
+# --- 游戏 LED（对照表情映射v7.xlsx 里没有的新增行）---
+GAME_COUNTDOWN_LED_RGB = (0, 100, 255)
+GAME_COUNTDOWN_LED_PERIOD_MS = 2000
+GAME_SCAN_LED_PERIOD_MS = 3000
+GAME_FOUND_LED_RGB = (255, 50, 0)
+GAME_FOUND_LED_PERIOD_MS = 300
+GAME_TIMEOUT_LED_RGB = (0, 50, 200)
+GAME_TIMEOUT_LED_FADE_MS = 3000
+
+# --- 视觉大模型（Qwen-VL，通过阿里云 DashScope 的 OpenAI 兼容端点）---
+# 用于游戏"精确确认"这一步：颜色直方图粗筛通过后，再让 VLM 判断画面里是不是
+# 真的是那个物品的文字描述。API key 从 .env 的 DASHSCOPE_API_KEY 读取（跟
+# DEEPSEEK_API_KEY 同一份 .env，同一套 load_env_key() 解析逻辑）；没有配置
+# key 时 call_vision_llm() 直接返回 None，调用方（_game_register_phase()/
+# _game_confirm_with_vlm()）都设计成能在没有 VLM 的情况下优雅降级——注册阶段
+# game_ref_desc 留空，扫描阶段只靠颜色直方图相关度判断，不会因为没配置这个
+# key 就让整个游戏玩不了。
+QWEN_VL_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+QWEN_VL_MODEL = "qwen-vl-plus"
+
 # --- 触摸检测 ---
 # 从"手指碰到传感器"到"反应动作真正开始"的延迟，上限基本就是
 # MAIN_LOOP_INTERVAL_SEC + TOUCH_POLL_SEC 这两个数字之和（HTTP 往返本身只有
@@ -338,6 +379,7 @@ class State(Enum):
     CURIOUS  = "好奇"
     THINKING = "思考"
     SORRY    = "抱歉"
+    GAME_HIDE_SEEK = "捉迷藏"
 
 
 # ╔══════════════════════════════════════════════╗
@@ -364,7 +406,12 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"人"
 "你去休息吧""我们先聊到这里"这类意思）：直接输出，不要输出别的文字：
 {"type": "privacy"}
 
-5. 开放式问题（qa_complex）或其它情况（other）：
+5. 人提议一起玩"捉迷藏找物品"的游戏（比如"我们玩捉迷藏吧""你猜我藏了
+什么""找找看""藏东西"这类意思，且是在提议开始一个新游戏，不是在问"你在
+哪""你看到了吗"这种和游戏无关的日常问题）：直接输出，不要输出别的文字：
+{"type": "game_hide_seek"}
+
+6. 开放式问题（qa_complex）或其它情况（other）：
    第一步——先想清楚：如果你是这只小狗，针对人这句话，你会有什么具体、
    符合逻辑的真实反应？用一句大白话写下来，哪怕很短也行。这句话不会被
    念出来，只是逼自己先想清楚答案，不许跳过这一步，也不许把人问题里的
@@ -372,7 +419,7 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"人"
    第二步——把这句大白话压缩成 2-4 个关键词（空格分隔），再换行输出 JSON：
    {"type": "qa_complex", "keywords": [...]}  或  {"type": "other", "keywords": [...]}
 
-第 5 条的关键词选择规则：
+第 6 条的关键词选择规则：
 - 关键词必须来自你自己想清楚的那句大白话，不能是人问题原句里出现的词的
   简单复读。如果发现自己选的词和问题原句几乎一样，说明大概率是偷懒没有
   真的回答，回去重想。
@@ -445,7 +492,10 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"人"
 {"type": "privacy"}
 
 用户：你把鞋子咬坏了！
-{"type": "scold"}"""
+{"type": "scold"}
+
+用户：我们玩捉迷藏吧，我藏个东西你来找
+{"type": "game_hide_seek"}"""
 
 
 # ╔══════════════════════════════════════════════╗
@@ -539,11 +589,19 @@ def get_status():
     return None
 
 def capture_frame():
+    img, _ = capture_frame_with_bytes()
+    return img
+
+def capture_frame_with_bytes():
+    """跟 capture_frame() 一样拍一帧，但同时把原始 JPEG 字节也返回——人脸
+    检测只需要解码后的图像数组，捉迷藏游戏的 VLM 精确确认还需要把原始字节
+    编码成 base64 传给视觉大模型，两者共用同一次 /camera 请求，不重复拍照。
+    失败时返回 (None, None)。"""
     r = api_get("/camera")
     if r and r.status_code == 200:
         arr = np.frombuffer(r.content, np.uint8)
-        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    return None
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR), r.content
+    return None, None
 
 
 # ╔══════════════════════════════════════════════╗
@@ -682,9 +740,11 @@ def local_model_cache_dir(model_id, revision="master"):
     return model_id
 
 
-def load_deepseek_api_key():
-    """从项目根目录 .env 手动解析 DEEPSEEK_API_KEY（不读环境变量，也不依赖
-    python-dotenv —— 项目用的 conda 环境里没装这个包）。"""
+def load_env_key(var_name):
+    """从项目根目录 .env 手动解析指定变量名（不读环境变量，也不依赖
+    python-dotenv —— 项目用的 conda 环境里没装这个包）。DEEPSEEK_API_KEY 和
+    捉迷藏游戏用的 DASHSCOPE_API_KEY（Qwen-VL）共用同一份 .env、同一套
+    解析逻辑。"""
     if not ENV_PATH.exists():
         print(f"  [.env] 未找到: {ENV_PATH}")
         return None
@@ -693,10 +753,14 @@ def load_deepseek_api_key():
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        if key.strip() == "DEEPSEEK_API_KEY":
+        if key.strip() == var_name:
             return value.strip().strip('"').strip("'")
-    print("  [.env] 未找到 DEEPSEEK_API_KEY")
+    print(f"  [.env] 未找到 {var_name}")
     return None
+
+
+def load_deepseek_api_key():
+    return load_env_key("DEEPSEEK_API_KEY")
 
 
 _audio_server = None
@@ -846,6 +910,67 @@ def sanitize_keywords(keywords):
         print(f"[对话] 关键词全部超长（疑似 LLM 没拆句子），截断保底: {keywords[0][:KEYWORD_MAX_CHARS]}")
         return [keywords[0][:KEYWORD_MAX_CHARS]]
     return []
+
+
+# ╔══════════════════════════════════════════════╗
+# ║       捉迷藏游戏：颜色直方图 + 视觉大模型      ║
+# ╚══════════════════════════════════════════════╝
+
+def extract_color_hist(img):
+    """从 cv2 解码后的 BGR 图像提取归一化的 HSV 颜色直方图（H 180 bin、S 256
+    bin），用来做"这两张照片颜色分布像不像"的粗筛。只看颜色不看形状/位置，
+    足够便宜到可以在扫描循环的每一步都算一次。"""
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1], None, [180, 256], [0, 180, 0, 256])
+    cv2.normalize(hist, hist)
+    return hist
+
+
+def compare_hist(ref_hist, scan_hist):
+    """比较两个颜色直方图的相关度，返回 -1.0~1.0（越接近 1 越像）。"""
+    return cv2.compareHist(ref_hist, scan_hist, cv2.HISTCMP_CORREL)
+
+
+def call_vision_llm(image_bytes, prompt, api_key, timeout=GAME_VLM_TIMEOUT_SEC):
+    """调用 Qwen-VL（阿里云 DashScope 的 OpenAI 兼容端点）识别一张图片，返回
+    模型的文字回答；任何失败（没配置 key、网络错误、超时、响应格式不对）都
+    统一返回 None，不抛异常——调用方（捉迷藏游戏的注册/确认阶段）都设计成
+    在 VLM 不可用时能优雅降级（注册阶段退化成没有文字描述、扫描阶段退化成
+    只看颜色直方图），不能假设这里一定能拿到结果。"""
+    if not api_key:
+        return None
+    b64_image = base64.b64encode(image_bytes).decode("utf-8")
+    try:
+        r = requests.post(
+            QWEN_VL_API_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": QWEN_VL_MODEL,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}},
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+                "max_tokens": 100,
+            },
+            timeout=timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        print(f"  [VLM] 请求失败: {e}")
+        return None
+    if r.status_code != 200:
+        print(f"  [VLM] API 返回 {r.status_code}: {r.text[:200]}")
+        return None
+    try:
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        print(f"  [VLM] 响应格式不对: {e!r}  body={r.text[:200]}")
+        return None
 
 
 # ╔══════════════════════════════════════════════╗
@@ -1141,6 +1266,16 @@ class PuppyEngine:
         else:
             print("[引擎] [警告] 没有 DeepSeek API key，对话链路里的 LLM 调用会失败")
 
+        # 捉迷藏游戏：Qwen-VL key 是可选的——没配置也不影响游戏能不能玩，
+        # 只是"精确确认"这一步会自动降级成只看颜色直方图，见 call_vision_llm()。
+        self.qwen_api_key = load_env_key("DASHSCOPE_API_KEY")
+        if self.qwen_api_key:
+            print("[引擎] Qwen-VL API key 已从 .env 加载（捉迷藏游戏可用精确确认）")
+        else:
+            print("[引擎] 没有 Qwen-VL API key，捉迷藏游戏会退化成只用颜色直方图判断")
+        self.game_ref_hist = None
+        self.game_ref_desc = None
+
         ensure_audio_server()
 
         # 语音流式监听：先在 host 端把 TCP 监听起来，再告诉 StackChan 开始
@@ -1167,6 +1302,7 @@ class PuppyEngine:
         print("[引擎] 头顶双击 → 兴奋")
         print(f"[引擎] 头顶长按满 {PRIVACY_HOLD_SEC}s → 进/出隐私（隐私状态下头顶双击也能 → 兴奋，退出隐私）")
         print("[引擎] 呼唤\"小狗小狗\" → 开心")
+        print("[引擎] 说\"我们玩捉迷藏吧\" → 捉迷藏找物品游戏（游戏中长按头顶可中途退出）")
         print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应（隐私状态下忽略语音）")
         print("[引擎] Ctrl+C 退出\n")
 
@@ -1827,6 +1963,10 @@ class PuppyEngine:
                 print("[对话] 人示意去休息/独处 → 隐私")
                 self.transition(State.PRIVACY)
 
+            elif intent == "game_hide_seek":
+                print("[对话] 提议捉迷藏游戏 → 进入游戏模式")
+                self.play_game_hide_seek()
+
             else:  # qa_complex / other：逐个念关键词。数量是 2-4 个，不固定，
                    # 顺序（迫切程度/指代对象和地点在前等）由 SYSTEM_PROMPT 里的
                    # 规则直接约束 LLM 输出，这里不再做任何重排——早期版本用
@@ -1938,6 +2078,223 @@ class PuppyEngine:
             time.sleep(KEYWORD_GAP_SEC)
         set_button("off")
         self.restore_state_led()
+
+    # ---------- 捉迷藏找物品游戏 ----------
+    #
+    # 整个游戏是一次同步阻塞的交互，从 _run_conversation_turn_body() 的
+    # game_hide_seek 分支进来，跟对话链路本身一样会占住 tick() 直到游戏结束
+    # （找到/超时/长按中止）——这跟现有架构里"一次完整对话占住 tick() 好几
+    # 秒"是同一种模式，不是新引入的阻塞。self.state 全程停在 GAME_HIDE_SEEK，
+    # 不经过 transition() 的常规状态分发表（那张表是给"进入即播放一次性动画"
+    # 的状态设计的，游戏内部每个子阶段的表情/LED/舵机都要自己精细控制，见
+    # enter_xiaokaixin() 已经有的先例：直接改 self.state 而不是调
+    # transition()）；只有游戏结束那一刻统一调 self.transition(State.IDLE)，
+    # 复用 play_idle_animation() 现成的"表情回常态+回正+关灯"收尾。
+    #
+    # 游戏进行中不接受碰屏幕/双击这些正常状态下的触摸手势（那些是"小开心"/
+    # "兴奋"的触发器，游戏语境下含义会冲突——比如用户摸屏幕很可能只是想
+    # 确认"我藏好了"，不是想要小开心反应），只保留长按头顶这一个"中止游戏"
+    # 信号，所以不走 self.check_touch()/handle_touch_trigger() 那一整套手势
+    # 分发，改成 _game_check_abort() 直接读原始 /touch。
+
+    def play_game_hide_seek(self):
+        """捉迷藏找物品：人拿物品给小狗看一眼 → 小狗低头等人藏好 → 倒计时结束
+        转头扫描房间找。三个阶段依次执行，任何一个阶段中途被长按打断都会
+        自己调用 _game_abort() 收尾并返回，后续阶段不会再执行。"""
+        self.state = State.GAME_HIDE_SEEK
+        self.state_enter_time = time.time()
+        self.game_ref_hist = None
+        self.game_ref_desc = None
+        print("[游戏] 捉迷藏开始")
+
+        if not self._game_register_phase():
+            return
+        if not self._game_countdown_phase():
+            return
+        self._game_scan_phase()
+
+    def _game_check_abort(self):
+        """轮询一次头顶触摸，长按满 PRIVACY_HOLD_SEC 就视为"中止游戏"信号。
+        直接读 get_touch() 原始返回值，不经过 self.check_touch()——那是给
+        正常 tick() 流程用的，会做触摸反馈灯、双击/屏幕点击计数比较等一整套
+        跟游戏无关的副作用。"""
+        touch = get_touch()
+        return bool(touch) and touch.get("held_ms", 0) >= PRIVACY_HOLD_SEC * 1000
+
+    def _game_abort(self):
+        print("[游戏] 长按头顶 → 中止捉迷藏")
+        stop_play()
+        self.transition(State.IDLE)
+
+    def _game_wait(self, seconds):
+        """等待这么多秒，期间每 0.2s 检查一次长按中止信号。返回 False 表示
+        中途被长按打断（调用方应该直接 return，不再继续后面的阶段）。"""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if self._game_check_abort():
+                self._game_abort()
+                return False
+            time.sleep(0.2)
+        return True
+
+    def _game_say(self, text):
+        """播一句游戏旁白/引导语——这是游戏流程的旁白，不是回答问题，跟对话
+        回应"只能用 AAC 关键词表达"的限制是两回事，直接把整句话合成播放。
+        跟 wait_for_playback() 类似地轮询 /status 等自然播完，但用
+        _game_check_abort() 代替 handle_touch_trigger()（原因同上：游戏中
+        不接受碰屏幕/双击）。TTS 合成或启动播放失败时直接跳过这句旁白继续
+        游戏（旁白只是锦上添花，不应该因为一次网络抖动就让整个游戏玩不
+        下去）；返回 False 表示中途被长按打断，调用方应该直接 return。"""
+        wav_path = tts_to_wav(text, "game_say")
+        if wav_path is None or not start_play(wav_path):
+            return True
+        deadline = time.time() + PLAY_TIMEOUT
+        while time.time() < deadline:
+            if self._game_check_abort():
+                self._game_abort()
+                return False
+            status = get_status()
+            if status is not None and not status.get("playing", False):
+                return True
+            time.sleep(0.1)
+        stop_play()
+        return True
+
+    def _game_register_phase(self):
+        """阶段一：注册物品——引导用户把物品拿到镜头前，等一小段时间后拍照，
+        提取颜色直方图，可选调用 Qwen-VL 生成一句文字描述（没配置 key 或调用
+        失败都不影响游戏继续，只是后面扫描阶段少一层精确确认）。"""
+        print("[游戏] 阶段：注册物品")
+        set_expression("curious")
+        set_led_mode("breathe", *THINKING_GREEN_RGB, period_ms=CURIOUS_LED_BREATHE_PERIOD_MS)
+        if not self._game_say("好呀，把东西拿给我看一眼吧！"):
+            return False
+        if not self._game_wait(GAME_REGISTER_WAIT_SEC):
+            return False
+
+        img, jpeg_bytes = capture_frame_with_bytes()
+        if img is None:
+            print("[游戏] 拍照失败，取消游戏")
+            self._game_say("呜，我没看清楚，我们下次再玩吧")
+            self._game_abort()
+            return False
+
+        self.game_ref_hist = extract_color_hist(img)
+        self.game_ref_desc = call_vision_llm(
+            jpeg_bytes,
+            "请用一句话简洁描述图片中最主要物品的外观特征（颜色、形状、材质、"
+            "图案），不超过30个字，只输出描述本身，不要输出其它内容。",
+            self.qwen_api_key,
+        )
+        print(f"[游戏] 物品描述: {self.game_ref_desc or '（VLM 不可用，仅用颜色直方图判断）'}")
+
+        set_expression("happy")
+        play_nod_animation()
+        if not self._game_say("记住啦！你快去把它藏起来吧！"):
+            return False
+        return True
+
+    def _game_countdown_phase(self):
+        """阶段二：倒计时——说一句"数到N就来找你"，低头等一段时间给用户去
+        藏东西，时间到了再说一句"我来找你啦"。用一次性的整句播报而不是
+        逐秒念数字：逐秒念需要 GAME_COUNTDOWN_SECONDS 次 /play 调用，参考
+        speak_keywords() 的经验，这种高频调用没必要，一句话说清楚就够了。"""
+        print("[游戏] 阶段：倒计时")
+        set_expression("sleepy")
+        set_led_mode("breathe", *GAME_COUNTDOWN_LED_RGB, period_ms=GAME_COUNTDOWN_LED_PERIOD_MS)
+        move_servo(yaw=0, pitch=450, speed=300, mute=True)
+        if not self._game_say(f"我要开始数数啦，数到{GAME_COUNTDOWN_SECONDS}就来找你！"):
+            return False
+        if not self._game_wait(GAME_COUNTDOWN_SECONDS):
+            return False
+        if not self._game_say("时间到，我来找你啦！"):
+            return False
+        return True
+
+    def _game_scan_phase(self):
+        """阶段三：扫描搜索——转头扫描房间，每一步拍照算颜色直方图相关度，
+        超过阈值就算初筛命中；有物品描述的话再调一次 VLM 精确确认，没有就
+        直接采信颜色匹配结果。找到/超时/中途长按打断，三条路径都在这个方法
+        里收尾。"""
+        print("[游戏] 阶段：扫描搜索")
+        set_expression("curious")
+        set_led_mode("rainbow", period_ms=GAME_SCAN_LED_PERIOD_MS)
+
+        found = False
+        scan_start = time.time()
+        for step in range(GAME_SCAN_STEPS):
+            if time.time() - scan_start > GAME_SCAN_TIMEOUT_SEC:
+                print("[游戏] 扫描超时")
+                break
+            if self._game_check_abort():
+                self._game_abort()
+                return
+
+            target_yaw = self._game_scan_yaw(step)
+            move_servo(yaw=target_yaw, pitch=GAME_SCAN_PITCH, speed=SCAN_SPEED, mute=True)
+            time.sleep(GAME_SCAN_PAUSE_SEC)
+
+            img, jpeg_bytes = capture_frame_with_bytes()
+            if img is None:
+                continue
+            corr = compare_hist(self.game_ref_hist, extract_color_hist(img))
+            print(f"[游戏] 扫描 yaw={target_yaw} 颜色相关度={corr:.2f}")
+            if corr <= GAME_HIST_THRESHOLD:
+                continue
+
+            if self.game_ref_desc and not self._game_confirm_with_vlm(jpeg_bytes):
+                continue
+            found = True
+            break
+
+        if found:
+            self._game_on_found()
+        else:
+            self._game_on_timeout()
+
+    @staticmethod
+    def _game_scan_yaw(step):
+        """第 step 步（0-based）该转到的 yaw，从 GAME_SCAN_YAW_MIN 到 MAX
+        线性均匀分布，覆盖扫描找人参数（SCAN_POSITIONS）同一量级的安全
+        转动范围。"""
+        if GAME_SCAN_STEPS <= 1:
+            return 0
+        span = GAME_SCAN_YAW_MAX - GAME_SCAN_YAW_MIN
+        return int(GAME_SCAN_YAW_MIN + step * span / (GAME_SCAN_STEPS - 1))
+
+    def _game_confirm_with_vlm(self, jpeg_bytes):
+        """颜色直方图初筛命中后，调 VLM 精确确认画面里是不是真的是那个物品。
+        VLM 调用失败（没配置 key/网络问题/超时）时不应该让"没有精确确认能力"
+        变成"永远找不到"，直接采信颜色匹配的结果。"""
+        answer = call_vision_llm(
+            jpeg_bytes,
+            f"画面中是否存在这样的物品：{self.game_ref_desc}？只回答\"是\"或\"否\"，不要输出其它内容。",
+            self.qwen_api_key,
+        )
+        if answer is None:
+            print("[游戏] VLM 确认不可用，按颜色匹配结果直接采信")
+            return True
+        confirmed = ("是" in answer) and ("不是" not in answer) and ("否" not in answer)
+        print(f"[游戏] VLM 确认: {answer!r} → {'确认找到' if confirmed else '排除，继续找'}")
+        return confirmed
+
+    def _game_on_found(self):
+        print("[游戏] 找到了！")
+        set_expression("excited")
+        set_led_mode("blink", *GAME_FOUND_LED_RGB, period_ms=GAME_FOUND_LED_PERIOD_MS)
+        move_servo(pitch=EXCITED_PITCH_HIGH, speed=EXCITED_YAW_SPEED, mute=True)
+        self._game_say("我找到啦！")
+        time.sleep(GAME_FOUND_CELEBRATE_SEC)
+        self.transition(State.IDLE)
+
+    def _game_on_timeout(self):
+        print("[游戏] 超时，没找到")
+        set_expression("sorry")
+        set_led_mode("fade", *GAME_TIMEOUT_LED_RGB, fade_ms=GAME_TIMEOUT_LED_FADE_MS)
+        move_servo(yaw=0, pitch=450, speed=SORRY_SPEED, mute=True)
+        self._game_say("呜……我没找到，你藏得太好了！")
+        time.sleep(GAME_TIMEOUT_LINGER_SEC)
+        self.transition(State.IDLE)
 
     # ---------- 计时器 ----------
 

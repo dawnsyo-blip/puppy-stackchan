@@ -501,6 +501,43 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
 `play_idle_animation()`。`scan_for_face()` 因此多了一个 `pitch` 形参（默认
 值还是 450，其它调用方不用改）。
 
+## 捉迷藏找物品游戏
+`puppy_engine_v4.py` 里的一个新游戏模式：人拿一个物品给小狗看一眼 → 小狗
+低头等人藏好 → 倒计时结束后转头扫描房间找。语音触发（LLM 意图分类新增
+`game_hide_seek` 一条，`SYSTEM_PROMPT` 规则第 5 条），触发后调用
+`PuppyEngine.play_game_hide_seek()`。
+- **整个游戏是一次同步阻塞的交互，从 `_run_conversation_turn_body()` 的
+  `game_hide_seek` 分支进来**，架构上跟对话链路本身占住 `tick()` 好几秒是
+  同一种模式，不是新引入的阻塞写法。`self.state` 全程停在新增的
+  `State.GAME_HIDE_SEEK`，不经过 `transition()` 的常规状态分发表（那张表
+  是给"进入即播放一次性动画"的状态设计的）——直接改 `self.state`，游戏内部
+  每个子阶段（注册/倒计时/扫描）自己精细控制表情/LED/舵机，只有游戏结束
+  （找到/超时/长按中止）那一刻统一调 `self.transition(State.IDLE)` 收尾。
+- **游戏进行中只接受长按头顶这一个"中止游戏"信号**，不接受碰屏幕/双击这些
+  正常状态下的触摸手势（那些语义在游戏语境下会冲突，比如摸屏幕平时是
+  "小开心"，游戏里用户很可能只是想确认"已经藏好了"）——所以不走
+  `self.check_touch()`/`handle_touch_trigger()` 那一整套手势分发，改成
+  `_game_check_abort()` 直接读原始 `/touch` 的 `held_ms`。
+- **找物品靠两层判断**：先用 OpenCV 的 HSV 颜色直方图相关度
+  （`extract_color_hist()`/`compare_hist()`，阈值 `GAME_HIST_THRESHOLD`）做
+  便宜的粗筛，每个扫描步都能算一次；粗筛命中后如果有物品的文字描述，再调
+  一次视觉大模型精确确认（`call_vision_llm()`，通义千问 Qwen-VL，走阿里云
+  DashScope 的 OpenAI 兼容端点）。**VLM 是可选增强，不是硬依赖**——API key
+  从 `.env` 的 `DASHSCOPE_API_KEY` 读取（`load_env_key()`，跟
+  `DEEPSEEK_API_KEY` 共用同一套解析逻辑），没配置这个 key、或者调用失败/
+  超时，`call_vision_llm()` 统一返回 `None`，游戏会自动降级成只用颜色直方图
+  判断，不会因为没有 VLM 就整个玩不了。
+- `GAME_HIST_THRESHOLD`（初始 0.35）和扫描相关的 `GAME_SCAN_*` 系列参数都
+  没有实机验证过，需要拿真实物品测过再调——误报多就调高阈值，漏检多就调低；
+  `GAME_SCAN_YAW_MIN/MAX` 用的是 `±800`，跟 `EXCITED_YAW_RANGE`/
+  `PRIVACY_YAW` 同一量级的已验证安全幅度。
+- 游戏里的语音旁白（"好呀，把东西拿给我看一眼吧！"之类）用 `_game_say()`
+  直接合成整句 TTS 播放，**不受"回应只能用 AAC 关键词表达"那条规则约束**
+  ——那条规则针对的是回答用户问题的场景（`qa_simple`/`qa_complex`），游戏
+  旁白是流程引导，性质不同。
+- 这个功能还没有更新 `表情映射v7.xlsx`（新状态没有对应行）——目前只在
+  `CLAUDE.md` 记录，如果以后要保持表格权威性，需要手动补一行。
+
 ## 编译 / 烧录 / 验证流程
 本机的 `arduino-cli` 不在 PATH 里，可执行文件在
 `C:\Users\89823\arduino-cli\arduino-cli.exe`：
