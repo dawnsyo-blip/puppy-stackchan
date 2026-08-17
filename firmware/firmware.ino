@@ -101,11 +101,6 @@ volatile int g_buttonState = 0;
 // loop() 所在的主线程里读写，没有并发，不需要原子类型。
 uint32_t g_headDoubleTapCount = 0;
 uint32_t g_screenTapCount = 0;
-// wasSingleClicked()：Button_Class 自带的"确认是单击、不是双击的前半段"判定
-// （只在双击判定窗口过去、确定不会再来第二下之后才为真），用来给"短按头顶"
-// 这个手势计数，跟双击共用同一个物理传感器但不会互相误判——双击的第一下不
-// 会被提前当成单击触发。
-uint32_t g_headSingleTapCount = 0;
 
 // UTF-8 line breaking: CJK (3 bytes) = 16px, ASCII = 8px, max line width 292px
 static void buildSubtitle(const String &text) {
@@ -925,16 +920,15 @@ void handleTouch() {
   // double_tap_count/screen_tap_count：见声明处注释，单调递增计数器，
   // host 端比较差值判断"有没有发生过"，不会因为轮询跟不上手势本身的判定
   // 节奏而漏掉。
-  static char buf[240];
+  static char buf[220];
   snprintf(buf, sizeof(buf),
     "{\"front\":%d,\"middle\":%d,\"back\":%d,\"pressed\":%s,\"held_ms\":%lu,"
-    "\"double_tap_count\":%lu,\"screen_tap_count\":%lu,\"single_tap_count\":%lu}",
+    "\"double_tap_count\":%lu,\"screen_tap_count\":%lu}",
     intensities[0], intensities[1], intensities[2],
     pressed ? "true" : "false",
     (unsigned long)heldMs,
     (unsigned long)g_headDoubleTapCount,
-    (unsigned long)g_screenTapCount,
-    (unsigned long)g_headSingleTapCount);
+    (unsigned long)g_screenTapCount);
   server.send(200, "application/json", buf);
 }
 
@@ -1480,9 +1474,6 @@ void loop() {
   // 靠比较这个值有没有变化来判断"有没有发生过一次新的双击"）。
   if (M5StackChan.TouchSensor.wasDoubleClicked()) {
     g_headDoubleTapCount++;
-  }
-  if (M5StackChan.TouchSensor.wasSingleClicked()) {
-    g_headSingleTapCount++;
   }
 
   // 舵机噪音静音：见 g_muteStreamForServo/g_currentMoveIsNoisy 声明处的注释。

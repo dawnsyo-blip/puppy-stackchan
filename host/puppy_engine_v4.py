@@ -1079,7 +1079,6 @@ class PuppyEngine:
         # 校准基线，不当成事件触发。
         self.last_double_tap_count = None
         self.last_screen_tap_count = None
-        self.last_single_tap_count = None
 
         # 主循环计数（用于轮流轮询 + 心跳打印）
         self.tick_count = 0
@@ -1137,7 +1136,7 @@ class PuppyEngine:
         print(f"[引擎] 当前状态: {self.state.value}")
         print("[引擎] 碰一下屏幕 → 小开心（摸头反应）")
         print("[引擎] 头顶双击 → 兴奋")
-        print(f"[引擎] 头顶长按满 {PRIVACY_HOLD_SEC}s → 进/出隐私（隐私状态下头顶单击也能 → 兴奋，退出隐私）")
+        print(f"[引擎] 头顶长按满 {PRIVACY_HOLD_SEC}s → 进/出隐私（隐私状态下头顶双击也能 → 兴奋，退出隐私）")
         print("[引擎] 呼唤\"小狗小狗\" → 开心")
         print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应（隐私状态下忽略语音）")
         print("[引擎] Ctrl+C 退出\n")
@@ -1281,10 +1280,10 @@ class PuppyEngine:
             set_led(off=True)
 
     def enter_excited_from_touch(self):
-        """从触摸手势进兴奋。如果是从隐私状态触发的（头顶双击、或隐私状态下
-        头顶单击），先把舵机转到正对人脸再开始兴奋动画——隐私姿势本身刻意
-        把头转开（PRIVACY_YAW/PITCH），不这样处理的话兴奋的摇摆动作会从一个
-        背对着人的诡异角度开始；其它状态触发时头本来就大致朝前，不需要这
+        """从触摸手势进兴奋。如果是从隐私状态触发的（头顶双击），先把舵机
+        转到正对人脸再开始兴奋动画——隐私姿势本身刻意把头转开（PRIVACY_
+        YAW/PITCH），不这样处理的话兴奋的摇摆动作会从一个背对着人的诡异
+        角度开始；其它状态触发时头本来就大致朝前，不需要这
         一步。"""
         if self.state == State.PRIVACY:
             self._face_person_before_excited()
@@ -1323,16 +1322,15 @@ class PuppyEngine:
         提前返回/中止正在做的事）。
 
         隐私状态下退出方式被收紧成只有两种，都必须是头顶手势——长按（下面
-        held_ms 分支）和头顶单击（single_tap）；碰屏幕、头顶双击这两个在别的
-        状态下有效的手势，在隐私状态下故意不生效（`and self.state !=
-        State.PRIVACY` 这个门槛），碰屏幕/双击如果也能拉出隐私，就不是"只有
-        触摸头顶才能退出"了。单击反过来只在隐私状态下才算数——这是隐私
-        专属的退出手势，不打算做成常规状态下也能用的全局触发。"""
+        held_ms 分支）和头顶双击；碰屏幕在隐私状态下故意不生效（`and
+        self.state != State.PRIVACY`），碰屏幕如果也能拉出隐私，就不是"只有
+        触摸头顶才能退出"了。双击本来就是不分状态的全局触发，隐私状态下
+        自然也生效，不需要单独处理——这里原来试过给隐私状态额外做一个"头顶
+        单击"专属退出手势（`wasSingleClicked()`），实测这个单击判定很难可靠
+        触发，改回了双击。"""
         is_screen_trigger = touch["screen_tap"] and self.state != State.PRIVACY
-        is_double_tap_trigger = touch["double_tap"] and self.state != State.PRIVACY
-        is_privacy_single_tap = touch["single_tap"] and self.state == State.PRIVACY
         is_trigger = (
-            is_screen_trigger or is_double_tap_trigger or is_privacy_single_tap
+            is_screen_trigger or touch["double_tap"]
             or (touch["held_ms"] >= PRIVACY_HOLD_SEC * 1000 and not self.privacy_hold_fired)
         )
         if not is_trigger:
@@ -1350,7 +1348,7 @@ class PuppyEngine:
             # play_xiaokaixin_animation() 里已经会把 LED 设成暖白常亮，效果跟触摸
             # 反馈灯完全一样，重复调一次没有任何可观察的区别。
             self.enter_xiaokaixin()
-        elif is_double_tap_trigger:
+        elif touch["double_tap"]:
             print("[触发] 头顶双击 → 兴奋！")
             # 双击是个瞬时手势，press/release 边沿那套触摸反馈灯（见
             # check_touch()）不一定能可靠地在双击的两次快速点按之间抓到；
@@ -1360,11 +1358,6 @@ class PuppyEngine:
             # 双击既不会有暖白反馈、也不会有任何其它可见变化，感觉像完全
             # 没反应；restore_state_led() 保证不管是不是空操作，最终都会
             # 落回兴奋该有的彩虹快闪，不会卡在这次反馈用的暖白上。
-            set_led_mode("solid", *WARM_WHITE_RGB)
-            self.enter_excited_from_touch()
-            self.restore_state_led()
-        elif is_privacy_single_tap:
-            print("[触发] 隐私状态下头顶单击 → 兴奋！")
             set_led_mode("solid", *WARM_WHITE_RGB)
             self.enter_excited_from_touch()
             self.restore_state_led()
@@ -1520,11 +1513,7 @@ class PuppyEngine:
           （比较固件端单调递增计数器 double_tap_count 有没有变化）。
         - screen_tap：自上次查询以来屏幕有没有被点过一次（同理，比较
           screen_tap_count）。
-        - single_tap：自上次查询以来头顶有没有发生过一次新的单击（比较
-          single_tap_count）。固件端用的是 Button_Class 自带的
-          wasSingleClicked()，只在双击判定窗口过去、确认不会再来第二下之后
-          才为真，不会被双击的第一下提前触发。
-        这些手势本身在固件内部只在判定成立的那一帧短暂为真，host 端
+        这两个手势本身在固件内部只在判定成立的那一帧短暂为真，host 端
         大约 1Hz 的轮询频率直接问"现在是不是刚发生"大概率会错过，所以固件
         侧改成了单调计数器，host 端只看差值，poll 慢一点也不会漏事件。
 
@@ -1541,21 +1530,17 @@ class PuppyEngine:
         held_ms = touch.get("held_ms", 0)
         double_tap_count = touch.get("double_tap_count", 0)
         screen_tap_count = touch.get("screen_tap_count", 0)
-        single_tap_count = touch.get("single_tap_count", 0)
 
         if self.last_double_tap_count is None:
             # 第一次拿到读数：只校准基线，不能把设备之前（这次 host 启动
             # 之前）积累的计数差当成"刚刚发生"。
             self.last_double_tap_count = double_tap_count
             self.last_screen_tap_count = screen_tap_count
-            self.last_single_tap_count = single_tap_count
 
         double_tap = double_tap_count != self.last_double_tap_count
         screen_tap = screen_tap_count != self.last_screen_tap_count
-        single_tap = single_tap_count != self.last_single_tap_count
         self.last_double_tap_count = double_tap_count
         self.last_screen_tap_count = screen_tap_count
-        self.last_single_tap_count = single_tap_count
 
         pressed = held_ms > 0
         if pressed and not self.touch_pressed:
@@ -1585,16 +1570,8 @@ class PuppyEngine:
         if screen_tap:
             print("[触摸] 检测到屏幕点击")
             self.record_interaction()
-        if single_tap:
-            print("[触摸] 检测到头顶单击")
-            self.record_interaction()
 
-        return {
-            "held_ms": held_ms,
-            "double_tap": double_tap,
-            "screen_tap": screen_tap,
-            "single_tap": single_tap,
-        }
+        return {"held_ms": held_ms, "double_tap": double_tap, "screen_tap": screen_tap}
 
     # ---------- 语音唤醒 + 完整对话链路 ----------
 
@@ -1664,7 +1641,7 @@ class PuppyEngine:
         self.record_interaction()
 
         if self.state == State.PRIVACY:
-            # 隐私状态下不接受语音唤醒——退出隐私只认触摸头顶（长按/单击，
+            # 隐私状态下不接受语音唤醒——退出隐私只认触摸头顶（长按/双击，
             # 见 handle_touch_trigger()）。这段语音（不管是真的在说话还是
             # 环境噪音误触发）直接丢弃，不进对话流程；MicStream 的滚动
             # 缓冲/VAD 本身继续正常跑，不受影响，只是 host 端不理会这次

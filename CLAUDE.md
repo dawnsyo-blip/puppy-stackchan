@@ -410,14 +410,14 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   剩下的就是纯粹的轮询间隔取舍。
 - **隐私状态退出被收紧成"只认头顶触摸"**：语音唤醒不再能退出隐私
   （`check_voice_wake()` 在 PRIVACY 状态下直接丢弃这段语音、返回 False）；
-  碰屏幕、头顶双击这两个在别的状态下有效的手势，在 PRIVACY 状态下也故意
-  不生效（`handle_touch_trigger()` 里都加了 `and self.state != State.
-  PRIVACY`），只剩长按（进/出对称）和头顶单击（`single_tap`，仅隐私状态下
-  生效，触发兴奋）两条路径。单击用的是 M5Unified `Button_Class` 自带的
-  `wasSingleClicked()`（固件新增 `g_headSingleTapCount` 计数器 + `/touch`
-  的 `single_tap_count` 字段）——这个判定本身就要等双击判定窗口过去、确认
-  不会再来第二下才为真，跟双击天然不会互相误判，不需要额外去重。从隐私
-  状态进兴奋（单击或双击触发）时，`enter_excited_from_touch()` 会先
+  碰屏幕在 PRIVACY 状态下也故意不生效（`handle_touch_trigger()` 里加了
+  `and self.state != State.PRIVACY`）。只剩长按（进/出对称）和头顶双击
+  （不分状态的全局触发，隐私状态下自然也生效）两条路径。**踩过一个坑**：
+  最初想给隐私专门做一个"头顶单击"退出手势（M5Unified `Button_Class` 的
+  `wasSingleClicked()`），实测这个判定很难可靠触发，已经改回复用双击，
+  相关的 `g_headSingleTapCount`/`single_tap_count` 也已经从固件和 host
+  端删掉——以后不要再想着用 `wasSingleClicked()` 做这类手势。从隐私状态
+  双击进兴奋时，`enter_excited_from_touch()` 会先
   `_face_person_before_excited()` 转回正对人脸再开始兴奋动画——隐私姿势
   本身刻意把头转开，不这样处理动作会从背对人的角度开始。长按退出隐私时
   新增了反向 LED（`fade_in` 模式，固件里 `FADE_OUT` 的镜像实现，从熄灭
