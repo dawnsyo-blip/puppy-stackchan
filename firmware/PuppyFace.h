@@ -179,13 +179,17 @@ static const float GRIEVED_NOSE_CLOSER_PX = 6.0f;  // 鼻子朝眼睛靠拢的�
 static const int GRIEVED_EAR_CLOSER_PX = 10;        // 耳朵朝眼睛靠拢的像素数（加在 topYTarget 上）
 static const float GRIEVED_EYE_SCALE = 1.2f;        // 三个同心圆整体放大比例
 static const float GRIEVED_SOCKET_SCALE = 0.8f;     // 眼眶（最外层空心圆）在 GRIEVED_EYE_SCALE 基础上再缩小20%
+static const float GRIEVED_PUPIL_SCALE = 0.9f;      // 瞳孔（实心圆）在已有的0.95基础上再缩小10%
 // 高光（最内层空心圆）调过两轮尺寸（0.95、再*0.7）以后，这一轮反馈直接
 // 取消了，不再画——参数已删，画高光的那段代码也一并去掉了。
 
 // 委屈：眼睛上方一条"担心"眉毛，弯成一条弧线（不是直线）——跟五官同步用
 // FloatTransition 淡入，不需要额外常量控制过渡时长（PuppyEye 里复用眼睛
 // 自己的 s 过渡进度）。
-static const int GRIEVED_BROW_GAP = 13;    // 眉毛距离眼眶最高点的间隙（像素）
+static const int GRIEVED_BROW_GAP = 28;    // 眉毛距离眼眶最高点的间隙（像素）——弧线最低点
+                                            // (browY+arc-tilt附近) 原本只比眼眶最高点高
+                                            // gap-arc=-5（其实已经低于眼眶顶点了），这一轮
+                                            // 加大到 gap-arc=+10，真正留出一点空隙
 static const int GRIEVED_BROW_HALF_W = 9;  // 眉毛线段半宽——反馈过"收口
                                             // 不要太聚拢，宽度保持和现在一样"，一直没动
 static const int GRIEVED_BROW_TILT = 5;    // 眉毛倾斜幅度：内侧（靠鼻子）比外侧高这么多像素
@@ -489,7 +493,7 @@ class PuppyEye : public Drawable {
       // 是"瘦高"的竖椭圆），上一轮改成正圆时误用了较小的 rx1=9 做基准，导致
       // 眼眶（10px）反而比瞳孔（12px）还小——这一轮顺手修正过来。
       int r1 = (int)roundf(16 * 0.9f * GRIEVED_EYE_SCALE * GRIEVED_SOCKET_SCALE * s);     // 眼眶（空心，正圆，比最初小10%、整体放大20%后又缩小20%）
-      int r2 = (int)roundf(10 * 0.95f * GRIEVED_EYE_SCALE * s);                            // 瞳孔（实心，正圆，再缩小5%）
+      int r2 = (int)roundf(10 * 0.95f * GRIEVED_PUPIL_SCALE * GRIEVED_EYE_SCALE * s);       // 瞳孔（实心，正圆，累计缩小5%后再缩小10%）
       int topY = cy - r1;
 
       spi->drawCircle(cx, topY + r1, r1, col);
