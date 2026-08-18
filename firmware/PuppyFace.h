@@ -149,25 +149,32 @@ static const float EXCITED_EAR_INWARD_PX = 12.0f;  // 兴奋时耳朵朝眼睛�
 static const float EXCITED_NOSE_UP_PX = 10.0f;     // 兴奋时鼻子朝眼睛方向靠拢（往上贴）的像素数
 
 // peekaboo 复用"兴奋"的整套尺寸参数（exciteLike），但整体要放大——第一轮
-// 放大 10%，第二轮反馈"整体都再放大20%"（在第一轮基础上继续放大，不是把
-// 10%改成20%），所以最终是 1.1 * 1.2 = 1.32。每个用到 EXCITED_SCALE/
-// EXCITED_*_INWARD_PX/EXCITED_NOSE_UP_PX 的地方，peekaboo 分支都额外乘一个
-// sizeMul（= isPeekaboo ? PEEKABOO_SIZE_MUL : 1.0f，在各自 draw() 里就近
-// 算好），不影响真正的"兴奋"表情本身的大小。
-static const float PEEKABOO_SIZE_MUL = 1.32f;
+// 放大 10%，第二轮"整体都再放大20%"（1.1*1.2=1.32），第三轮又反馈"整体
+// 还是再放大20%"，所以在 1.32 基础上再乘 1.2 = 1.584。每个用到
+// EXCITED_SCALE/EXCITED_*_INWARD_PX/EXCITED_NOSE_UP_PX 的地方，peekaboo
+// 分支都额外乘一个 sizeMul（= isPeekaboo ? PEEKABOO_SIZE_MUL : 1.0f，在
+// 各自 draw() 里就近算好），不影响真正的"兴奋"表情本身的大小。
+static const float PEEKABOO_SIZE_MUL = 1.584f;
+
+// peekaboo 左耳盖眼的那片"耳朵"专用：整体再往外挪一点，离中轴线（嘴巴
+// 所在的竖线）远一点，避免跟嘴巴的线条重叠；随 sizeMul 一起缩放。
+static const float PEEKABOO_EAR_AWAY_PX = 8.0f;
 
 // 委屈（grieved）：鼻子比默认再放大 10%；鼻子/耳朵各自朝眼睛方向靠拢一点
 // （复用跟"兴奋朝眼睛靠拢"同一个思路，但幅度是单独调的，不共用 EXCITED_*
-// 那组数值，因为委屈不属于 exciteLike）。
+// 那组数值，因为委屈不属于 exciteLike）；眼睛（三个同心圆）整体放大 20%。
 static const float GRIEVED_NOSE_SCALE = 1.1f;
 static const float GRIEVED_NOSE_CLOSER_PX = 6.0f;  // 鼻子朝眼睛靠拢的像素数
 static const int GRIEVED_EAR_CLOSER_PX = 10;        // 耳朵朝眼睛靠拢的像素数（加在 topYTarget 上）
+static const float GRIEVED_EYE_SCALE = 1.2f;        // 三个同心圆整体放大比例
 
-// 委屈：眼睛上方一条简单的"担心"眉毛——跟五官同步用 FloatTransition 淡入，
-// 不需要额外常量控制过渡时长（PuppyEye 里复用眼睛自己的 s 过渡进度）。
+// 委屈：眼睛上方一条"担心"眉毛，弯成一条弧线（不是直线）——跟五官同步用
+// FloatTransition 淡入，不需要额外常量控制过渡时长（PuppyEye 里复用眼睛
+// 自己的 s 过渡进度）。
 static const int GRIEVED_BROW_GAP = 6;     // 眉毛距离眼眶最高点的间隙（像素）
 static const int GRIEVED_BROW_HALF_W = 9;  // 眉毛线段半宽
 static const int GRIEVED_BROW_TILT = 5;    // 眉毛倾斜幅度：内侧（靠鼻子）比外侧高这么多像素
+static const int GRIEVED_BROW_ARC = 4;     // 眉毛中点相对两端连线再往上拱起多少像素
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -462,12 +469,12 @@ class PuppyEye : public Drawable {
     //      "层层嵌在最上端"的效果，不需要额外算相交逻辑。上方再加一条
     //      "担心"眉毛。----
     if (style == 7) {
-      int r1 = (int)roundf(9 * 0.9f * s);  // 眼眶（空心，正圆，比最初小10%）
-      int r2 = (int)roundf(10 * s);        // 瞳孔（实心，正圆）
-      int r3 = (int)roundf(5.2f * s);      // 高光（无描边，正圆）
+      int r1 = (int)roundf(9 * 0.9f * GRIEVED_EYE_SCALE * s);  // 眼眶（空心，正圆，比最初小10%后再整体放大20%）
+      int r2 = (int)roundf(10 * GRIEVED_EYE_SCALE * s);        // 瞳孔（实心，正圆）
+      int r3 = (int)roundf(5.2f * GRIEVED_EYE_SCALE * s);      // 高光（无描边，正圆）
       int topY = cy - r1;
-      int highlightGap = (int)roundf(3 * s);  // 高光中心比瞳孔顶边再往下挪这么多，
-                                               // 不要贴着瞳孔的边
+      int highlightGap = (int)roundf(3 * GRIEVED_EYE_SCALE * s);  // 高光中心比瞳孔顶边再往下挪这么多，
+                                                                    // 不要贴着瞳孔的边
 
       spi->drawCircle(cx, topY + r1, r1, col);
       if (r1 > 1) {
@@ -481,19 +488,24 @@ class PuppyEye : public Drawable {
         spi->fillCircle(cx, topY + highlightGap + r3, r3, bgCol);
       }
 
-      // ---- 眉毛：眼眶上方一条短线，靠鼻子一侧的端点更高、外侧端点更低，
-      //      做出"担心/委屈"的挑眉感。dir 沿用 eyeInward/bowX 那套镜像约定
-      //      （isLeft 时 +cx 方向是"靠近鼻子"），如果实机看起来方向反了
-      //      （变成挑向外侧、像生气而不是担心），把 dir 的符号取反即可。----
+      // ---- 眉毛：眼眶上方一条弧线（不是直线），靠鼻子一侧的端点更高、
+      //      外侧端点更低，做出"担心/委屈"的挑眉感；中点相对两端连线再往上
+      //      拱起 GRIEVED_BROW_ARC，弯出弧度。dir 沿用 eyeInward/bowX 那套
+      //      镜像约定（isLeft 时 +cx 方向是"靠近鼻子"），如果实机看起来
+      //      方向反了（变成挑向外侧、像生气而不是担心），把 dir 的符号
+      //      取反即可。----
       int dir = isLeft ? 1 : -1;
       int halfW = (int)roundf(GRIEVED_BROW_HALF_W * s);
       int tilt = (int)roundf(GRIEVED_BROW_TILT * s);
       int gap = (int)roundf(GRIEVED_BROW_GAP * s);
+      int arc = (int)roundf(GRIEVED_BROW_ARC * s);
       int browY = topY - gap;
       int innerX = cx + dir * halfW, innerY = browY - tilt;
       int outerX = cx - dir * halfW, outerY = browY + tilt;
+      int midX = (innerX + outerX) / 2;
+      int midY = (innerY + outerY) / 2 - arc;
       for (int t = -1; t <= 1; t++) {
-        spi->drawLine(innerX, innerY + t, outerX, outerY + t, col);
+        spi->drawBezier(innerX, innerY + t, midX, midY + t, outerX, outerY + t, col);
       }
       return;
     }
@@ -955,32 +967,27 @@ class PuppyEar : public Drawable {
     //      眼睛两个锚点的大致相对位置估的，第一次实机看大概率还要再调，改
     //      这几行就行，不影响下面正常耳朵的画法。=====
     if (isPeekaboo && isLeft) {
-      // 参考用户提供的手绘图重新设计成三段：①耳根处一个小勾（先往外上方
-      // 挑一下再收回来）②大幅度向下向内甩出去盖住眼睛的主弧线③到底部以后
-      // 再勾回来一小段（控制点故意甩得比落点更远，让曲线在靠近主弧线下方
-      // 的地方绕回来，形成一个看得出"卷起来"的钩子，而不是像上一版那样在
-      // 端点收尾却没有真正打一个钩）。三段共享端点，衔接处不额外做相切
-      // 处理——用粗线画出来目测已经连贯，不需要引入更复杂的样条计算。
-      int rootX = (int)roundf(4 * sizeMul),  rootY = topY + (int)roundf(6 * sizeMul);
-      int hookCtrlX = (int)roundf(-6 * sizeMul), hookCtrlY = topY + (int)roundf(-4 * sizeMul);
-      int hookEndX = (int)roundf(14 * sizeMul), hookEndY = topY + (int)roundf(4 * sizeMul);
+      // 两段：①耳根直接甩出大幅度向下向内的主弧线盖住眼睛②到底部以后再
+      // 勾回来一小段（控制点故意甩得比落点更远，让曲线在靠近主弧线下方的
+      // 地方绕回来，形成一个看得出"卷起来"的钩子）。上一版在耳根多画了一个
+      // 小勾，反馈说不需要，已去掉，直接从耳根开始大弧线。整体再往外挪
+      // PEEKABOO_EAR_AWAY_PX（离中轴线/嘴巴远一点，避免线条重叠）。
+      int earCx = cx - (int)roundf(PEEKABOO_EAR_AWAY_PX * sizeMul);
 
+      int rootX = (int)roundf(4 * sizeMul),  rootY = topY + (int)roundf(6 * sizeMul);
       int sweepCtrlX = (int)roundf(32 * sizeMul), sweepCtrlY = topY + (int)roundf(16 * sizeMul);
       int bellyX = (int)roundf(30 * sizeMul), bellyY = topY + (int)roundf(48 * sizeMul);
 
       int curlCtrlX = (int)roundf(28 * sizeMul), curlCtrlY = topY + (int)roundf(72 * sizeMul);
       int curlEndX = (int)roundf(8 * sizeMul), curlEndY = topY + (int)roundf(56 * sizeMul);
 
-      int fx0 = cx + rootX,      fy0 = cy + rootY;
-      int fxh = cx + hookCtrlX,  fyh = cy + hookCtrlY;
-      int fx1 = cx + hookEndX,   fy1 = cy + hookEndY;
-      int fxs = cx + sweepCtrlX, fys = cy + sweepCtrlY;
-      int fx2 = cx + bellyX,     fy2 = cy + bellyY;
-      int fxc = cx + curlCtrlX,  fyc = cy + curlCtrlY;
-      int fx3 = cx + curlEndX,   fy3 = cy + curlEndY;
+      int fx0 = earCx + rootX,      fy0 = cy + rootY;
+      int fxs = earCx + sweepCtrlX, fys = cy + sweepCtrlY;
+      int fx2 = earCx + bellyX,     fy2 = cy + bellyY;
+      int fxc = earCx + curlCtrlX,  fyc = cy + curlCtrlY;
+      int fx3 = earCx + curlEndX,   fy3 = cy + curlEndY;
 
-      drawThickBezier(spi, fx0, fy0, fxh, fyh, fx1, fy1, thick, col);
-      drawThickBezier(spi, fx1, fy1, fxs, fys, fx2, fy2, thick, col);
+      drawThickBezier(spi, fx0, fy0, fxs, fys, fx2, fy2, thick, col);
       drawThickBezier(spi, fx2, fy2, fxc, fyc, fx3, fy3, thick, col);
       return;
     }
