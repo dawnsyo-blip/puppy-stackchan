@@ -165,6 +165,11 @@ static const float PEEKABOO_SIZE_MUL = 1.584f;
 // peekaboo 时要记得这个常量大概率也要跟着往上调，不能指望它自动跟上。
 static const float PEEKABOO_EAR_AWAY_PX = 22.0f;
 
+// peekaboo 的鼻子/嘴巴比"兴奋"整体缩小10%（跟 PEEKABOO_SIZE_MUL 是分开的
+// 独立系数——sizeMul 管的是五官整体跟"兴奋"相比放大多少，这个只管鼻子和
+// 嘴巴额外再缩一档，眼睛/耳朵不受影响）。
+static const float PEEKABOO_NOSE_MOUTH_SCALE = 0.9f;
+
 // 委屈（grieved）：鼻子比默认再放大 10%；鼻子/耳朵各自朝眼睛方向靠拢一点
 // （复用跟"兴奋朝眼睛靠拢"同一个思路，但幅度是单独调的，不共用 EXCITED_*
 // 那组数值，因为委屈不属于 exciteLike）；眼睛（三个同心圆）整体放大 20%。
@@ -172,14 +177,16 @@ static const float GRIEVED_NOSE_SCALE = 1.1f;
 static const float GRIEVED_NOSE_CLOSER_PX = 6.0f;  // 鼻子朝眼睛靠拢的像素数
 static const int GRIEVED_EAR_CLOSER_PX = 10;        // 耳朵朝眼睛靠拢的像素数（加在 topYTarget 上）
 static const float GRIEVED_EYE_SCALE = 1.2f;        // 三个同心圆整体放大比例
+static const float GRIEVED_SOCKET_SCALE = 0.8f;     // 眼眶（最外层空心圆）在 GRIEVED_EYE_SCALE 基础上再缩小20%
+static const float GRIEVED_HIGHLIGHT_SCALE = 0.95f; // 高光（最内层空心圆）在 GRIEVED_EYE_SCALE 基础上再缩小5%
 
 // 委屈：眼睛上方一条"担心"眉毛，弯成一条弧线（不是直线）——跟五官同步用
 // FloatTransition 淡入，不需要额外常量控制过渡时长（PuppyEye 里复用眼睛
 // 自己的 s 过渡进度）。
-static const int GRIEVED_BROW_GAP = 6;     // 眉毛距离眼眶最高点的间隙（像素）
+static const int GRIEVED_BROW_GAP = 9;     // 眉毛距离眼眶最高点的间隙（像素）
 static const int GRIEVED_BROW_HALF_W = 9;  // 眉毛线段半宽
 static const int GRIEVED_BROW_TILT = 5;    // 眉毛倾斜幅度：内侧（靠鼻子）比外侧高这么多像素
-static const int GRIEVED_BROW_ARC = 4;     // 眉毛中点相对两端连线再往上拱起多少像素
+static const int GRIEVED_BROW_ARC = 7;     // 眉毛中点相对两端连线再往下凹多少像素（"⌣"的弯曲程度）
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -477,9 +484,9 @@ class PuppyEye : public Drawable {
       // 眼眶半径的换算基准应该是原始椭圆里较大的那个维度（ry1=16，眼眶本来
       // 是"瘦高"的竖椭圆），上一轮改成正圆时误用了较小的 rx1=9 做基准，导致
       // 眼眶（10px）反而比瞳孔（12px）还小——这一轮顺手修正过来。
-      int r1 = (int)roundf(16 * 0.9f * GRIEVED_EYE_SCALE * s);  // 眼眶（空心，正圆，比最初小10%后再整体放大20%）
-      int r2 = (int)roundf(10 * 0.95f * GRIEVED_EYE_SCALE * s); // 瞳孔（实心，正圆，再缩小5%）
-      int r3 = (int)roundf(5.2f * GRIEVED_EYE_SCALE * s);       // 高光（无描边，正圆）
+      int r1 = (int)roundf(16 * 0.9f * GRIEVED_EYE_SCALE * GRIEVED_SOCKET_SCALE * s);     // 眼眶（空心，正圆，比最初小10%、整体放大20%后又缩小20%）
+      int r2 = (int)roundf(10 * 0.95f * GRIEVED_EYE_SCALE * s);                            // 瞳孔（实心，正圆，再缩小5%）
+      int r3 = (int)roundf(5.2f * GRIEVED_EYE_SCALE * GRIEVED_HIGHLIGHT_SCALE * s);        // 高光（无描边，正圆，再缩小5%）
       int topY = cy - r1;
       int highlightGap = (int)roundf(3 * GRIEVED_EYE_SCALE * s);  // 高光中心比瞳孔顶边再往下挪这么多，
                                                                     // 不要贴着瞳孔的边
@@ -570,15 +577,19 @@ class PuppyNose : public Drawable {
     // peekaboo 比"兴奋"整体再放大 PEEKABOO_SIZE_MUL（10%），乘在所有用到
     // EXCITED_SCALE/EXCITED_*_PX 的地方；真正的"兴奋"不受影响（sizeMul=1）。
     float sizeMul = isPeekaboo ? PEEKABOO_SIZE_MUL : 1.0f;
+    // peekaboo 的鼻子/嘴巴要在上面那个整体放大的基础上再缩小一档，跟
+    // sizeMul 是两件独立的事，只乘在鼻子/嘴巴相关的目标值上，不影响
+    // "兴奋"本身（isExcited 时这个系数恒为1）。
+    float noseMouthMul = isPeekaboo ? PEEKABOO_NOSE_MOUTH_SCALE : 1.0f;
 
     // ---- 目标参数 ----
     float targetRx = isPrivacy
                           ? 9.0f
-                          : (exciteLike ? 10.0f * EXCITED_SCALE * sizeMul
+                          : (exciteLike ? 10.0f * EXCITED_SCALE * sizeMul * noseMouthMul
                                         : (isGrieved ? 10.0f * GRIEVED_NOSE_SCALE : 10.0f));
     float targetRy = isPrivacy
                           ? 6.0f
-                          : (exciteLike ? 7.0f * EXCITED_SCALE * sizeMul
+                          : (exciteLike ? 7.0f * EXCITED_SCALE * sizeMul * noseMouthMul
                                         : (isGrieved ? 7.0f * GRIEVED_NOSE_SCALE : 7.0f));
     float targetOffX = isPrivacy ? -8.0f : 0.0f;
     float targetOffY = isPrivacy ? -5.0f : 0.0f;
@@ -592,8 +603,8 @@ class PuppyNose : public Drawable {
       targetCw = 20.0f;
       targetCd = 12.0f;
     } else if (exciteLike) {
-      targetCw = 20.0f * EXCITED_SCALE * sizeMul;
-      targetCd = 12.0f * EXCITED_SCALE * sizeMul;
+      targetCw = 20.0f * EXCITED_SCALE * sizeMul * noseMouthMul;
+      targetCd = 12.0f * EXCITED_SCALE * sizeMul * noseMouthMul;
     } else if (exp == Expression::Sleepy) {
       targetCw = 10.0f;
       targetCd = 5.0f;
