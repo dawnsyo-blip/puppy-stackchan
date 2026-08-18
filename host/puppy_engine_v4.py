@@ -247,13 +247,13 @@ GAME_COUNTDOWN_LED_PERIOD_MS = 2000
 GAME_SCAN_LED_PERIOD_MS = 3000
 
 # --- 游戏固定词汇 TTS 预热 ---
-# "小狗""看""开始"和倒计时数字这几个词，内容从来不随游戏而变，没必要每次
+# "小狗""看""闭眼"和倒计时数字这几个词，内容从来不随游戏而变，没必要每次
 # 触发游戏都现合成一次——TTS 合成是一次网络往返，几百毫秒到一两秒不等，
 # 用户反馈"从听到邀请到说出'小狗 看'中间等太久"，这段网络延迟是主因之一。
 # PuppyEngine.__init__() 后台预热合成好并缓存路径（_prewarm_game_tts()），
 # _game_speak_keywords() 优先用缓存，只有缓存未命中（预热还没跑完，或者是
 # LLM 生成的动态关键词，比如识别到的物品/位置）才现合成。
-GAME_FIXED_PHRASES = ["小狗", "看", "开始"] + GAME_COUNTDOWN_NUMBERS
+GAME_FIXED_PHRASES = ["小狗", "看", "闭眼"] + GAME_COUNTDOWN_NUMBERS
 
 # --- 视觉大模型（Qwen-VL，通过阿里云 DashScope 的 OpenAI 兼容端点）---
 # 用途有三处：①注册阶段把拍到的物品压缩成 1 个关键词念出来（比如"橘子"）
@@ -1341,7 +1341,7 @@ class PuppyEngine:
             print("[引擎] 没有 Qwen-VL API key，捉迷藏游戏会退化成只用颜色直方图判断")
         self.game_ref_hist = None
         self.game_ref_desc = None
-        # 捉迷藏游戏固定词汇（"小狗""看""开始"、倒计时数字）的 TTS 预热缓存，
+        # 捉迷藏游戏固定词汇（"小狗""看""闭眼"、倒计时数字）的 TTS 预热缓存，
         # 见 GAME_FIXED_PHRASES 和 _prewarm_game_tts()。后台线程跑，不拖慢
         # 引擎启动；万一游戏在预热完成前就被触发，_game_tts() 会自动退化成
         # 现合成，不影响正确性。
@@ -2167,7 +2167,7 @@ class PuppyEngine:
     # 位置），直接接在刚播完的兴奋/抱歉表情后面会打断这段表情反馈，见
     # _game_settle_after_result() 的说明。
     #
-    # 游戏里所有的播报（"小狗 看"、识别到的物品/位置、倒计时数字、"开始"）
+    # 游戏里所有的播报（"小狗 看"、识别到的物品/位置、倒计时数字、"小狗 闭眼"）
     # 都走跟 speak_keywords() 同一套"按钮按一下+关键词 TTS 同步播放"的 AAC
     # 风格，不用整句 TTS 旁白——理由跟对话回应必须用关键词表达是同一个：
     # 这是小狗表达自己的统一方式，游戏流程也不应该破例说整句话。
@@ -2288,8 +2288,8 @@ class PuppyEngine:
         把识别结果压缩成一个关键词念出来（比如"橘子"）。念完给一个窗口期
         （_game_listen_for_rejection()），人可以说"不是这个"之类的话让小狗
         重新看一次——不这样的话，认错物品只能眼睁睁看着流程走到倒计时才能
-        发现。确认（或者超时没人反对）以后，点两下头、按按钮说"开始"，示意
-        进入倒计时。全程用 set_expression("thinking") 表示"正在专心记这个
+        发现。确认（或者超时没人反对）以后，点两下头、按按钮说"小狗 闭眼"，
+        示意进入倒计时。全程用 set_expression("thinking") 表示"正在专心记这个
         东西"；VLM 不可用时跳过关键词播报和否定窗口的语义检查基础（没有
         识别结果可以被否定），不影响游戏继续（后面扫描阶段会退化成只靠
         颜色直方图判断）。"""
@@ -2329,7 +2329,7 @@ class PuppyEngine:
 
         set_expression("happy")
         play_nod_animation()
-        if not self._game_speak_keywords(["开始"]):
+        if not self._game_speak_keywords(["小狗", "闭眼"]):
             return False
         return True
 

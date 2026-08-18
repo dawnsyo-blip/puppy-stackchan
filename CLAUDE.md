@@ -504,7 +504,7 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
 ## 捉迷藏找物品游戏
 `puppy_engine_v4.py` 里的一个新游戏模式：听到"我们玩捉迷藏吧"先开心点头
 回应 → 按钮播报"小狗 看"（看的时候LED绿灯，拍照记住物品，VLM 识别结果也
-按关键词念出来，比如"橘子"）→ 点两下头、按钮说"开始" → 低头闭眼按钮报数
+按关键词念出来，比如"橘子"）→ 点两下头、按钮说"小狗 闭眼" → 低头闭眼按钮报数
 "5 4 3 2 1"（报数本身就是留给人藏东西的时间）→ 转头扫描房间找。语音触发
 （LLM 意图分类新增 `game_hide_seek` 一条，`SYSTEM_PROMPT` 规则第 5 条），
 触发后调用 `PuppyEngine.play_game_hide_seek()`。
@@ -512,7 +512,7 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   同步播放"的 AAC 风格**（`_game_speak_keywords()`），不用整句 TTS 旁白
   ——这版是从"游戏旁白可以整句话说"改过来的：既然对话回应必须靠关键词表达
   是这只小狗"表达自己的唯一方式"，游戏里的播报没道理破例，所以"小狗 看"、
-  识别到的物品/位置、倒计时数字、"开始"，全部统一成关键词+按钮动画。
+  识别到的物品/位置、倒计时数字、"小狗 闭眼"，全部统一成关键词+按钮动画。
   `_game_speak_keywords()` 不能直接复用 `speak_keywords()`——那个内部调用
   `self.wait_for_playback()`，会走 `handle_touch_trigger()` 的完整手势分发
   （碰屏幕→小开心等），游戏进行中触发这些会跟游戏状态冲突，所以另外写了一份
@@ -563,7 +563,7 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   "闭上眼睛"的表情（`sleepy` 只是眯眼），只是借用视觉效果，不涉及真正进入
   隐私状态。
 - **固定词汇 TTS 预热**（`_prewarm_game_tts()`/`_game_tts()`）：`GAME_FIXED_
-  PHRASES`（"小狗""看""开始"+倒计时数字）内容从来不变，`PuppyEngine.__init__()`
+  PHRASES`（"小狗""看""闭眼"+倒计时数字）内容从来不变，`PuppyEngine.__init__()`
   用后台线程提前合成好并缓存路径，`_game_speak_keywords()` 优先用缓存，
   跳过一次网络 TTS 往返（几百毫秒到一两秒）。这是为了解决"从听到邀请到
   说出'小狗 看'中间等太久"的延迟反馈加的——**以后任何"每次触发都要念的
