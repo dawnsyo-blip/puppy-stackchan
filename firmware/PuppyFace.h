@@ -158,7 +158,12 @@ static const float PEEKABOO_SIZE_MUL = 1.584f;
 
 // peekaboo 左耳盖眼的那片"耳朵"专用：整体再往外挪一点，离中轴线（嘴巴
 // 所在的竖线）远一点，避免跟嘴巴的线条重叠；随 sizeMul 一起缩放。
-static const float PEEKABOO_EAR_AWAY_PX = 8.0f;
+// 踩过一个坑：这个常量本身乘的是 sizeMul，但耳朵形状里伸得最远的几个点
+// （bellyX/curlCtrlX 等）系数比它大得多，sizeMul 每整体放大一次，这些点
+// 往中线方向"长"得比这个常量的补偿量更快，导致"整体放大"反而让耳朵实际
+// 看起来离中线更近——这一轮把数值调大了不少来补偿，以后再整体放大
+// peekaboo 时要记得这个常量大概率也要跟着往上调，不能指望它自动跟上。
+static const float PEEKABOO_EAR_AWAY_PX = 22.0f;
 
 // 委屈（grieved）：鼻子比默认再放大 10%；鼻子/耳朵各自朝眼睛方向靠拢一点
 // （复用跟"兴奋朝眼睛靠拢"同一个思路，但幅度是单独调的，不共用 EXCITED_*
@@ -469,9 +474,12 @@ class PuppyEye : public Drawable {
     //      "层层嵌在最上端"的效果，不需要额外算相交逻辑。上方再加一条
     //      "担心"眉毛。----
     if (style == 7) {
-      int r1 = (int)roundf(9 * 0.9f * GRIEVED_EYE_SCALE * s);  // 眼眶（空心，正圆，比最初小10%后再整体放大20%）
-      int r2 = (int)roundf(10 * GRIEVED_EYE_SCALE * s);        // 瞳孔（实心，正圆）
-      int r3 = (int)roundf(5.2f * GRIEVED_EYE_SCALE * s);      // 高光（无描边，正圆）
+      // 眼眶半径的换算基准应该是原始椭圆里较大的那个维度（ry1=16，眼眶本来
+      // 是"瘦高"的竖椭圆），上一轮改成正圆时误用了较小的 rx1=9 做基准，导致
+      // 眼眶（10px）反而比瞳孔（12px）还小——这一轮顺手修正过来。
+      int r1 = (int)roundf(16 * 0.9f * GRIEVED_EYE_SCALE * s);  // 眼眶（空心，正圆，比最初小10%后再整体放大20%）
+      int r2 = (int)roundf(10 * 0.95f * GRIEVED_EYE_SCALE * s); // 瞳孔（实心，正圆，再缩小5%）
+      int r3 = (int)roundf(5.2f * GRIEVED_EYE_SCALE * s);       // 高光（无描边，正圆）
       int topY = cy - r1;
       int highlightGap = (int)roundf(3 * GRIEVED_EYE_SCALE * s);  // 高光中心比瞳孔顶边再往下挪这么多，
                                                                     // 不要贴着瞳孔的边
@@ -488,12 +496,12 @@ class PuppyEye : public Drawable {
         spi->fillCircle(cx, topY + highlightGap + r3, r3, bgCol);
       }
 
-      // ---- 眉毛：眼眶上方一条弧线（不是直线），靠鼻子一侧的端点更高、
-      //      外侧端点更低，做出"担心/委屈"的挑眉感；中点相对两端连线再往上
-      //      拱起 GRIEVED_BROW_ARC，弯出弧度。dir 沿用 eyeInward/bowX 那套
-      //      镜像约定（isLeft 时 +cx 方向是"靠近鼻子"），如果实机看起来
-      //      方向反了（变成挑向外侧、像生气而不是担心），把 dir 的符号
-      //      取反即可。----
+      // ---- 眉毛：眼眶上方一条弧线，形状是"（"逆时针转90°——两端跟原来
+      //      一样有高低差（靠鼻子一侧更高），但弧线中点要往下凹（而不是
+      //      上一版的往上拱），整条弧线看起来像"⌣"（两端翘、中间低），
+      //      不是"⌢"。dir 沿用 eyeInward/bowX 那套镜像约定（isLeft 时
+      //      +cx 方向是"靠近鼻子"），如果实机看起来方向反了（变成挑向
+      //      外侧、像生气而不是担心），把 dir 的符号取反即可。----
       int dir = isLeft ? 1 : -1;
       int halfW = (int)roundf(GRIEVED_BROW_HALF_W * s);
       int tilt = (int)roundf(GRIEVED_BROW_TILT * s);
@@ -503,7 +511,7 @@ class PuppyEye : public Drawable {
       int innerX = cx + dir * halfW, innerY = browY - tilt;
       int outerX = cx - dir * halfW, outerY = browY + tilt;
       int midX = (innerX + outerX) / 2;
-      int midY = (innerY + outerY) / 2 - arc;
+      int midY = (innerY + outerY) / 2 + arc;
       for (int t = -1; t <= 1; t++) {
         spi->drawBezier(innerX, innerY + t, midX, midY + t, outerX, outerY + t, col);
       }
