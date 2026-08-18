@@ -68,8 +68,13 @@ String g_customExpr = "";
 // 真实角度），每帧在 loop() 里从 M5StackChan.Motion.getCurrentAngles() 刷新。
 // PuppyFace.h 用它决定"好奇"表情整体歪头的镜像方向（见 doubtMirrorSign()）
 // ——捉迷藏游戏扫描房间时舵机会左右来回摆动，歪头方向应该跟着摆向的一侧镜像，
-// 而不是不管转到哪边都固定歪同一侧。
-int g_currentYaw = 0;
+// 而不是不管转到哪边都固定歪同一侧。必须是 volatile：写在 loop()
+// 所在的 Arduino 主任务里，读在 avatar.init() 起的独立渲染任务里（跟
+// g_buttonState/g_subNLines 是同一种跨任务共享场景，同样的理由）——不加
+// volatile 的话，编译器可以合法地把渲染任务里的读取缓存在寄存器里，
+// 导致 doubtMirrorSign() 读到的值一直不刷新，表现出来就是歪头方向卡死、
+// 好奇表情看起来"没有变化"。
+volatile int g_currentYaw = 0;
 
 // Subtitle system (replaces the library's Balloon which is too small for CJK)
 // Layout is done once in handleSpeech; render thread only reads static arrays.

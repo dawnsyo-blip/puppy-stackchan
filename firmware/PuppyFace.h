@@ -42,8 +42,10 @@ extern volatile int g_buttonState;
 // g_subNLines 定义在 firmware.ino：字幕当前的行数，0=没有字幕要显示
 extern volatile int g_subNLines;
 // g_currentYaw 定义在 firmware.ino：舵机当前真实的 yaw（每帧从 Motion 库
-// 刷新，不是最后一次下发的目标值），驱动"好奇"表情的镜像方向
-extern int g_currentYaw;
+// 刷新，不是最后一次下发的目标值），驱动"好奇"表情的镜像方向。volatile
+// 是必须的——写在 loop() 的主任务里，读在这个文件里 draw() 所在的独立
+// 渲染任务里，见定义处的完整说明。
+extern volatile int g_currentYaw;
 
 namespace m5avatar {
 
