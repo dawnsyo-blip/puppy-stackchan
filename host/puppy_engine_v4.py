@@ -2161,7 +2161,11 @@ class PuppyEngine:
     # 的状态设计的，游戏内部每个子阶段的表情/LED/舵机都要自己精细控制，见
     # enter_xiaokaixin() 已经有的先例：直接改 self.state 而不是调
     # transition()）；只有找到/超时结尾复用 EXCITED/SORRY 的标准动画（走
-    # transition()），游戏彻底结束时再复用 _settle_happy() 收尾。
+    # transition()），游戏彻底结束时用 _game_settle_after_result() 收尾——
+    # 专门写了这个轻量版本而不是复用对话结束用的 _settle_happy()，因为
+    # 后者追踪丢失时会调 scan_for_face()（切"好奇"表情+转头扫描好几个
+    # 位置），直接接在刚播完的兴奋/抱歉表情后面会打断这段表情反馈，见
+    # _game_settle_after_result() 的说明。
     #
     # 游戏里所有的播报（"小狗 看"、识别到的物品/位置、倒计时数字、"开始"）
     # 都走跟 speak_keywords() 同一套"按钮按一下+关键词 TTS 同步播放"的 AAC
@@ -2468,10 +2472,11 @@ class PuppyEngine:
 
     def _game_on_found(self, jpeg_bytes):
         """找到了：进兴奋状态（复用 play_excited_animation()），再调 VLM 把
-        物品大概的位置压缩成关键词念出来（比如"桌子 下面"）。结束后不是
-        简单回 IDLE，而是复用 _settle_happy(False)——游戏期间头转了一圈，
-        肯定需要重新扫描确认人脸位置，这跟对话结束时"追踪丢失过，重新扫描"
-        是同一个收尾逻辑，直接传 False 强制走重新扫描分支。"""
+        物品大概的位置压缩成关键词念出来（比如"桌子 下面"）。结束后用
+        _game_settle_after_result() 收尾，不能用普通对话结束时的
+        _settle_happy(False)——那个追踪丢失时会调 scan_for_face()，是一次
+        完整的转头扫描 + 切"好奇"表情的动画，用在这里会立刻打断刚播完、
+        用户还没看几眼的兴奋表情，表现出来就是"找到反馈被打断"。"""
         print("[游戏] 找到了！")
         self.transition(State.EXCITED)
         location = call_vision_llm(jpeg_bytes, GAME_LOCATION_DESC_PROMPT, self.qwen_api_key)
@@ -2481,15 +2486,35 @@ class PuppyEngine:
             if keywords and not self._game_speak_keywords(keywords):
                 return
         time.sleep(GAME_FOUND_CELEBRATE_SEC)
-        self._settle_happy(False)
+        self._game_settle_after_result()
 
     def _game_on_timeout(self):
         """没找到：进抱歉状态（复用 play_sorry_animation()），停留一下再
-        跟 _game_on_found() 一样用 _settle_happy(False) 收尾、恢复人脸追踪。"""
+        跟 _game_on_found() 一样用 _game_settle_after_result() 收尾。"""
         print("[游戏] 超时，没找到")
         self.transition(State.SORRY)
         time.sleep(GAME_TIMEOUT_LINGER_SEC)
-        self._settle_happy(False)
+        self._game_settle_after_result()
+
+    def _game_settle_after_result(self):
+        """游戏结束（找到/没找到）以后的收尾：恢复到正常状态、继续追踪人脸。
+        故意不复用 _settle_happy()——那是给普通对话结束设计的，追踪丢失时
+        会调 scan_for_face()（切"好奇"表情 + 转头扫描 SCAN_POSITIONS 好几个
+        位置），直接接在刚播完的兴奋/抱歉表情后面，会打断用户正在看的表情
+        反馈，感觉像"庆祝到一半突然又开始东张西望"。这里改成只拍一帧轻量
+        确认（不切表情、不转头扫描）：确认到人脸就直接 enter_happy()（如果
+        session_active 已经是 True，只是安静地切换状态，不会重播开心动画，
+        更不会有额外的转头动作打断刚才的表情）；没确认到也不强行扫，直接
+        回到常态，交给后续 tick() 里的被动人脸检测自然接管。"""
+        found, face_x = self.detect_face_once()
+        if found:
+            self.face_detected = True
+            self.face_confirm_count = FACE_CONFIRM_FRAMES
+            self.last_face_seen_time = time.time()
+            self.record_interaction()
+            self.enter_happy()
+        else:
+            self.transition(State.IDLE)
 
     # ---------- 计时器 ----------
 

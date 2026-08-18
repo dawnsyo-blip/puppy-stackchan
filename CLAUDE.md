@@ -591,6 +591,27 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   后者仍然低于项目里用过的最快值（`EXCITED_YAW_SPEED`=500）。
 - 这个功能还没有更新 `表情映射v7.xlsx`（新状态没有对应行）——目前只在
   `CLAUDE.md` 记录，如果以后要保持表格权威性，需要手动补一行。
+- **好奇（Doubt）表情跟随舵机 yaw 镜像歪头方向**（`doubtMirrorSign()`，
+  `PuppyFace.h`）：扫描时舵机左右摆动，五官整体旋转方向、以及"长耳/垂耳"
+  角色分配都会跟着 yaw 符号镜像，不再固定歪向一侧。驱动它的
+  `g_currentYaw`（`firmware.ino`，每帧从 `Motion.getCurrentAngles()`
+  刷新）**必须声明成 `volatile int`**——踩过一次坑：一开始漏加
+  `volatile`，写在 `loop()` 的主任务、读在 `avatar.init()` 起的独立渲染
+  任务，编译器合法地把读取缓存在寄存器里，表现出来就是镜像方向"卡死不
+  变"。这个项目里 `g_buttonState`/`g_subNLines` 早就因为同样的跨任务
+  共享场景被标成过 `volatile`，以后再加类似"主任务写、渲染任务读"的
+  共享状态，直接照这个模式来，不要再漏。
+- **找到/没找到之后不能复用 `_settle_happy()` 收尾**：普通对话结束时
+  `_settle_happy(track_ok)` 在追踪丢失时会调 `scan_for_face()`——切
+  "好奇"表情、转头扫描 `SCAN_POSITIONS` 好几个位置，这套动作接在
+  `EXCITED`/`SORRY` 刚播完的表情后面，会打断用户正在看的兴奋/抱歉反馈
+  （实测反馈：'找到/没找到之后的表情反馈会被打断'）。改成专门的
+  `_game_settle_after_result()`：只拍一帧轻量确认人脸在不在（不切表情、
+  不转头扫描），在的话直接 `enter_happy()`（`session_active` 通常已经是
+  `True`，只是安静切换，不会又播一次动画），不在也不强行扫，直接回常态
+  交给后续 `tick()` 的被动检测接管。以后任何"游戏/动画结束后要不要重新
+  找人脸"的收尾场景，如果紧跟在一段本身就该被看到、不该被打断的表情
+  后面，都应该考虑这种轻量确认，而不是无脑复用 `_settle_happy()`。
 
 ## 编译 / 烧录 / 验证流程
 本机的 `arduino-cli` 不在 PATH 里，可执行文件在
