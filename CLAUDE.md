@@ -22,7 +22,7 @@
   让两边再次脱节。
 
 ## HTTP API
-- `/face?expr=<表情>` — 切换表情（neutral/happy/sleepy/curious/sorry/thinking/excited/privacy）
+- `/face?expr=<表情>` — 切换表情（neutral/happy/sleepy/curious/sorry/thinking/excited/privacy/grieved/peekaboo）
 - `/servo?yaw=N&pitch=N&speed=N&mute=1` — 控制舵机（yaw 越大越向右转，越小越
   向左转，见下面"人脸追踪方向"）。`mute=1` 是可选的"这次移动会有明显噪音，
   转动期间请静音麦克风推流"声明，见下面"舵机噪音防误触发语音"一节；不传时
@@ -69,7 +69,12 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
 
 内置 Expression 枚举值（Neutral/Happy/Sleepy/Doubt/Angry/Sad）之外，还有几个通过
 `g_customExpr` 字符串扩展的自定义表情（此时 `Expression` 本身是 Neutral）：
-`thinking`（眼镜+竖椭圆瞳孔）、`excited`（见下）、`privacy`（闭眼+耳朵变形）。
+`thinking`（眼镜+竖椭圆瞳孔）、`excited`（见下）、`privacy`（闭眼+耳朵变形）、
+`grieved`（委屈：无嘴巴，眼睛是同心正圆眼眶+瞳孔，上方一条"⌣"形担心眉毛）、
+`peekaboo`（闭眼：五官基础跟 `excited` 共用一套尺寸参数，但左耳画成盖住左眼
+的一片弯曲耳朵、左眼不画，鼻子嘴巴额外再缩小一档）。`grieved`/`peekaboo` 目前
+只在捉迷藏游戏里触发（见下面"捉迷藏找物品游戏"一节），没有绑定到常规状态机
+的任何一个 State。
 
 所有可动画参数（耳朵长宽、鼻子嘴巴大小、旋转角度、爪印出现进度等）都通过
 `FloatTransition` 做平滑过渡，默认时长 500ms（`FloatTransition::DURATION_MS`）；
@@ -559,9 +564,21 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   没有实机验证过，需要拿真实物品测过再调——误报多就调高阈值，漏检多就调低；
   `GAME_SCAN_YAW_MIN/MAX` 用的是 `±800`，跟 `EXCITED_YAW_RANGE`/
   `PRIVACY_YAW` 同一量级的已验证安全幅度。
-- 倒计时的"闭眼"复用 `set_expression("privacy")`——这是这个项目里唯一真正
-  "闭上眼睛"的表情（`sleepy` 只是眯眼），只是借用视觉效果，不涉及真正进入
-  隐私状态。
+- 倒计时的"闭眼"用专门设计的 `set_expression("peekaboo")`（`_game_countdown_
+  phase()` 一开始就切换，一直保持到倒计时的关键词念完；`_game_scan_phase()`
+  一开始会切成 `curious`，所以自然在扫描开始时结束）。这个表情最初是在早期
+  版本里借用 `set_expression("privacy")` 的闭眼视觉效果实现的（`privacy` 当
+  时是唯一真正闭眼的表情，`sleepy` 只是眯眼）；后来单独设计并反复调整出了
+  专属的 `peekaboo` 表情（见"表情系统"一节），已经把这里换成用它，不再需要
+  借用隐私表情。
+- **没找到目标时用"委屈"（`grieved`）表情反应，不是"抱歉"（`sorry`）**：
+  `_game_on_timeout()` 调用 `play_grieved_reaction()`——动作和灯效（微低头 +
+  暖白闪烁）完全复用 `play_sorry_animation()` 那一套参数，只是表情换成
+  `grieved`。故意不走 `self.transition(State.SORRY)`：`State.SORRY` 在别处
+  （"责备"语音意图，见 `_run_conversation_turn_body()` 的 `scold` 分支）仍然
+  要保留"抱歉"（`sad`）表情，两个场景视觉上应该不一样，所以没有改共享的
+  `State.SORRY`，而是给游戏单独写了一个不经过状态机的反应函数，`self.state`
+  全程留在 `GAME_HIDE_SEEK`，不影响 `_game_settle_after_result()` 的收尾。
 - **固定词汇 TTS 预热**（`_prewarm_game_tts()`/`_game_tts()`）：`GAME_FIXED_
   PHRASES`（"小狗""看""闭眼"+倒计时数字）内容从来不变，`PuppyEngine.__init__()`
   用后台线程提前合成好并缓存路径，`_game_speak_keywords()` 优先用缓存，

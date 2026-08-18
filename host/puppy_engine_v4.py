@@ -411,6 +411,8 @@ EXPRESSION_MAP = {
     "thinking": "thinking",
     "excited":  "excited",
     "privacy":  "privacy",
+    "grieved":  "grieved",
+    "peekaboo": "peekaboo",
 }
 
 
@@ -727,6 +729,16 @@ def play_thinking_animation():
 
 def play_sorry_animation():
     set_expression("sorry")
+    move_servo(pitch=SORRY_PITCH, yaw=SORRY_YAW, speed=SORRY_SPEED, mute=True)
+    set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
+
+def play_grieved_reaction():
+    """捉迷藏没找到目标时的专属反应：动作和灯效跟"抱歉"状态完全一样（微
+    低头 + 暖白闪烁），只是换成"委屈"表情。故意不复用 State.SORRY/
+    transition()——那条路径别处仍然要保留"抱歉"表情给"责备"语音意图用
+    （见 _run_conversation_turn_body() 的 scold 分支），这里只是借用同一套
+    动作参数，不改 self.state。"""
+    set_expression("grieved")
     move_servo(pitch=SORRY_PITCH, yaw=SORRY_YAW, speed=SORRY_SPEED, mute=True)
     set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
 
@@ -2360,11 +2372,12 @@ class PuppyEngine:
 
     def _game_countdown_phase(self):
         """阶段二：倒计时——低头闭眼，按钮报数"5 4 3 2 1"，报数本身就是给
-        人留出的藏东西时间，不需要再额外阻塞等待。"privacy" 表情是这个项目
-        里唯一"闭上眼睛"的表情（sleepy 只是眯眼），这里借用它的视觉效果，
-        不涉及真正进入隐私状态。"""
+        人留出的藏东西时间，不需要再额外阻塞等待。以前这里借用"privacy"
+        表情的闭眼视觉效果（当时项目里还没有专门的闭眼表情）；现在有了
+        专门为这个场景设计的"peekaboo"（闭眼）表情，改成用它，不再需要
+        借用隐私表情。"""
         print("[游戏] 阶段：倒计时")
-        set_expression("privacy")
+        set_expression("peekaboo")
         set_led_mode("breathe", *GAME_COUNTDOWN_LED_RGB, period_ms=GAME_COUNTDOWN_LED_PERIOD_MS)
         move_servo(yaw=0, pitch=GAME_COUNTDOWN_PITCH, speed=300, mute=True)
         return self._game_speak_keywords(GAME_COUNTDOWN_NUMBERS, gap_sec=GAME_COUNTDOWN_GAP_SEC)
@@ -2489,10 +2502,12 @@ class PuppyEngine:
         self._game_settle_after_result()
 
     def _game_on_timeout(self):
-        """没找到：进抱歉状态（复用 play_sorry_animation()），停留一下再
-        跟 _game_on_found() 一样用 _game_settle_after_result() 收尾。"""
+        """没找到：用"委屈"表情做反应（play_grieved_reaction()，动作/灯效
+        跟"抱歉"状态一样，只是换一张脸），不经过 self.transition(State.
+        SORRY)——self.state 全程留在 GAME_HIDE_SEEK，跟 _game_settle_after_
+        result() 的收尾方式无关。停留一下再跟 _game_on_found() 一样收尾。"""
         print("[游戏] 超时，没找到")
-        self.transition(State.SORRY)
+        play_grieved_reaction()
         time.sleep(GAME_TIMEOUT_LINGER_SEC)
         self._game_settle_after_result()
 

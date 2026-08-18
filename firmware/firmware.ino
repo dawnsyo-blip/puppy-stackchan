@@ -697,7 +697,8 @@ void handleFace() {
   else if (expr == "sleepy") { avatar.setExpression(Expression::Sleepy); baseExpr = Expression::Sleepy; }
   else if (expr == "doubt") { avatar.setExpression(Expression::Doubt); baseExpr = Expression::Doubt; }
   else if (expr == "love" || expr == "eyeroll" ||
-           expr == "thinking" || expr == "excited" || expr == "privacy") {
+           expr == "thinking" || expr == "excited" || expr == "privacy" ||
+           expr == "grieved" || expr == "peekaboo") {
     avatar.setExpression(Expression::Neutral);
     baseExpr = Expression::Neutral;
     g_customExpr = expr;
