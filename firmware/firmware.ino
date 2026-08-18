@@ -64,6 +64,13 @@ using namespace m5avatar;
 // automatically restores the custom face.
 String g_customExpr = "";
 
+// 当前舵机的实际 yaw（不是最后一次下发的目标值，是 Motion 库正在插值经过的
+// 真实角度），每帧在 loop() 里从 M5StackChan.Motion.getCurrentAngles() 刷新。
+// PuppyFace.h 用它决定"好奇"表情整体歪头的镜像方向（见 doubtMirrorSign()）
+// ——捉迷藏游戏扫描房间时舵机会左右来回摆动，歪头方向应该跟着摆向的一侧镜像，
+// 而不是不管转到哪边都固定歪同一侧。
+int g_currentYaw = 0;
+
 // Subtitle system (replaces the library's Balloon which is too small for CJK)
 // Layout is done once in handleSpeech; render thread only reads static arrays.
 const int SUB_MAX_LINES = 16;
@@ -1468,6 +1475,9 @@ void loop() {
   M5StackChan.update();
   server.handleClient();
   updateLed();
+
+  // 每帧刷新真实 yaw，供 PuppyFace.h 的好奇表情镜像判断用（见声明处注释）。
+  g_currentYaw = (int)M5StackChan.Motion.getCurrentAngles().x;
 
   // 头顶双击计数：M5StackChan.update() 刚刷新过 TouchSensor 的状态机，这里
   // 检查是不是刚好判定成立"双击"，是的话计数器 +1（见声明处注释，host 端

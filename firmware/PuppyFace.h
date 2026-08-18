@@ -8,7 +8,8 @@
  *   Neutral  → 常态（对称、平静）
  *   Happy    → 开心（^^ 眼）
  *   Sleepy   → 困倦（眯缝眼、耳朵更垂）
- *   Doubt    → 好奇（五官绕鼻子锚点顺时针转 15°，右耳转完后再单独逆时针转 15°）
+ *   Doubt    → 好奇（五官绕鼻子锚点转 15°，长耳转完后再单独多转 15°；旋转
+ *              方向随当前舵机 yaw 的符号镜像，见 doubtMirrorSign()）
  *   Sad      → 抱歉（大眼向上看、耳朵翻过来）
  *   custom "thinking"  → 思考（圆框眼镜 + 竖椭圆瞳孔）
  *   custom "excited"   → 兴奋（'><' 眼 + 舌头的静态表情，整体按 EXCITED_SCALE 缩小，
@@ -40,6 +41,9 @@ extern String g_customExpr;
 extern volatile int g_buttonState;
 // g_subNLines 定义在 firmware.ino：字幕当前的行数，0=没有字幕要显示
 extern volatile int g_subNLines;
+// g_currentYaw 定义在 firmware.ino：舵机当前真实的 yaw（每帧从 Motion 库
+// 刷新，不是最后一次下发的目标值），驱动"好奇"表情的镜像方向
+extern int g_currentYaw;
 
 namespace m5avatar {
 
@@ -95,10 +99,22 @@ class FloatTransition {
   unsigned long durationMs_;
 };
 
-// Doubt（好奇）：五官整体围绕"鼻子锚点"顺时针旋转的最大角度。
+// Doubt（好奇）：五官整体围绕"鼻子锚点"旋转的最大角度。
 // 屏幕坐标系 y 轴向下，这里用的旋转公式在该坐标系下视觉效果为顺时针（正角度）/
 // 逆时针（负角度）；如果实机看到的方向反了，把对应角度取负号即可翻转。
 static const float DOUBT_ROTATE_RAD = 15.0f * PI / 180.0f;
+
+// 好奇表情的歪头方向随当前舵机 yaw 的符号镜像：捉迷藏游戏扫描房间时舵机
+// 左右来回摆动找东西，歪头方向应该跟着摆向的一侧镜像，而不是不管转到哪边
+// 都固定歪同一侧。yaw<=0 时保持原本的旋转方向（DOUBT_ROTATE_RAD 本来的正
+// 角度，见上面的顺时针/逆时针约定）；yaw>0 时整体镜像成相反方向。所有用到
+// DOUBT_ROTATE_RAD 的地方都应该乘上这个符号，而不是直接用常量本身——这样
+// PuppyEye/PuppyNose/PuppyEar 三个独立的 FloatTransition 实例各自在下一帧
+// 拿到新的目标角度时，会各自平滑过渡过去，过渡的起点天然就是 yaw 符号翻转
+// （也就是 yaw=0）的那一刻，不需要另外写专门的过渡触发逻辑。
+inline float doubtMirrorSign() {
+  return (g_currentYaw > 0) ? -1.0f : 1.0f;
+}
 // 近似鼻子锚点的位置，好奇表情的旋转、兴奋表情的爪印位置都以这一点为基准。
 static const int DOUBT_PIVOT_X = 160;
 static const int DOUBT_PIVOT_Y = 140;
@@ -263,7 +279,7 @@ class PuppyEye : public Drawable {
     bool isExcited = custom && g_customExpr == "excited";
     unsigned long excitedElapsed = elapsedSinceTrue(isExcited, wasExcited_, excitedStartMs_);
 
-    float doubtAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD : 0.0f);
+    float doubtAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD * doubtMirrorSign() : 0.0f);
     applyRotationAroundPivot(doubtAngle, DOUBT_PIVOT_X, DOUBT_PIVOT_Y, cx, cy);
     float rotTotal = doubtAngle;
 
@@ -475,7 +491,7 @@ class PuppyNose : public Drawable {
     float offYF = offYAnim_.update(targetOffY);
     float curveWidthF = cwAnim_.update(targetCw);
     float curveDepthF = cdAnim_.update(targetCd);
-    float rotAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD : 0.0f);
+    float rotAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD * doubtMirrorSign() : 0.0f);
 
     // 好奇表情下鼻子/嘴巴自身也跟着转。枢轴就是鼻子自己的锚点，
     // 所以鼻子中心的位置不动，但形状（椭圆朝向、嘴巴弧线）会跟着转。
@@ -571,7 +587,9 @@ class PuppyEar : public Drawable {
 
   FloatTransition lenAnim_, wAnim_, topYAnim_;
   FloatTransition doubtAngleAnim_;
-  FloatTransition rightTwistAnim_;      // 好奇：主体旋转结束后，右耳额外逆时针转 15°
+  FloatTransition earTwistAnim_;        // 好奇：主体旋转结束后，"长耳"额外多转 15°
+                                         // ——哪只耳朵是"长耳"由 doubtMirrorSign()
+                                         // 决定，不固定是左耳还是右耳，见 draw()
   bool wasDoubt_ = false;
   unsigned long doubtStartMs_ = 0;
 
@@ -710,7 +728,7 @@ class PuppyEar : public Drawable {
       pawPhaseStartMs_ = 0;
     }
 
-    float doubtAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD : 0.0f);
+    float doubtAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD * doubtMirrorSign() : 0.0f);
     applyRotationAroundPivot(doubtAngle, DOUBT_PIVOT_X, DOUBT_PIVOT_Y, cx, cy);
     float rotTotal = doubtAngle;
 
@@ -726,6 +744,11 @@ class PuppyEar : public Drawable {
 
     // 左右镜像
     int dir = isLeft ? -1 : 1;
+    // 好奇表情下哪只耳朵是"长耳"（更长、主体旋转结束后再额外多转一点）由
+    // doubtMirrorSign() 决定——正常方向时是右耳（原本的设计），镜像时变成
+    // 左耳，跟主体旋转方向一起镜像，两只耳朵的角色互换而不是各自独立翻转。
+    bool doubtLongEarIsLeft = doubtMirrorSign() < 0.0f;
+    bool isLongEar = (isLeft == doubtLongEarIsLeft);
 
     if (exp == Expression::Happy) {
       earLenTarget = 55;   // 开心时耳朵短一些（更精神）
@@ -741,19 +764,20 @@ class PuppyEar : public Drawable {
     }
     if (exp == Expression::Doubt) {
       // 好奇：两只耳朵先整体缩小到常态的 70%（缩放后的目标值变化会被下面的
-      // FloatTransition 自动缓动出来），左耳再额外垂一点、右耳再额外长一点，
-      // 同时整体也绕鼻子锚点顺时针旋转（见上方 applyRotationAroundPivot）。
+      // FloatTransition 自动缓动出来），"垂耳"再额外垂一点、"长耳"再额外长
+      // 一点（哪只耳朵扮演哪个角色见上面 isLongEar），同时整体也绕鼻子锚点
+      // 旋转（见上方 applyRotationAroundPivot，方向随 doubtMirrorSign() 镜像）。
       const float DOUBT_EAR_SCALE = 0.7f;
       earLenTarget = (int)roundf(earLenTarget * DOUBT_EAR_SCALE);
       earWTarget = (int)roundf(earWTarget * DOUBT_EAR_SCALE);
 
-      const int LEFT_EAR_DROOP = 12;
-      const int RIGHT_EAR_EXTRA = 15;  // 右耳 earLen 比左耳多 15px
-      if (isLeft) {
-        earLenTarget += LEFT_EAR_DROOP;
-        topYTarget += 5;
+      const int DOUBT_EAR_DROOP_BASE = 12;
+      const int DOUBT_EAR_LONG_EXTRA = 15;  // "长耳" earLen 比"垂耳"多 15px
+      if (isLongEar) {
+        earLenTarget += DOUBT_EAR_DROOP_BASE + DOUBT_EAR_LONG_EXTRA;
       } else {
-        earLenTarget += LEFT_EAR_DROOP + RIGHT_EAR_EXTRA;
+        earLenTarget += DOUBT_EAR_DROOP_BASE;
+        topYTarget += 5;
       }
     }
     if (exp == Expression::Sad) {
@@ -791,16 +815,17 @@ class PuppyEar : public Drawable {
                     (custom && g_customExpr == "thinking") || excitedSwingReady;
     int swing = swinging ? earSwingOffset() : 0;
 
-    // ---- 好奇：主体旋转（500ms）结束以后，右耳再额外绕自己的"耳根顶点"
-    //      （耳朵最上方的端点，即 x3,y3）单独逆时针转 15°，用自己的
-    //      FloatTransition 缓入，和主体旋转错开、不叠加着一起转。----
+    // ---- 好奇：主体旋转（500ms）结束以后，"长耳"再额外绕自己的"耳根顶点"
+    //      （耳朵最上方的端点，即 x3,y3）单独多转 15°，用自己的
+    //      FloatTransition 缓入，和主体旋转错开、不叠加着一起转。哪只耳朵是
+    //      "长耳"、转的方向，都随 doubtMirrorSign() 跟主体旋转一起镜像。----
     unsigned long doubtElapsed = elapsedSinceTrue(exp == Expression::Doubt, wasDoubt_, doubtStartMs_);
     bool doubtMainRotationDone = doubtElapsed >= FloatTransition::DURATION_MS;
-    const float RIGHT_EAR_TWIST_RAD = -15.0f * PI / 180.0f;  // 逆时针 15°
-    float twistTarget = (exp == Expression::Doubt && !isLeft && doubtMainRotationDone)
-                             ? RIGHT_EAR_TWIST_RAD
+    const float DOUBT_EAR_TWIST_RAD = -15.0f * PI / 180.0f * doubtMirrorSign();  // 基准逆时针15°，随主体一起镜像
+    float twistTarget = (exp == Expression::Doubt && isLongEar && doubtMainRotationDone)
+                             ? DOUBT_EAR_TWIST_RAD
                              : 0.0f;
-    float rightEarTwist = rightTwistAnim_.update(twistTarget);
+    float earTwist = earTwistAnim_.update(twistTarget);
 
     float pivotLX = dir * earW;  // 耳根顶点（远离头部一侧的顶部端点）局部坐标
     float pivotLY = topY;
@@ -820,11 +845,11 @@ class PuppyEar : public Drawable {
     // 整体旋转，最后加上 swing（左右摆动的水平平移，只作用于三个主要端点）。
 
     int x0, y0, xBot, yBot, x3, y3, ctrl1X, ctrl1Y, ctrl2X, ctrl2Y;
-    hingeThenRotate(dir * 5, topY + 15, pivotLX, pivotLY, rightEarTwist, rotTotal, x0, y0);
-    hingeThenRotate(dir * (earW / 2.0f), earLen, pivotLX, pivotLY, rightEarTwist, rotTotal, xBot, yBot);
-    hingeThenRotate(pivotLX, pivotLY, pivotLX, pivotLY, rightEarTwist, rotTotal, x3, y3);
-    hingeThenRotate(-dir * 8, earLen - 15, pivotLX, pivotLY, rightEarTwist, rotTotal, ctrl1X, ctrl1Y);
-    hingeThenRotate(dir * (earW + 12), earLen - 15, pivotLX, pivotLY, rightEarTwist, rotTotal, ctrl2X, ctrl2Y);
+    hingeThenRotate(dir * 5, topY + 15, pivotLX, pivotLY, earTwist, rotTotal, x0, y0);
+    hingeThenRotate(dir * (earW / 2.0f), earLen, pivotLX, pivotLY, earTwist, rotTotal, xBot, yBot);
+    hingeThenRotate(pivotLX, pivotLY, pivotLX, pivotLY, earTwist, rotTotal, x3, y3);
+    hingeThenRotate(-dir * 8, earLen - 15, pivotLX, pivotLY, earTwist, rotTotal, ctrl1X, ctrl1Y);
+    hingeThenRotate(dir * (earW + 12), earLen - 15, pivotLX, pivotLY, earTwist, rotTotal, ctrl2X, ctrl2Y);
 
     x0 += cx + swing;      y0 += cy;
     xBot += cx + swing;    yBot += cy;
