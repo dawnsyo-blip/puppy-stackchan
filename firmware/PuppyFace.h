@@ -165,10 +165,11 @@ static const float PEEKABOO_SIZE_MUL = 1.584f;
 // peekaboo 时要记得这个常量大概率也要跟着往上调，不能指望它自动跟上。
 static const float PEEKABOO_EAR_AWAY_PX = 22.0f;
 
-// peekaboo 的鼻子/嘴巴比"兴奋"整体缩小10%（跟 PEEKABOO_SIZE_MUL 是分开的
+// peekaboo 的鼻子/嘴巴比"兴奋"整体缩小（跟 PEEKABOO_SIZE_MUL 是分开的
 // 独立系数——sizeMul 管的是五官整体跟"兴奋"相比放大多少，这个只管鼻子和
-// 嘴巴额外再缩一档，眼睛/耳朵不受影响）。
-static const float PEEKABOO_NOSE_MOUTH_SCALE = 0.9f;
+// 嘴巴额外再缩一档，眼睛/耳朵不受影响）。第一轮缩小10%，第二轮反馈"继续
+// 缩小20%"（在第一轮基础上继续缩，不是把10%改成20%），所以 0.9*0.8=0.72。
+static const float PEEKABOO_NOSE_MOUTH_SCALE = 0.72f;
 
 // 委屈（grieved）：鼻子比默认再放大 10%；鼻子/耳朵各自朝眼睛方向靠拢一点
 // （复用跟"兴奋朝眼睛靠拢"同一个思路，但幅度是单独调的，不共用 EXCITED_*
@@ -178,15 +179,19 @@ static const float GRIEVED_NOSE_CLOSER_PX = 6.0f;  // 鼻子朝眼睛靠拢的�
 static const int GRIEVED_EAR_CLOSER_PX = 10;        // 耳朵朝眼睛靠拢的像素数（加在 topYTarget 上）
 static const float GRIEVED_EYE_SCALE = 1.2f;        // 三个同心圆整体放大比例
 static const float GRIEVED_SOCKET_SCALE = 0.8f;     // 眼眶（最外层空心圆）在 GRIEVED_EYE_SCALE 基础上再缩小20%
-static const float GRIEVED_HIGHLIGHT_SCALE = 0.95f; // 高光（最内层空心圆）在 GRIEVED_EYE_SCALE 基础上再缩小5%
+// 高光（最内层空心圆）在 GRIEVED_EYE_SCALE 基础上再缩小——第一轮5%，
+// 第二轮反馈"再缩小30%"（在第一轮基础上继续缩），所以 0.95*0.7=0.665。
+static const float GRIEVED_HIGHLIGHT_SCALE = 0.665f;
 
 // 委屈：眼睛上方一条"担心"眉毛，弯成一条弧线（不是直线）——跟五官同步用
 // FloatTransition 淡入，不需要额外常量控制过渡时长（PuppyEye 里复用眼睛
 // 自己的 s 过渡进度）。
 static const int GRIEVED_BROW_GAP = 9;     // 眉毛距离眼眶最高点的间隙（像素）
-static const int GRIEVED_BROW_HALF_W = 9;  // 眉毛线段半宽
+static const int GRIEVED_BROW_HALF_W = 9;  // 眉毛线段半宽——这一轮反馈"收口
+                                            // 不要太聚拢，宽度保持和现在一样"，不动
 static const int GRIEVED_BROW_TILT = 5;    // 眉毛倾斜幅度：内侧（靠鼻子）比外侧高这么多像素
-static const int GRIEVED_BROW_ARC = 7;     // 眉毛中点相对两端连线再往下凹多少像素（"⌣"的弯曲程度）
+static const int GRIEVED_BROW_ARC = 13;    // 眉毛中点相对两端连线再往下凹多少像素（"⌣"的弯曲程度，
+                                            // 这一轮加深到更接近"u"型，宽度不变，只加深凹陷）
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
