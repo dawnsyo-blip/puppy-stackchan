@@ -249,11 +249,14 @@ static unsigned long elapsedSinceTrue(bool isActive, bool &wasActive, unsigned l
 // 替代 Eye 组件。根据表情画不同眼睛：
 //   常态/生气/好奇: 竖向椭圆（好奇时会转）
 //   开心: ^^ 弧线
-//   兴奋: '><' 眉眼形（比其它眼睛款式更大，静态不旋转）
+//   兴奋: '><' 眉眼形（比其它眼睛款式更大，静态不旋转）；custom "peekaboo"
+//     复用同一套'><'画法（左眼被耳朵挡住，不画，见下方 style==1）
 //   困倦: 向下弯的曲线
 //   抱歉: 竖椭圆眼眶 + 瞳孔朝上
 //   思考: 竖椭圆瞳孔+眼镜框（右眼带眨眼）
 //   隐私: 闭合弧线
+//   custom "grieved"（委屈）: 三个纵向椭圆共享同一个最上端顶点——从外到内
+//     依次是空心眼眶、实心瞳孔、无描边的空心高光
 //
 // 切换到不同"眼睛款式"时，会用 0→1 的缩放在 500ms 内把新款式画出来
 // （旧款式所在的表情消失的同时，新款式从中心"长"出来）。
@@ -261,7 +264,8 @@ static unsigned long elapsedSinceTrue(bool isActive, bool &wasActive, unsigned l
 class PuppyEye : public Drawable {
   bool isLeft;  // true=屏幕左侧的眼睛, false=屏幕右侧
 
-  // 眼睛款式编号：0隐私 1兴奋 2思考 3开心 4困倦 5抱歉 6常态/生气/好奇
+  // 眼睛款式编号：0隐私 1兴奋/peekaboo 2思考 3开心 4困倦 5抱歉
+  // 6常态/生气/好奇 7委屈
   int lastStyle_ = -1;
   unsigned long styleStartMs_ = 0;
   FloatTransition doubtAngleAnim_;
@@ -279,14 +283,19 @@ class PuppyEye : public Drawable {
     Expression exp = ctx->getExpression();
     bool custom = (exp == Expression::Neutral) && g_customExpr.length() > 0;
     bool isExcited = custom && g_customExpr == "excited";
+    // peekaboo："基础表情和兴奋一样"——五官尺寸/位置这些跟"兴奋"共用的效果，
+    // 都用 exciteLike 统一判断；只有爪印、左眼是否画出来这两点不一样（分别
+    // 在 PuppyEar 和下面 style==1 里单独处理，不受 exciteLike 影响）。
+    bool isPeekaboo = custom && g_customExpr == "peekaboo";
+    bool exciteLike = isExcited || isPeekaboo;
     unsigned long excitedElapsed = elapsedSinceTrue(isExcited, wasExcited_, excitedStartMs_);
 
     float doubtAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD * doubtMirrorSign() : 0.0f);
     applyRotationAroundPivot(doubtAngle, DOUBT_PIVOT_X, DOUBT_PIVOT_Y, cx, cy);
     float rotTotal = doubtAngle;
 
-    // 兴奋：两只眼睛各自朝对方靠拢一点（左眼往右挪，右眼往左挪）。
-    int eyeInward = (int)roundf(eyeInwardAnim_.update(isExcited ? EXCITED_EYE_INWARD_PX : 0.0f));
+    // 兴奋/peekaboo：两只眼睛各自朝对方靠拢一点（左眼往右挪，右眼往左挪）。
+    int eyeInward = (int)roundf(eyeInwardAnim_.update(exciteLike ? EXCITED_EYE_INWARD_PX : 0.0f));
     cx += isLeft ? eyeInward : -eyeInward;
 
     uint16_t col = ctx->getColorDepth() == 1
@@ -300,11 +309,12 @@ class PuppyEye : public Drawable {
 
     int style;
     if (custom && g_customExpr == "privacy") style = 0;
-    else if (isExcited) style = 1;
+    else if (exciteLike) style = 1;
     else if (custom && g_customExpr == "thinking") style = 2;
     else if (exp == Expression::Happy) style = 3;
     else if (exp == Expression::Sleepy) style = 4;
     else if (exp == Expression::Sad) style = 5;
+    else if (custom && g_customExpr == "grieved") style = 7;
     else style = 6;
 
     unsigned long now = millis();
@@ -334,8 +344,11 @@ class PuppyEye : public Drawable {
     //      收窄）；openRatio<0.5（快闭眼/闭眼）时改画一条微微鼓出的竖向弧线，
     //      左右眼各自往相反方向鼓，类似"）（"，而不是收成一条横线或者一个点。----
     if (style == 1) {
+      // peekaboo：左耳盖住了左眼（见 PuppyEar 的特殊耳型），左眼的 '>' 不需要
+      // 画出来——直接返回，右眼照常画。
+      if (isPeekaboo && isLeft) return;
       float openRatio = 1.0f;
-      if (excitedElapsed >= EXCITED_BLINK_SWING_START_MS) {
+      if (isExcited && excitedElapsed >= EXCITED_BLINK_SWING_START_MS) {
         openRatio = isLeft ? ctx->getLeftEyeOpenRatio() : ctx->getRightEyeOpenRatio();
       }
       if (openRatio < 0.5f) {
@@ -419,6 +432,30 @@ class PuppyEye : public Drawable {
       return;
     }
 
+    // ---- 委屈：三个纵向椭圆共享同一个最上端顶点（cx, topY）——从外到内
+    //      依次是空心眼眶（描边）、实心瞳孔、无描边的空心高光。三个椭圆
+    //      各自的中心 = topY + 自己的半高，半高越小中心越靠上，天然做出
+    //      "层层嵌在最上端"的效果，不需要额外算相交逻辑。----
+    if (style == 7) {
+      int rx1 = (int)roundf(9 * s), ry1 = (int)roundf(16 * s);  // 眼眶（空心）
+      int rx2 = (int)roundf(6 * s), ry2 = (int)roundf(10 * s);  // 瞳孔（实心）
+      int rx3 = (int)roundf(2 * s), ry3 = (int)roundf(4 * s);   // 高光（无描边）
+      int topY = cy - ry1;
+
+      spi->drawEllipse(cx, topY + ry1, rx1, ry1, col);
+      if (rx1 > 1 && ry1 > 1) {
+        spi->drawEllipse(cx, topY + ry1, rx1 - 1, ry1 - 1, col);  // 加粗描边
+      }
+      spi->fillEllipse(cx, topY + ry2, rx2, ry2, col);
+      if (rx3 > 0 && ry3 > 0) {
+        uint16_t bgCol = ctx->getColorDepth() == 1
+                             ? ERACER_COLOR
+                             : ctx->getColorPalette()->get(COLOR_BACKGROUND);
+        spi->fillEllipse(cx, topY + ry3, rx3, ry3, bgCol);
+      }
+      return;
+    }
+
     // ---- 常态 / 生气 / 好奇：竖向椭圆，带眨眼动画；好奇时椭圆本身也跟着转 ----
     float openRatio = isLeft ? ctx->getLeftEyeOpenRatio() : ctx->getRightEyeOpenRatio();
     int rx = (int)roundf(8 * s);
@@ -463,22 +500,27 @@ class PuppyNose : public Drawable {
     bool custom = (exp == Expression::Neutral) && g_customExpr.length() > 0;
     bool isPrivacy = custom && g_customExpr == "privacy";
     bool isExcited = custom && g_customExpr == "excited";
+    bool isGrieved = custom && g_customExpr == "grieved";
+    // peekaboo："基础表情和兴奋一样"——鼻子/嘴巴/舌头这些跟"兴奋"共用同一套
+    // 参数，用 exciteLike 统一判断；跟 PuppyEye 里的用法保持一致。
+    bool isPeekaboo = custom && g_customExpr == "peekaboo";
+    bool exciteLike = isExcited || isPeekaboo;
 
     // ---- 目标参数 ----
-    float targetRx = isPrivacy ? 9.0f : (isExcited ? 10.0f * EXCITED_SCALE : 10.0f);
-    float targetRy = isPrivacy ? 6.0f : (isExcited ? 7.0f * EXCITED_SCALE : 7.0f);
+    float targetRx = isPrivacy ? 9.0f : (exciteLike ? 10.0f * EXCITED_SCALE : 10.0f);
+    float targetRy = isPrivacy ? 6.0f : (exciteLike ? 7.0f * EXCITED_SCALE : 7.0f);
     float targetOffX = isPrivacy ? -8.0f : 0.0f;
     float targetOffY = isPrivacy ? -5.0f : 0.0f;
 
     float targetCw = 16.0f, targetCd = 8.0f;  // 标准嘴巴弧线
-    if (isPrivacy) {
-      // 隐私时不画嘴巴：把目标收成 0，过渡时会看到嘴巴慢慢收起来
+    if (isPrivacy || isGrieved) {
+      // 隐私、委屈都不画嘴巴：把目标收成 0，过渡时会看到嘴巴慢慢收起来
       targetCw = 0.0f;
       targetCd = 0.0f;
     } else if (exp == Expression::Happy) {
       targetCw = 20.0f;
       targetCd = 12.0f;
-    } else if (isExcited) {
+    } else if (exciteLike) {
       targetCw = 20.0f * EXCITED_SCALE;
       targetCd = 12.0f * EXCITED_SCALE;
     } else if (exp == Expression::Sleepy) {
@@ -499,9 +541,10 @@ class PuppyNose : public Drawable {
     // 所以鼻子中心的位置不动，但形状（椭圆朝向、嘴巴弧线）会跟着转。
     applyRotationAroundPivot(rotAngle, DOUBT_PIVOT_X, DOUBT_PIVOT_Y, cx, cy);
 
-    // ---- 兴奋：鼻子连带嘴巴/舌头整体往上挪，贴近眼睛（眼睛的锚点 y 比鼻子小，
-    //      即在眼睛上方；这里统一改 cy，鼻子和嘴巴会一起挪动，不会跟嘴巴脱节）----
-    float noseUp = noseUpAnim_.update(isExcited ? EXCITED_NOSE_UP_PX : 0.0f);
+    // ---- 兴奋/peekaboo：鼻子连带嘴巴/舌头整体往上挪，贴近眼睛（眼睛的锚点 y
+    //      比鼻子小，即在眼睛上方；这里统一改 cy，鼻子和嘴巴会一起挪动，不会
+    //      跟嘴巴脱节）----
+    float noseUp = noseUpAnim_.update(exciteLike ? EXCITED_NOSE_UP_PX : 0.0f);
     cy -= (int)roundf(noseUp);
 
     // ---- 画鼻子 ----
@@ -520,7 +563,7 @@ class PuppyNose : public Drawable {
     int curveDepth = (int)roundf(curveDepthF);
     if (curveWidth < 1) return;
 
-    int mouthOffY = isExcited ? (int)roundf(10 * EXCITED_SCALE) : 10;  // 嘴巴起点相对鼻子中心的 Y 偏移
+    int mouthOffY = exciteLike ? (int)roundf(10 * EXCITED_SCALE) : 10;  // 嘴巴起点相对鼻子中心的 Y 偏移
     for (int t = -1; t <= 1; t++) {
       int p0x, p0y, l1x, l1y, l2x, l2y, r1x, r1y, r2x, r2y;
       rotateLocalOffset(rotAngle, 0, mouthOffY + t, p0x, p0y);
@@ -535,12 +578,12 @@ class PuppyNose : public Drawable {
       spi->drawBezier(cx + p0x, cy + p0y, cx + r1x, cy + r1y, cx + r2x, cy + r2y, col);
     }
 
-    // ---- 兴奋：加一个 U 型舌头，一直跟嘴巴一起显示。宽度正好是嘴巴宽度的
-    //      一半（tongueHalfW = curveWidth/2，和嘴巴弧线控制点的 x 完全一样）；
-    //      两端 y 坐标用二次贝塞尔的精确公式算出嘴巴弧线在这个 x 上的真实
-    //      位置（不是估算值），保证舌头和嘴巴严丝合缝地连在一起、围成一个
+    // ---- 兴奋/peekaboo：加一个 U 型舌头，一直跟嘴巴一起显示。宽度正好是嘴巴
+    //      宽度的一半（tongueHalfW = curveWidth/2，和嘴巴弧线控制点的 x 完全
+    //      一样）；两端 y 坐标用二次贝塞尔的精确公式算出嘴巴弧线在这个 x 上的
+    //      真实位置（不是估算值），保证舌头和嘴巴严丝合缝地连在一起、围成一个
     //      封闭的空间。----
-    if (isExcited) {
+    if (exciteLike) {
       int tongueHalfW = curveWidth / 2;
       // 嘴巴弧线是二次贝塞尔 (0,mouthOffY) -> (curveWidth/2, mouthOffY+curveDepth)
       // -> (curveWidth, mouthOffY+2)，在 x=curveWidth/2 处（t=0.5）的精确 y：
@@ -719,6 +762,11 @@ class PuppyEar : public Drawable {
     Expression exp = ctx->getExpression();
     bool custom = (exp == Expression::Neutral) && g_customExpr.length() > 0;
     bool isExcited = custom && g_customExpr == "excited";
+    // peekaboo："基础表情和兴奋一样"——耳朵尺寸/靠拢这些跟"兴奋"共用的效果，
+    // 用 exciteLike 统一判断；爪印只认真正的 isExcited（下面 931 行附近那个
+    // 判断没有改），左耳的形状单独特殊处理（见下面 isPeekaboo && isLeft）。
+    bool isPeekaboo = custom && g_customExpr == "peekaboo";
+    bool exciteLike = isExcited || isPeekaboo;
     bool wasExcitedBefore = wasExcited_;
     unsigned long excitedElapsed = elapsedSinceTrue(isExcited, wasExcited_, excitedStartMs_);
     if (isExcited && !wasExcitedBefore) {
@@ -755,8 +803,8 @@ class PuppyEar : public Drawable {
     if (exp == Expression::Happy) {
       earLenTarget = 55;   // 开心时耳朵短一些（更精神）
       topYTarget = -30;
-    } else if (isExcited) {
-      // 兴奋：耳朵在"开心"短耳基础上整体再按 EXCITED_SCALE 缩小
+    } else if (exciteLike) {
+      // 兴奋/peekaboo：耳朵在"开心"短耳基础上整体再按 EXCITED_SCALE 缩小
       earLenTarget = (int)roundf(55 * EXCITED_SCALE);
       earWTarget = (int)roundf(earWTarget * EXCITED_SCALE);
       topYTarget = (int)roundf(-30 * EXCITED_SCALE);
@@ -806,8 +854,9 @@ class PuppyEar : public Drawable {
     int earW = (int)roundf(wAnim_.update((float)earWTarget));
     int topY = (int)roundf(topYAnim_.update((float)topYTarget));
 
-    // ---- 兴奋：耳朵整体朝眼睛方向靠拢一点（水平方向），静态常驻，不随时间变化 ----
-    int earInward = (int)roundf(earInwardAnim_.update(isExcited ? EXCITED_EAR_INWARD_PX : 0.0f));
+    // ---- 兴奋/peekaboo：耳朵整体朝眼睛方向靠拢一点（水平方向），静态常驻，
+    //      不随时间变化 ----
+    int earInward = (int)roundf(earInwardAnim_.update(exciteLike ? EXCITED_EAR_INWARD_PX : 0.0f));
     cx -= dir * earInward;
 
     // ---- 摆动动画：开心 / 好奇 / 思考时耳朵左右轻轻摆动（水平平移）；
@@ -831,6 +880,19 @@ class PuppyEar : public Drawable {
 
     float pivotLX = dir * earW;  // 耳根顶点（远离头部一侧的顶部端点）局部坐标
     float pivotLY = topY;
+
+    // ===== peekaboo 左耳：不画平时朝外垂的 U 形，换成一片朝内下方甩过去、
+    //      盖住左眼的耳朵（所以 PuppyEye 那边左眼的 '>' 才不用画）。三个点的
+    //      偏移量是按耳朵/眼睛两个锚点的大致相对位置估的粗略值，没有实机看过
+    //      效果，大概率需要调整——调的时候改这三行就行，不影响下面正常耳朵
+    //      的画法。=====
+    if (isPeekaboo && isLeft) {
+      int fx0 = cx + 2,  fy0 = cy + topY + 8;    // 耳根附近的起点
+      int fx1 = cx + 22, fy1 = cy + topY + 45;   // 甩到眼睛附近的控制点
+      int fx2 = cx + 14, fy2 = cy + topY + 68;   // 收尾点
+      drawThickBezier(spi, fx0, fy0, fx1, fy1, fx2, fy2, thick + 2, col);
+      return;
+    }
 
     // ===== 绘制 U 形耳朵 =====
     //
