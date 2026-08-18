@@ -339,9 +339,12 @@ KEYWORD_MAX_CHARS = 10           # 单个关键词允许的最大字符数——
                                   # 数组的某一项，见 sanitize_keywords()
 
 # --- 字幕：语音段识别出结果后，把识别到的文字显示出来，方便用户确认输入
-#     内容，一直保留到 LLM 回复出来、即将执行下一步动作时才清空。改成流式
-#     监听（MicStream）之后不再有单独的"录音中"状态可以配麦克风图标——语音
-#     是持续后台捕捉的，触发的时候内容已经录完了，所以只剩这一段用途。
+#     内容。字幕框只应该在"录音+语音识别"这段时间出现——实测字幕框会挡住
+#     "兴奋"等表情的一部分，所以最终识别结果一显示出来就立刻清空，不会留到
+#     LLM 回复出来、更不会留到后面的表情/状态切换（见
+#     _run_conversation_turn_body()）。改成流式监听（MicStream）之后不再有
+#     单独的"录音中"状态可以配麦克风图标——语音是持续后台捕捉的，触发的时候
+#     内容已经录完了，所以只剩这一段用途。
 #     SenseVoice 不是逐字流式识别模型，做不到真正的"边说边一个字一个字往外
 #     蹦"，但退而求其次可以做到：只要用户还在说（MicStream 判定"说完"之前），
 #     就每隔一小段时间把目前为止录到的全部内容整段重新识别一次，用新结果
@@ -1967,21 +1970,25 @@ class PuppyEngine:
 
         set_led(off=True)
         self.transition(State.THINKING)
-        # 字幕只应该在"识别语音以及思考"这段时间出现（见 play_curious_
-        # animation()/play_thinking_animation() 的绿色呼吸灯也是同一个窗口），
-        # 用完必须清掉，不能留到后面盖住关键词按钮之类的动画。这段 try 从
-        # THINKING 开始一路包到函数结束，不管从哪个分支 return（没识别到
-        # 内容、识别到"小狗小狗"、LLM 调用失败、四路意图分支……），finally
-        # 保证只要进了这个 try 就一定会清一次字幕，不用在每个 return 前都
-        # 手动补一次——以前就是漏了"没识别到内容"和"小狗小狗"这两条 return
-        # 路径的字幕清理，导致字幕偶尔会一直卡在屏幕上，把关键词按钮的动画
-        # 挡住。
+        # 字幕框只应该在"录音+语音识别"这段时间出现——实测字幕框会挡住
+        # "兴奋"表情的一部分，如果留到 LLM 思考、乃至回复触发的表情/状态
+        # 切换（比如"表扬→兴奋"）都还在显示，就会一路盖住后面的画面。
+        # 说话过程中的实时字幕由 _partial_transcribe_loop() 负责（那才是真正
+        # 的"录音"阶段）；这里 transcribe() 返回的一刻就是"识别"阶段的终点，
+        # 字幕显示一下确认结果之后必须立刻清掉，不能等到 LLM 请求发出去、
+        # 更不能等到本函数结束才清（那样会盖到 THINKING 之后的所有画面）。
+        # 这段 try 仍然包到函数结束，finally 兜底清一次字幕，防止中途异常导致
+        # 字幕卡死在屏幕上；但正常路径下字幕在进 LLM 之前就已经手动清过了。
         try:
             wav_bytes = pcm_to_wav_bytes(pcm_bytes, sample_rate=self.mic_stream.sample_rate)
             user_text = self.transcribe(wav_bytes, "question.wav")
             print(f"[对话] 识别结果: 「{user_text}」")
             if not user_text:
                 print("[对话] 没识别到内容")
+                set_subtitle("")  # 说话过程中的实时字幕（_partial_transcribe_loop()）
+                                   # 可能还留着最后一次的文字，这里没有识别结果可以
+                                   # 展示，直接清掉，不要让它挡住 _settle_happy() 可能
+                                   # 触发的表情
                 self._settle_happy(track_ok)
                 return
 
@@ -1993,12 +2000,15 @@ class PuppyEngine:
             # 扫描——用户显然就在附近正对着它说话，不需要摄像头再确认一次。
             if is_calling_puppy(user_text):
                 print(f"[对话] 识别到呼唤「{user_text}」→ 开心")
+                set_subtitle("")  # 同上，进 enter_happy() 之前先清掉，别挡住开心动画
                 self.enter_happy()
                 return
 
-            # 识别结果一出来就立刻显示在字幕框里，方便用户确认小狗听到的是
-            # 什么；留到 LLM 回复出来或者本函数结束（靠上面的 finally）才清空。
+            # 识别结果出来就闪一下字幕框确认小狗听到的是什么，然后立刻清掉——
+            # 语音识别到这里已经结束，接下来是"思考"（LLM），不属于字幕该
+            # 出现的时间段了。
             set_subtitle(user_text, dur_ms=SUBTITLE_DUR_MS)
+            set_subtitle("")
 
             # 等 DeepSeek 回复期间设备是空闲的（不像 CURIOUS 时被 /record 占满），
             # 用后台线程发 LLM 请求，主线程每隔 FACE_TRACK_INTERVAL_SEC 追踪一次。

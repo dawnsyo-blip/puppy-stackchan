@@ -15,11 +15,12 @@
 - `firmware/config.h` — WiFi 配置（SSID: DAWN, 密码: 12121212）
 - `host/puppy_engine_v4.py` — 行为状态机（人脸检测、触摸、空闲计时、语音唤醒），当前最新版
 - `host/voice_test.py` — 语音链路独立测试（录音→STT→LLM→TTS→播放）
-- `表情映射v7.xlsx`（仓库根目录，不在 git 里）— 每个状态的触发/退出条件、表情、
-  舵机、LED、声音规格表，是行为设计的权威参考。这份是跟当前代码同步过的
-  （v6 存在跟代码对不上的地方，已经改完存成 v7 并删掉了 v6），改状态机行为
-  时应该先查这张表；如果代码要改成跟表不一致的行为，应该同时更新表格，不要
-  让两边再次脱节。
+- `表情映射v8.xlsx`（仓库根目录，不在 git 里）— 每个状态/动作的触发/退出条件、
+  表情、舵机、LED、声音规格表，是行为设计的权威参考。这份是跟当前代码同步过的
+  （v6 跟代码对不上，改完存成 v7 删掉 v6；v7 只覆盖最早的10个基础状态，后来
+  加的触摸手势"小开心"、捉迷藏游戏各阶段、`grieved`/`peekaboo` 两个新表情都
+  没跟进，改完存成 v8 并删掉了 v7），改状态机行为时应该先查这张表；如果代码
+  要改成跟表不一致的行为，应该同时更新表格，不要让两边再次脱节。
 
 ## HTTP API
 - `/face?expr=<表情>` — 切换表情（neutral/happy/sleepy/curious/sorry/thinking/excited/privacy/grieved/peekaboo）
@@ -103,6 +104,22 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
 `firmware/host/expr_review.py` 里的 `STEPS`列表维护着每个表情改动后要重点看
 什么，每次改表情视觉效果后都要同步更新对应表情的说明文字。
 
+**设计全新表情（不是微调现有表情）时，优先用 `firmware/expr_preview/
+expr_preview.ino` 这个独立最小 sketch 反复迭代，而不是直接改主固件反复烧
+录**——开发 `grieved`/`peekaboo` 这两个表情时用的就是这个流程：不含
+WiFi/HTTP/摄像头/麦克风，只有屏幕渲染，`PuppyFace.h` 直接用相对路径
+`#include "../PuppyFace.h"` 引用主固件那一份（不是复制一份改，改完直接就在
+正确的地方，不需要"搬"），编译（~575KB/18% flash）和烧录（~3s）都比完整版
+firmware.ino（~1.76MB/55% flash，~10s）快很多；串口按回车键切换表情（不依赖
+计时器自动轮播，因为调参往往需要盯着某一个表情看好几秒）。这套"改
+`PuppyFace.h` 里的常量/绘制逻辑 → 编译烧录 expr_preview → 实机看效果 →
+根据反馈继续改常量"的循环可以跑很多轮（这两个表情实测跑了将近十轮），
+每轮的改动都应该配一条简短的常量注释说明"这一轮改了什么、依据是什么"，
+方便下一轮反馈时能看懂当前参数是怎么来的、要在哪个基础上继续调，不用每次
+都从头重新试。视觉效果稳定以后再把 `handleFace()` 的 `/face?expr=` 分支和
+host 端的触发逻辑接上，烧录真正的主固件——这两步不要在设计阶段就做，早期
+每一轮反复烧录 1.76MB 的主固件会显著拖慢迭代节奏。
+
 ## 关键词播报按钮（爪印按钮）
 `PuppyFace.h` 里 `BUTTON_*` 一组常量控制的"狗粮碗"形状按钮，`qa_complex`
 逐个念关键词时出现，画在屏幕右下角，形状是椭圆"碗口"叠在圆角矩形"碗身"上。
@@ -163,6 +180,19 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   在后面几次重跑里自动"纠正"。跟 `run_conversation_turn()` 里"说完了"以后
   的正式识别共用同一个 `AutoModel` 实例，两边都要经过 `PuppyEngine._asr_lock`
   互斥——ONNX/PyTorch 在 CPU 上不保证能安全并发 `generate()`。
+- **字幕框只应该在"录音+语音识别"这段时间出现，不能靠函数末尾的一个
+  `finally` 兜底清空**：早期实现里，`_run_conversation_turn_body()` 识别出
+  最终文本后调用 `set_subtitle(user_text, ...)`，然后一路不清空，直到整个
+  函数最后的 `finally: set_subtitle("")` 才清——这中间还夹着 LLM 网络请求、
+  以及"表扬→兴奋"这类意图分支触发的表情/状态切换，实测字幕框会挡住"兴奋"
+  表情的一部分（"复杂回应"逐词播报、捉迷藏整局游戏这些更长的分支同样会被
+  拖着，只是没那么显眼）。修法是把"清空"从"函数结束时兜底"改成"用完立刻
+  显式清空"：`set_subtitle(user_text, ...)` 后紧接着就是 `set_subtitle("")`
+  ——识别结果本身闪一下即可，一旦要开始等 LLM 回复就必须清掉；`_settle_happy()`
+  /`enter_happy()` 之前也要补一次清空（否则会挡住这两个分支各自触发的表情）。
+  以后任何"临时显示的 UI 元素后面紧跟着可能会切表情/切状态的动作"，都应该
+  在触发那个动作之前显式清掉，不要依赖函数末尾兜底的 `finally`——那只是"最终
+  不会卡死"的安全网，不等于"不会短暂挡住画面"。
 - **`AutoModel(model="iic/SenseVoiceSmall", ...)` 每次启动都会连网络，哪怕
   模型早就缓存在本地**：funasr 的 `download_from_ms()` 只要看到 `model`
   参数是个 ID 字符串（不是本地已存在的路径），就会调 ModelScope 的
@@ -245,7 +275,7 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   真正的完整状态切换才会恢复，中间可能是好几轮对话的时间。以后新增任何
   临时借用 LED（或者其它"应该跟随状态持续"的效果）的代码，都要问一句"用完
   之后谁负责把它还回去"。
-- **当前各状态的 LED 常驻效果**（跟`表情映射v7.xlsx`保持同步）：常态
+- **当前各状态的 LED 常驻效果**（跟`表情映射v8.xlsx`保持同步）：常态
   （IDLE）是完全关闭、不点亮（`play_idle_animation()` 用 `set_led(off=True)`）；
   开心（HAPPY）是暖白灯常亮（`set_led_mode("solid", *WARM_WHITE_RGB)`，不是
   之前的闪烁）。`setup()` 里 `M5StackChan.begin()` 之后立刻加了
@@ -606,8 +636,9 @@ PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr �
   JITTER`），层与层之间插一个 yaw 回正的过渡点（不拍照）；转动速度随扫描
   进度从 `GAME_SCAN_SPEED_MIN`(150) 线性升到 `GAME_SCAN_SPEED_MAX`(450)，
   后者仍然低于项目里用过的最快值（`EXCITED_YAW_SPEED`=500）。
-- 这个功能还没有更新 `表情映射v7.xlsx`（新状态没有对应行）——目前只在
-  `CLAUDE.md` 记录，如果以后要保持表格权威性，需要手动补一行。
+- 这个功能已经补进了 `表情映射v8.xlsx`（"捉迷藏-看物品/倒计时/扫描搜索/
+  找到/没找到"五个"游戏"类型的行，外加 `grieved`/`peekaboo` 两个"表情"类型
+  的行），不再是只在 `CLAUDE.md` 里记录、表格脱节的状态。
 - **好奇（Doubt）表情跟随舵机 yaw 镜像歪头方向**（`doubtMirrorSign()`，
   `PuppyFace.h`）：扫描时舵机左右摆动，五官整体旋转方向、以及"长耳/垂耳"
   角色分配都会跟着 yaw 符号镜像，不再固定歪向一侧。驱动它的
