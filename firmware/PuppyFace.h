@@ -179,19 +179,18 @@ static const float GRIEVED_NOSE_CLOSER_PX = 6.0f;  // 鼻子朝眼睛靠拢的�
 static const int GRIEVED_EAR_CLOSER_PX = 10;        // 耳朵朝眼睛靠拢的像素数（加在 topYTarget 上）
 static const float GRIEVED_EYE_SCALE = 1.2f;        // 三个同心圆整体放大比例
 static const float GRIEVED_SOCKET_SCALE = 0.8f;     // 眼眶（最外层空心圆）在 GRIEVED_EYE_SCALE 基础上再缩小20%
-// 高光（最内层空心圆）在 GRIEVED_EYE_SCALE 基础上再缩小——第一轮5%，
-// 第二轮反馈"再缩小30%"（在第一轮基础上继续缩），所以 0.95*0.7=0.665。
-static const float GRIEVED_HIGHLIGHT_SCALE = 0.665f;
+// 高光（最内层空心圆）调过两轮尺寸（0.95、再*0.7）以后，这一轮反馈直接
+// 取消了，不再画——参数已删，画高光的那段代码也一并去掉了。
 
 // 委屈：眼睛上方一条"担心"眉毛，弯成一条弧线（不是直线）——跟五官同步用
 // FloatTransition 淡入，不需要额外常量控制过渡时长（PuppyEye 里复用眼睛
 // 自己的 s 过渡进度）。
-static const int GRIEVED_BROW_GAP = 9;     // 眉毛距离眼眶最高点的间隙（像素）
-static const int GRIEVED_BROW_HALF_W = 9;  // 眉毛线段半宽——这一轮反馈"收口
-                                            // 不要太聚拢，宽度保持和现在一样"，不动
+static const int GRIEVED_BROW_GAP = 13;    // 眉毛距离眼眶最高点的间隙（像素）
+static const int GRIEVED_BROW_HALF_W = 9;  // 眉毛线段半宽——反馈过"收口
+                                            // 不要太聚拢，宽度保持和现在一样"，一直没动
 static const int GRIEVED_BROW_TILT = 5;    // 眉毛倾斜幅度：内侧（靠鼻子）比外侧高这么多像素
-static const int GRIEVED_BROW_ARC = 13;    // 眉毛中点相对两端连线再往下凹多少像素（"⌣"的弯曲程度，
-                                            // 这一轮加深到更接近"u"型，宽度不变，只加深凹陷）
+static const int GRIEVED_BROW_ARC = 18;    // 眉毛中点相对两端连线再往下凹多少像素（"⌣"的弯曲程度，
+                                            // 宽度不变，只继续加深凹陷）
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -491,22 +490,14 @@ class PuppyEye : public Drawable {
       // 眼眶（10px）反而比瞳孔（12px）还小——这一轮顺手修正过来。
       int r1 = (int)roundf(16 * 0.9f * GRIEVED_EYE_SCALE * GRIEVED_SOCKET_SCALE * s);     // 眼眶（空心，正圆，比最初小10%、整体放大20%后又缩小20%）
       int r2 = (int)roundf(10 * 0.95f * GRIEVED_EYE_SCALE * s);                            // 瞳孔（实心，正圆，再缩小5%）
-      int r3 = (int)roundf(5.2f * GRIEVED_EYE_SCALE * GRIEVED_HIGHLIGHT_SCALE * s);        // 高光（无描边，正圆，再缩小5%）
       int topY = cy - r1;
-      int highlightGap = (int)roundf(3 * GRIEVED_EYE_SCALE * s);  // 高光中心比瞳孔顶边再往下挪这么多，
-                                                                    // 不要贴着瞳孔的边
 
       spi->drawCircle(cx, topY + r1, r1, col);
       if (r1 > 1) {
         spi->drawCircle(cx, topY + r1, r1 - 1, col);  // 加粗描边
       }
       spi->fillCircle(cx, topY + r2, r2, col);
-      if (r3 > 0) {
-        uint16_t bgCol = ctx->getColorDepth() == 1
-                             ? ERACER_COLOR
-                             : ctx->getColorPalette()->get(COLOR_BACKGROUND);
-        spi->fillCircle(cx, topY + highlightGap + r3, r3, bgCol);
-      }
+      // 高光（最内层空心圆）取消了——反馈里明确要去掉，不再画。
 
       // ---- 眉毛：眼眶上方一条弧线，形状是"（"逆时针转90°——两端跟原来
       //      一样有高低差（靠鼻子一侧更高），但弧线中点要往下凹（而不是
