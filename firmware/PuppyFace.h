@@ -15,6 +15,9 @@
  *   custom "excited"   → 兴奋（'><' 眼 + 舌头的静态表情，整体按 EXCITED_SCALE 缩小，
  *                         2s 后开始爪印动画，见下方 PuppyEar 顶部注释）
  *   custom "privacy"   → 隐私（闭眼、耳朵变形）
+ *   custom "dizzy"     → 晕（设计中：漩涡眼 + 张嘴吐舌 + 双耳同步朝同一方向
+ *                         轻晃，尚未接入 handleFace()/host，只在 expr_preview
+ *                         里能看到）
  *
  * 表情切换时，尺寸类参数（耳朵长宽、鼻子/嘴巴大小、旋转角度）会用
  * FloatTransition 在 500ms 内线性插值过渡；开心/好奇/思考时耳朵左右
@@ -305,6 +308,7 @@ static unsigned long elapsedSinceTrue(bool isActive, bool &wasActive, unsigned l
 //   隐私: 闭合弧线
 //   custom "grieved"（委屈）: 三个纵向椭圆共享同一个最上端顶点——从外到内
 //     依次是空心眼眶、实心瞳孔、无描边的空心高光
+//   custom "dizzy"（晕）: 从中心向外的螺旋折线（漩涡）
 //
 // 切换到不同"眼睛款式"时，会用 0→1 的缩放在 500ms 内把新款式画出来
 // （旧款式所在的表情消失的同时，新款式从中心"长"出来）。
@@ -313,7 +317,7 @@ class PuppyEye : public Drawable {
   bool isLeft;  // true=屏幕左侧的眼睛, false=屏幕右侧
 
   // 眼睛款式编号：0隐私 1兴奋/peekaboo 2思考 3开心 4困倦 5抱歉
-  // 6常态/生气/好奇 7委屈
+  // 6常态/生气/好奇 7委屈 8晕（螺旋）
   int lastStyle_ = -1;
   unsigned long styleStartMs_ = 0;
   FloatTransition doubtAngleAnim_;
@@ -336,6 +340,7 @@ class PuppyEye : public Drawable {
     // 在 PuppyEar 和下面 style==1 里单独处理，不受 exciteLike 影响）。
     bool isPeekaboo = custom && g_customExpr == "peekaboo";
     bool exciteLike = isExcited || isPeekaboo;
+    bool isDizzy = custom && g_customExpr == "dizzy";
     // peekaboo 比"兴奋"整体再放大 PEEKABOO_SIZE_MUL（10%），乘在所有用到
     // EXCITED_SCALE/EXCITED_*_PX 的地方；真正的"兴奋"不受影响（sizeMul=1）。
     float sizeMul = isPeekaboo ? PEEKABOO_SIZE_MUL : 1.0f;
@@ -366,6 +371,7 @@ class PuppyEye : public Drawable {
     else if (exp == Expression::Sleepy) style = 4;
     else if (exp == Expression::Sad) style = 5;
     else if (custom && g_customExpr == "grieved") style = 7;
+    else if (isDizzy) style = 8;
     else style = 6;
 
     unsigned long now = millis();
@@ -525,6 +531,29 @@ class PuppyEye : public Drawable {
       return;
     }
 
+    // ---- 晕：从中心向外的螺旋折线（漩涡），用短直线段近似一条连续曲线；
+    //      DIZZY_SPIRAL_TURNS 圈数、DIZZY_SPIRAL_MAX_R 最终半径都是第一版
+    //      估的，还没实机看过，参数偏保守，方便照 expr_preview 里的反馈调。----
+    if (style == 8) {
+      const float DIZZY_SPIRAL_TURNS = 1.6f;  // 螺旋圈数
+      const int DIZZY_SPIRAL_STEPS = 28;      // 折线段数，越多越平滑
+      int maxR = (int)roundf(9 * s);
+      int lastX = cx, lastY = cy;
+      for (int i = 1; i <= DIZZY_SPIRAL_STEPS; i++) {
+        float t = (float)i / DIZZY_SPIRAL_STEPS;
+        float theta = t * DIZZY_SPIRAL_TURNS * 2.0f * PI;
+        float r = maxR * t;
+        int x = cx + (int)roundf(r * cosf(theta));
+        int y = cy + (int)roundf(r * sinf(theta));
+        for (int dt = -1; dt <= 1; dt++) {
+          spi->drawLine(lastX + dt, lastY, x + dt, y, col);
+        }
+        lastX = x;
+        lastY = y;
+      }
+      return;
+    }
+
     // ---- 常态 / 生气 / 好奇：竖向椭圆，带眨眼动画；好奇时椭圆本身也跟着转 ----
     float openRatio = isLeft ? ctx->getLeftEyeOpenRatio() : ctx->getRightEyeOpenRatio();
     int rx = (int)roundf(8 * s);
@@ -570,6 +599,7 @@ class PuppyNose : public Drawable {
     bool isPrivacy = custom && g_customExpr == "privacy";
     bool isExcited = custom && g_customExpr == "excited";
     bool isGrieved = custom && g_customExpr == "grieved";
+    bool isDizzy = custom && g_customExpr == "dizzy";
     // peekaboo："基础表情和兴奋一样"——鼻子/嘴巴/舌头这些跟"兴奋"共用同一套
     // 参数，用 exciteLike 统一判断；跟 PuppyEye 里的用法保持一致。
     bool isPeekaboo = custom && g_customExpr == "peekaboo";
@@ -608,6 +638,11 @@ class PuppyNose : public Drawable {
     } else if (exp == Expression::Sleepy) {
       targetCw = 10.0f;
       targetCd = 5.0f;
+    } else if (isDizzy) {
+      // 晕：张嘴吐舌，尺寸跟"开心"的嘴巴一样宽（不像 exciteLike 那样整体
+      // 按 EXCITED_SCALE 缩小），下面舌头那段要跟着不缩小。
+      targetCw = 20.0f;
+      targetCd = 12.0f;
     }
 
     // ---- 过渡插值 ----
@@ -663,17 +698,19 @@ class PuppyNose : public Drawable {
       spi->drawBezier(cx + p0x, cy + p0y, cx + r1x, cy + r1y, cx + r2x, cy + r2y, col);
     }
 
-    // ---- 兴奋/peekaboo：加一个 U 型舌头，一直跟嘴巴一起显示。宽度正好是嘴巴
-    //      宽度的一半（tongueHalfW = curveWidth/2，和嘴巴弧线控制点的 x 完全
-    //      一样）；两端 y 坐标用二次贝塞尔的精确公式算出嘴巴弧线在这个 x 上的
-    //      真实位置（不是估算值），保证舌头和嘴巴严丝合缝地连在一起、围成一个
-    //      封闭的空间。----
-    if (exciteLike) {
+    // ---- 兴奋/peekaboo/晕：加一个 U 型舌头，一直跟嘴巴一起显示。宽度正好是
+    //      嘴巴宽度的一半（tongueHalfW = curveWidth/2，和嘴巴弧线控制点的 x
+    //      完全一样）；两端 y 坐标用二次贝塞尔的精确公式算出嘴巴弧线在这个 x
+    //      上的真实位置（不是估算值），保证舌头和嘴巴严丝合缝地连在一起、围成
+    //      一个封闭的空间。晕的嘴巴不像 exciteLike 那样整体缩小，舌头的深度
+    //      也不应该跟着 EXCITED_SCALE 缩小，所以缩放系数分开算。----
+    if (exciteLike || isDizzy) {
       int tongueHalfW = curveWidth / 2;
       // 嘴巴弧线是二次贝塞尔 (0,mouthOffY) -> (curveWidth/2, mouthOffY+curveDepth)
       // -> (curveWidth, mouthOffY+2)，在 x=curveWidth/2 处（t=0.5）的精确 y：
       float tongueAttachY = mouthOffY + curveDepth * 0.5f + 0.5f;
-      const int tongueDepth = (int)roundf(8 * EXCITED_SCALE * sizeMul);  // U 形往下鼓出的深度
+      float tongueScaleMul = exciteLike ? (EXCITED_SCALE * sizeMul) : 1.0f;
+      const int tongueDepth = (int)roundf(8 * tongueScaleMul);  // U 形往下鼓出的深度
       for (int t = -1; t <= 1; t++) {
         int t0x, t0y, t1x, t1y, t2x, t2y;
         rotateLocalOffset(rotAngle, -tongueHalfW, tongueAttachY + t, t0x, t0y);
@@ -853,6 +890,7 @@ class PuppyEar : public Drawable {
     bool isPeekaboo = custom && g_customExpr == "peekaboo";
     bool exciteLike = isExcited || isPeekaboo;
     bool isGrieved = custom && g_customExpr == "grieved";
+    bool isDizzy = custom && g_customExpr == "dizzy";
     // peekaboo 比"兴奋"整体再放大 PEEKABOO_SIZE_MUL（10%），乘在所有用到
     // EXCITED_SCALE/EXCITED_*_PX 的地方；真正的"兴奋"不受影响（sizeMul=1）。
     float sizeMul = isPeekaboo ? PEEKABOO_SIZE_MUL : 1.0f;
@@ -955,9 +993,13 @@ class PuppyEar : public Drawable {
 
     // ---- 摆动动画：开心 / 好奇 / 思考时耳朵左右轻轻摆动（水平平移）；
     //      兴奋时要等静态姿势保持 EXCITED_BLINK_SWING_START_MS 之后才开始摆 ----
+    // ---- 晕：双耳同步朝同一方向轻晃，复用跟开心/好奇/思考同一条 sin 曲线——
+    //      earSwingOffset() 对左右两只耳朵返回同一个偏移量，不像 dir 那样按
+    //      isLeft 镜像，两只耳朵的端点会一起朝屏幕同一侧平移，天然就是"同步
+    //      同一方向"，不需要额外的镜像/反相处理。----
     bool excitedSwingReady = isExcited && excitedElapsed >= EXCITED_BLINK_SWING_START_MS;
     bool swinging = (exp == Expression::Happy) || (exp == Expression::Doubt) ||
-                    (custom && g_customExpr == "thinking") || excitedSwingReady;
+                    (custom && g_customExpr == "thinking") || excitedSwingReady || isDizzy;
     int swing = swinging ? earSwingOffset() : 0;
 
     // ---- 好奇：主体旋转（500ms）结束以后，"长耳"再额外绕自己的"耳根顶点"
