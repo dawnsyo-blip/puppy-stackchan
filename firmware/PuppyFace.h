@@ -209,10 +209,16 @@ static const int GRIEVED_BROW_ARC = 18;    // 眉毛中点相对两端连线再�
 // 改回 1.6 后要维持同样的 10，所以 MAX_R = 10 * 1.6 = 16。另外加了一个缓慢
 // 顺时针自转（DIZZY_SPIRAL_ROTATE_PERIOD_MS 转一整圈），周期先按"慢悠悠"的
 // 直觉估了 4 秒，没有实机验证过快慢是否合适。
+// 第三版反馈：①右眼在左眼共用的自转相位基础上再叠加 30° 的固定偏移——两
+// 只眼睛转速仍然一样（同一个 DIZZY_SPIRAL_ROTATE_PERIOD_MS），只是右眼永远
+// 领先左眼 30°，不是同步转到一模一样的角度；②圈数从 1.6 增加到 2（这次
+// 反馈没有像上一轮那样要求保持间距，所以只改圈数，半径不变，间距会自然
+// 变窄）；③嘴巴去掉舌头（鼻子/嘴巴本身的缩放尺寸不变，只是不再画舌头）。
 static const float DIZZY_SPIRAL_MAX_R = 16.0f;      // 螺旋最终半径：13/1.3(上一版间距)*1.6(圈数改回1.6) = 16
-static const float DIZZY_SPIRAL_TURNS = 1.6f;       // 螺旋圈数：改回初版的1.6圈
+static const float DIZZY_SPIRAL_TURNS = 2.0f;       // 螺旋圈数：从1.6增加到2
 static const unsigned long DIZZY_SPIRAL_ROTATE_PERIOD_MS = 4000;  // 整条螺旋顺时针自转一圈所需时间
-static const float DIZZY_NOSE_MOUTH_SCALE = 0.8f;   // 鼻子、嘴巴（含舌头）整体缩小20%
+static const float DIZZY_RIGHT_EYE_PHASE_DEG = 30.0f;  // 右眼在左眼同一相位基础上额外领先的角度
+static const float DIZZY_NOSE_MOUTH_SCALE = 0.8f;   // 鼻子、嘴巴整体缩小20%（这一版嘴巴不画舌头了，但缩放比例还是同一个）
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -551,11 +557,14 @@ class PuppyEye : public Drawable {
     //      整条螺旋叠加一个随时间线性增长的相位（rotationPhase），让它缓慢
     //      自转——屏幕坐标系 y 轴向下，theta 增大在这个坐标系下视觉效果是
     //      顺时针（跟 DOUBT_ROTATE_RAD 那条注释的约定一致），如果实机看到
-    //      转反了，把 rotationPhase 取负号即可。----
+    //      转反了，把 rotationPhase 取负号即可。右眼在左右共用的这个相位上
+    //      再额外加 DIZZY_RIGHT_EYE_PHASE_DEG——转速仍然相同（同一个周期），
+    //      只是右眼永远领先左眼这个固定角度，不会转到完全一致的画面。----
     if (style == 8) {
       const int DIZZY_SPIRAL_STEPS = 28;      // 折线段数，越多越平滑
       int maxR = (int)roundf(DIZZY_SPIRAL_MAX_R * s);
       float rotationPhase = 2.0f * PI * (float)(millis() % DIZZY_SPIRAL_ROTATE_PERIOD_MS) / (float)DIZZY_SPIRAL_ROTATE_PERIOD_MS;
+      if (!isLeft) rotationPhase += DIZZY_RIGHT_EYE_PHASE_DEG * PI / 180.0f;
       int lastX = cx, lastY = cy;
       for (int i = 1; i <= DIZZY_SPIRAL_STEPS; i++) {
         float t = (float)i / DIZZY_SPIRAL_STEPS;
@@ -718,18 +727,19 @@ class PuppyNose : public Drawable {
       spi->drawBezier(cx + p0x, cy + p0y, cx + r1x, cy + r1y, cx + r2x, cy + r2y, col);
     }
 
-    // ---- 兴奋/peekaboo/晕：加一个 U 型舌头，一直跟嘴巴一起显示。宽度正好是
+    // ---- 兴奋/peekaboo：加一个 U 型舌头，一直跟嘴巴一起显示。宽度正好是
     //      嘴巴宽度的一半（tongueHalfW = curveWidth/2，和嘴巴弧线控制点的 x
     //      完全一样）；两端 y 坐标用二次贝塞尔的精确公式算出嘴巴弧线在这个 x
     //      上的真实位置（不是估算值），保证舌头和嘴巴严丝合缝地连在一起、围成
-    //      一个封闭的空间。晕的嘴巴不像 exciteLike 那样整体缩小，舌头的深度
-    //      也不应该跟着 EXCITED_SCALE 缩小，所以缩放系数分开算。----
-    if (exciteLike || isDizzy) {
+    //      一个封闭的空间。晕最初也画过舌头，反馈"去掉舌头"以后改回只有
+    //      exciteLike 才画——嘴巴本身的张开尺寸（含 DIZZY_NOSE_MOUTH_SCALE
+    //      缩放）不受影响，只是不再往嘴巴里加这一笔。----
+    if (exciteLike) {
       int tongueHalfW = curveWidth / 2;
       // 嘴巴弧线是二次贝塞尔 (0,mouthOffY) -> (curveWidth/2, mouthOffY+curveDepth)
       // -> (curveWidth, mouthOffY+2)，在 x=curveWidth/2 处（t=0.5）的精确 y：
       float tongueAttachY = mouthOffY + curveDepth * 0.5f + 0.5f;
-      float tongueScaleMul = exciteLike ? (EXCITED_SCALE * sizeMul) : (isDizzy ? DIZZY_NOSE_MOUTH_SCALE : 1.0f);
+      float tongueScaleMul = EXCITED_SCALE * sizeMul;
       const int tongueDepth = (int)roundf(8 * tongueScaleMul);  // U 形往下鼓出的深度
       for (int t = -1; t <= 1; t++) {
         int t0x, t0y, t1x, t1y, t2x, t2y;
