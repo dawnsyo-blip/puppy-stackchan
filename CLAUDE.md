@@ -736,3 +736,20 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   别想当然地假设这两个状态的退出逻辑是对称的。`transition()` 进入 PRIVACY
   时还会重置 `face_detected`/`face_confirm_count`，避免语音唤醒时复用进
   隐私前残留的"人脸已确认"状态而跳过该做的那次扫描。
+- **`requests.Session()` 默认 `trust_env=True`，会自动用本机的
+  `HTTP_PROXY`/`HTTPS_PROXY` 环境变量**——本机跑着一个本地沙盒代理（也是
+  为什么 `curl` 验证设备接口时永远要加 `--noproxy '*'`，见"编译/烧录/验证
+  流程"一节），host 端如果不显式关掉，`api_get()` 用的那个全局 `_session`
+  也会一样被代理接管。**踩过一次坑，而且很隐蔽**：代理把请求转走以后对
+  `192.168.137.100` 这种局域网地址返回的是 `503` + 空 body，不是连接失败
+  ——`requests.get()` 不会抛异常（503 是"正常"收到的 HTTP 响应，不是网络层
+  错误），`api_get()` 的 `except requests.exceptions.RequestException` 完全
+  抓不到，也没做返回值检查，所以整个引擎（表情、舵机、触摸轮询、摄像头…
+  所有接口）会全程"看起来正常运行、不报任何错"，实际上每一个请求都没有
+  真正到达设备——表现出来就是"舵机怎么摆都不动，好像也听不见说话"，一开始
+  很容易被误判成某个具体功能（比如舵机控制本身）的 bug，实际是最底层的
+  HTTP 请求就没发出去。修法是创建 `_session` 后立刻
+  `_session.trust_env = False`，让它彻底不看代理设置，直连设备。以后
+  host 端新增任何直接发请求给 StackChan 的代码，都必须走这个共享
+  `_session`（或者同样设置 `trust_env=False`），不要图省事直接
+  `requests.get(...)`。
