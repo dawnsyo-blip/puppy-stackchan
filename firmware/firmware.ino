@@ -1497,10 +1497,40 @@ void setup() {
   M5StackChan.Motion.goHome(300);
 }
 
+// 物理电源键长按关机的收尾动画：CoreS3 用的 AXP2101 电源管理芯片被 M5Unified
+// 配置成"长按 1 秒触发内部长按标记 / 长按满 4 秒芯片自己硬件断电"（见
+// setup() 里 Axp2101 那段初始化数组旁的注释 "0x27, 0x00 // PowerKey Hold=1sec
+// / PowerOff=4sec"）。4 秒这个硬件断电阈值完全没动，还是原来的安全兜底——
+// 这里只是蹭了芯片提前在 1 秒时给出的"长按"信号（M5.update() 会把它翻译成
+// M5.BtnPWR.wasHold()，读一次就自动清零，天然是边沿触发，不需要自己再管
+// 防抖/去重），在真正断电前的 ~3 秒窗口里抢先播一遍"闭眼→关屏幕"，跟 host
+// 端 Ctrl+C 退出时的 play_shutdown_animation() 是同一个视觉设计，但这里是
+// 纯固件实现——用户是直接按物理电源键关机，这时候电脑上的 host 脚本未必在
+// 跑，不能依赖它发 HTTP 指令。delay(1000) 会短暂卡住 server.handleClient()，
+// 但这时候设备最多几秒后就要断电，没有必要再处理新请求，avatar 的渲染任务
+// 在独立的 FreeRTOS 任务里跑，不受这里阻塞影响，闭眼表情照常能画出来。
+void playShutdownAnimation() {
+  avatar.setExpression(Expression::Neutral);
+  baseExpr = Expression::Neutral;
+  g_customExpr = "privacy";
+  currentExprName = "privacy";
+  touchExprActive = false;
+  g_currentMoveIsNoisy = true;
+  M5StackChan.Motion.goHome();
+  g_ledMode = LedMode::OFF;
+  M5StackChan.showRgbColor(0, 0, 0);
+  delay(1000);
+  M5StackChan.Display().sleep();
+}
+
 void loop() {
   M5StackChan.update();
   server.handleClient();
   updateLed();
+
+  if (M5.BtnPWR.wasHold()) {
+    playShutdownAnimation();
+  }
 
   // 每帧刷新真实 yaw，供 PuppyFace.h 的好奇表情镜像判断用（见声明处注释）。
   g_currentYaw = (int)M5StackChan.Motion.getCurrentAngles().x;
