@@ -145,12 +145,34 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
 ## 语音唤醒 / 流式监听（MicStream）
 `host/puppy_engine_v4.py` 的语音唤醒不再靠轮询 `/volume` + 触发后另开
 `/record`（两者都是一次性、有限时长的调用，大部分时间设备根本没在"听"）。
-现在是 StackChan 主动通过 `/stream?port=N` 连到 host 常驻监听的 TCP 端口
-持续推 PCM，host 端的 `MicStream` 类维护滚动缓冲区 + 简单 VAD（按
-`STREAM_CHUNK_SECONDS` 分段算 RMS，超过 `STREAM_RMS_THRESHOLD` 记为说话，
-连续 `STREAM_SILENCE_SECONDS` 低于阈值判定说完），说完那一刻直接把这段语音
-从缓冲区切出来，不需要再另外录一次——`check_voice_wake()` 因此变成纯内存
-队列查询，不发 HTTP 请求，可以每个 tick 都调用。
+方案演进到现在一共有三版：A（`/volume`轮询+`/record`）→ B（StackChan 主动
+通过 `/stream?port=N` 连到 host 常驻监听的 TCP 端口持续推 PCM）→ **C（当前，
+改用电脑本地接的无线麦克风）**。host 端的 `MicStream` 类维护滚动缓冲区 +
+简单 VAD（按 `STREAM_CHUNK_SECONDS` 分段算 RMS，超过 `STREAM_RMS_THRESHOLD`
+记为说话，连续 `STREAM_SILENCE_SECONDS` 低于阈值判定说完），说完那一刻直接
+把这段语音从缓冲区切出来，不需要再另外录一次——`check_voice_wake()` 因此
+变成纯内存队列查询，不发 HTTP 请求，可以每个 tick 都调用；这套 VAD/缓冲逻辑
+在方案 B→C 切换时完全没动，只是喂给它的音频来源换了。
+- **方案 C：电脑本地无线麦克风**（`sounddevice` 直接采集，`MicStream` 类
+  头部注释）——动机是环境音、尤其是 StackChan 自己转动舵机的机械噪音总是
+  被机身麦克风收进去干扰识别；无线麦克风别在人身上，离嘴近、离舵机远，
+  信噪比好得多。`find_wireless_mic_device()` 按 `WIRELESS_MIC_NAME_HINT`
+  子串在 **Windows WASAPI** host API 下找设备（同一个物理设备在 MME/
+  DirectSound/WASAPI/WDM-KS 下各出现一次，WASAPI 延迟最低）。**踩过一个坑**：
+  WASAPI 共享模式不接受用任意采样率打开设备（`sd.InputStream(samplerate=
+  16000, ...)` 直接报 `Invalid sample rate`），必须先查
+  `dev["default_samplerate"]` 拿到设备真实原生采样率（这个无线麦克风接收器
+  实测是 **48kHz 立体声**，不是随便猜的 44100 或 16000），照原生格式打开，
+  再在回调里用 `scipy.signal.resample_poly`（按 `math.gcd` 现算 up/down
+  比例，不要硬编码）降混单声道 + 重采样到 16kHz。阈值也要重新校准——
+  `STREAM_RMS_THRESHOLD` 是给机身麦克风（固件端 `mic_cfg.magnification=5`
+  放大过）校准的 600，换了麦克风增益特性完全不同（实测无线麦克风安静基线
+  只有 0~25，说话能到 90~190），**换音频源必须重新测、不能沿用旧数值**。
+  StackChan 端 `/stream` 相关的固件代码（`streamTaskFn()`、`g_i2sMutex`等，
+  见下面两条）原样保留没删，host 只是不再调用 `/stream?port=N` 告诉它推流
+  ——以后想切回机身麦克风，恢复调用即可，不需要改固件。**已知局限**：只有
+  戴/拿着无线麦克风的那个人能被听到（不像机身麦克风谁在附近说话都能收到）；
+  设备中途断开没有自动重连，需要重启进程。
 - **ESP32 的 `WebServer` 是单线程的**（`loop()` 里同步调用
   `server.handleClient()`）：任何 handler 只要阻塞得久，就会让设备在那段
   时间内完全无法响应其它请求（表情、舵机、触摸、摄像头全部卡住）。

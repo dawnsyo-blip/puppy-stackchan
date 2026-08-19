@@ -21,8 +21,11 @@ StackChan 小狗行为引擎 v4
 
 依赖（此项目用的是 anaconda "stackchan" 环境，基础环境没装这些）：
     conda activate stackchan
-    pip install funasr torch torchaudio edge-tts pydub
+    pip install funasr torch torchaudio edge-tts pydub sounddevice scipy
 ffmpeg 需要在系统 PATH 里（pydub 转 WAV 要用）。
+语音输入现在走电脑本地无线麦克风（sounddevice 采集，见 MicStream 类），不
+再依赖 StackChan 机身麦克风——Windows 需要能看到一个名字包含
+WIRELESS_MIC_NAME_HINT 的输入设备（无线麦克风接收器），否则语音唤醒不可用。
 SenseVoiceSmall / fsmn-vad 模型首次运行会自动从 ModelScope 下载并缓存，
 如果下载失败/很慢，可以先设 HF_ENDPOINT=https://hf-mirror.com 再运行。
 
@@ -45,6 +48,7 @@ import socket
 import queue
 import wave
 import io
+import math
 from pathlib import Path
 from enum import Enum
 from urllib.parse import quote
@@ -54,6 +58,8 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python import BaseOptions
+import sounddevice as sd
+from scipy.signal import resample_poly
 
 
 # ╔══════════════════════════════════════════════╗
@@ -293,16 +299,29 @@ GAME_LOCATION_DESC_PROMPT = (
 # 不会重蹈那次覆辙。
 TOUCH_POLL_SEC = 0.2
 
-# --- 语音唤醒（方案B：TCP 流式监听，取代方案A的 /volume 轮询 + /record
-#     间歇录音）---
-# 旧方案的根本问题：/volume、/record 都是"一次性、有限时长"的调用，
-# /volume 每 VOLUME_POLL_SEC 秒才采样一次，中间大段时间设备根本没在听；
-# 触发之后还要另开一次 /record 才能录到真正的问题，如果用户说话节奏跟这套
-# "听一下→（可能）转头→再录音"的节奏对不上，开头就被切掉、甚至整段错过。
-# 流式方案让 StackChan 主动推流、host 常驻监听，音频从来不会"没在录"，
-# 触发条件（音量超过阈值）判断到的那一刻，实际说的内容已经在滚动缓冲区里
-# 了，不需要再额外录一次。
-STREAM_PORT = 8081                 # StackChan 的 /stream?port=N 主动连过来的端口
+# --- 语音唤醒 ---
+# 方案演进：最早是 /volume 轮询 + /record 间歇录音（方案A），根本问题是
+# 两者都是"一次性、有限时长"的调用，/volume 每 VOLUME_POLL_SEC 秒才采样
+# 一次，中间大段时间设备根本没在听，触发之后还要另开一次 /record 才能录到
+# 真正的内容，说话节奏对不上就会被切掉、甚至整段错过。方案B改成 StackChan
+# 主动推流（/stream?port=N）、host 常驻监听，音频从来不会"没在录"。
+#
+# 现在是方案C：改用电脑本地接的无线麦克风（sounddevice 直接从系统音频设备
+# 采集），不再依赖 StackChan 机身麦克风经 WiFi 转发。动机是环境音/机身舵机
+# 噪音总是被机身麦克风收进去、干扰语音识别；无线麦克风别在人身上、离嘴近、
+# 离舵机远，信噪比好得多。StackChan 端的 /stream 相关代码原样保留（没有
+# 删），只是不再被这里调用——如果以后想切回机身麦克风，恢复调用即可，不需要
+# 改固件。方案B的滚动缓冲区+RMS阈值VAD这套逻辑完全复用，只是喂给它的音频
+# 来源换了（见 MicStream._sd_callback()），"判断是不是真的有人在说话"的
+# 判定方式不变。
+WIRELESS_MIC_NAME_HINT = "Wireless Mic Rx"  # sounddevice 设备名子串匹配，
+                                    # 优先在 WASAPI host API 下找（延迟低、
+                                    # Windows 音频引擎共享模式管理，比 MME/
+                                    # DirectSound 稳定）；实测这个无线麦克风
+                                    # 接收器在 WASAPI 下的原生格式是 48kHz
+                                    # 立体声，不是设备名旁边显示的那个默认值，
+                                    # 所以代码里按查到的 default_samplerate
+                                    # 现算重采样比例，不要硬编码 44100/48000。
 STREAM_BUFFER_SECONDS = 8.0        # 滚动缓冲区保留的音频时长——够放下一整句话，
                                     # 又不会无限占内存（16kHz/16bit/单声道下
                                     # 8 秒约 256KB）
@@ -311,24 +330,14 @@ STREAM_SILENCE_SECONDS = 1.0       # 连续这么久 RMS 都低于阈值，判�
 STREAM_PREROLL_SECONDS = 0.4       # 判定"开始说话"的那一刻往前多留一点余量
                                     # （因为是按 0.5s 一段判定的，真正开口的
                                     # 时刻很可能比"这一段整体超过阈值"稍早）
-STREAM_RMS_THRESHOLD = 600         # 语音触发阈值。原始校准值是 450（安静环境
-                                    # 基线约 280-367，说话时能冲到 778 左右），
-                                    # 但实测环境噪音会偶尔冲上 450 触发一次
-                                    # "假语音"——check_voice_wake() 一旦判定
-                                    # 有语音就同步跑完整个对话链路（STT+LLM+
-                                    # TTS+播放，好几秒起步），这几秒里 tick()
-                                    # 完全被占住，连带把当时可能正在进行的
-                                    # 长按头顶（进/出隐私）也读不到了。抬高到
-                                    # 600（离说话时的 778 还有富余，不会明显
-                                    # 影响拾音灵敏度），给环境噪音多留一点
-                                    # 缓冲区；如果之后实测还是有环境噪音能冲
-                                    # 上 600、或者反而说话变得不够灵敏，从这个
-                                    # 值继续调——固件端的物理麦克风增益
-                                    # （setup() 里的 mic_cfg.magnification=5）
-                                    # 是专门为了让小声说话也能被听清才调高的，
-                                    # 不要为了压环境噪音去调低它，两个问题分开
-                                    # 处理：物理增益负责"听得到"，这个阈值负责
-                                    # "判断是不是真的有人在说话"。
+STREAM_RMS_THRESHOLD = 60           # 换成电脑无线麦克风后重新校准的初始值
+                                    # （原来给机身麦克风用的 600 完全不适用，
+                                    # 无线麦克风灵敏度高得多）。实测安静环境
+                                    # 基线在 0~25 之间，说话时能冲到 90~190，
+                                    # 60 是留在两者中间偏说话那侧的起始值，
+                                    # 后续如果误触发或不够灵敏，从这个值继续
+                                    # 调——方法不变：安静基线 vs 说话时的 RMS
+                                    # 差异，阈值取中间偏说话那侧留缓冲。
 # --- 完整对话链路 ---
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
 BUTTON_PRESS_MS = 200            # 每个关键词播放前，按钮"按下"状态维持的时长
@@ -1078,32 +1087,54 @@ def pcm_to_wav_bytes(pcm: bytes, sample_rate=16000, channels=1, sample_width=2) 
     return buf.getvalue()
 
 
+def find_wireless_mic_device():
+    """在 sounddevice 能看到的输入设备里，按 WIRELESS_MIC_NAME_HINT 子串找无线
+    麦克风接收器，优先找 Windows WASAPI host API 下的那个实例（同一个物理设备
+    在 MME/DirectSound/WASAPI/WDM-KS 下都会各出现一次，WASAPI 延迟最低、由
+    Windows 音频引擎在共享模式下管理，重采样也更好支持）。找不到返回 None。"""
+    wasapi_idx = None
+    for i, api in enumerate(sd.query_hostapis()):
+        if api["name"] == "Windows WASAPI":
+            wasapi_idx = i
+            break
+    if wasapi_idx is None:
+        return None
+    for i, dev in enumerate(sd.query_devices()):
+        if (dev["hostapi"] == wasapi_idx and dev["max_input_channels"] > 0
+                and WIRELESS_MIC_NAME_HINT in dev["name"]):
+            return i
+    return None
+
+
 class MicStream:
-    """StackChan 通过 /stream?port=N 主动连过来推流 PCM 音频（16bit/16kHz/
-    单声道），这个类在 host 端常驻监听、接收、缓冲、做简单的语音活动检测：
+    """电脑本地无线麦克风常驻采集 + 缓冲 + 简单语音活动检测（VAD）。
 
-    - 一个后台线程负责 accept：绑定端口监听，StackChan 连上来就持续收数据；
-      连接断开（无论是对端主动关闭、网络问题，还是固件那边 /play 期间暂停
-      推流导致的重连）就回到 accept() 等下一次连接——全程不需要 host 主动
-      发起重连，是 StackChan 那边主动连过来的，host 只要一直守着端口就行。
-    - 收到的数据一份写入滚动缓冲区（只保留最近 STREAM_BUFFER_SECONDS 秒），
-      另一份喂给 VAD：每凑够 STREAM_CHUNK_SECONDS 秒新数据算一次 RMS，超过
-      阈值记为"正在说话"，连续 STREAM_SILENCE_SECONDS 秒低于阈值判定"说完
-      了"——这时直接从滚动缓冲区里把这段语音（含一点前置余量）切出来放进
-      一个小队列，主循环用 take_utterance() 非阻塞取走，不需要再另外调用
-      /record 补录一次，因为要说的话已经在缓冲区里了。
+    早期版本是 StackChan 机身麦克风通过 /stream?port=N 主动连过来推流 PCM，
+    这个类在 host 端常驻监听 TCP 端口接收；现在换成直接用 sounddevice 打开
+    电脑上的无线麦克风接收设备，音频源变了，但下面这套"滚动缓冲区 + 按
+    STREAM_CHUNK_SECONDS 分段算 RMS 判定说话/说完"的逻辑完全没变——`_feed()`/
+    `_process_chunk()`/`_emit_utterance()` 只认裸 PCM 字节，不关心这些字节
+    是从 TCP socket 收的还是从本地音频设备回调收的。
 
-    音频的读写全部发生在同一个后台线程里（accept 线程本身），所以内部状态
-    不需要加锁；跟主线程之间唯一的交接点是线程安全的 _utterance_queue。
+    - `_sd_callback()` 是 sounddevice 在专门的音频线程上周期性调用的回调：
+      拿到的是设备原生采样率/声道数的音频（这个无线麦克风接收器在 WASAPI
+      下实测是 48kHz 立体声，不是常见的 16kHz 单声道，Windows 共享模式不
+      接受直接以任意采样率打开），先降混成单声道，再用 scipy 的
+      resample_poly 重采样到 self.sample_rate（16kHz），最后喂进 _feed()。
+    - 跟旧版一样，音频的写入全部发生在同一个线程里（sounddevice 的音频
+      回调线程），所以内部状态不需要加锁；跟主线程之间唯一的交接点是线程
+      安全的 _utterance_queue。
+    - 设备断开/找不到的情况目前没有自动重连——如果无线麦克风接收器中途被
+      拔掉，需要重启这个程序，跟旧版"断线自动重连"比是一个已知的能力
+      倒退，以后有需要再补。
     """
 
-    def __init__(self, port=STREAM_PORT, sample_rate=16000,
+    def __init__(self, sample_rate=16000,
                  buffer_seconds=STREAM_BUFFER_SECONDS,
                  chunk_seconds=STREAM_CHUNK_SECONDS,
                  silence_seconds=STREAM_SILENCE_SECONDS,
                  preroll_seconds=STREAM_PREROLL_SECONDS,
                  rms_threshold=STREAM_RMS_THRESHOLD):
-        self.port = port
         self.sample_rate = sample_rate
         self._bytes_per_sample = 2
         self._max_buffer_bytes = int(buffer_seconds * sample_rate * self._bytes_per_sample)
@@ -1122,25 +1153,54 @@ class MicStream:
 
         self._utterance_queue = queue.Queue()
         self._running = False
-        self._server_sock = None
-        self._accept_thread = None
+        self._stream = None        # sounddevice.InputStream 实例
+        self._resample_up = 1
+        self._resample_down = 1
         self.connected = False     # 仅供主循环/调试查看，不用于同步
 
     def start(self):
         if self._running:
             return
+        device_idx = find_wireless_mic_device()
+        if device_idx is None:
+            print(f"[本地麦克风] 没找到名字包含 {WIRELESS_MIC_NAME_HINT!r} 的 "
+                  "WASAPI 输入设备，语音唤醒不可用（检查无线麦克风接收器是否"
+                  "插好、Windows 是否识别到）")
+            return
+        dev = sd.query_devices()[device_idx]
+        native_sr = int(round(dev["default_samplerate"]))
+        g = math.gcd(native_sr, self.sample_rate)
+        self._resample_up = self.sample_rate // g
+        self._resample_down = native_sr // g
+        channels = dev["max_input_channels"]
+        # 100ms 一个回调块：够大，让 resample_poly 每次有足够样本做滤波；
+        # 也够小，不会给 VAD/字幕引入明显的额外延迟。
+        blocksize = max(1, int(native_sr * 0.1))
+        try:
+            self._stream = sd.InputStream(
+                device=device_idx, samplerate=native_sr, channels=channels,
+                dtype="int16", blocksize=blocksize, callback=self._sd_callback)
+            self._stream.start()
+        except Exception as e:
+            print(f"[本地麦克风] 打开输入流失败: {e}")
+            self._stream = None
+            return
         self._running = True
-        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
-        self._accept_thread.start()
+        self.connected = True
+        print(f"[本地麦克风] 已打开 {dev['name']!r}（原生 {native_sr}Hz/"
+              f"{channels}ch，重采样到 {self.sample_rate}Hz/单声道）")
 
     def stop(self):
-        """程序退出时调用：停掉 accept 循环、关掉监听 socket 和当前连接。"""
+        """程序退出时调用：停掉音频流。"""
         self._running = False
-        if self._server_sock:
+        self.connected = False
+        if self._stream is not None:
             try:
-                self._server_sock.close()
-            except OSError:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
                 pass
+            self._stream = None
 
     def take_utterance(self):
         """非阻塞取出最近一段捕捉到的完整语音（bytes，裸 PCM）；没有就绪的
@@ -1159,65 +1219,26 @@ class MicStream:
         说话"这个状态，就把从开始说话到现在收到的全部音频原样吐出去（还在
         继续增长，可以反复调用）；不在说话状态时返回 None。给增量字幕用。
 
-        这个方法从主线程（PuppyEngine 的后台增量识别线程）调用，跟 accept
-        线程之间不像 take_utterance() 靠 _utterance_queue 那样有专门的线程安全
-        交接。对一段仅用于展示的字幕来说这个折衷可以接受：最坏情况是读到的
-        切片跟 _speech_active 标志之间差了一两帧（比如刚好在这一刻判定说完
-        了），不会崩溃或者数据错乱，下一次调用就会用最新状态纠正过来。"""
+        这个方法从主线程（PuppyEngine 的后台增量识别线程）调用，跟 sounddevice
+        的音频回调线程之间不像 take_utterance() 靠 _utterance_queue 那样有
+        专门的线程安全交接。对一段仅用于展示的字幕来说这个折衷可以接受：最坏
+        情况是读到的切片跟 _speech_active 标志之间差了一两帧（比如刚好在这
+        一刻判定说完了），不会崩溃或者数据错乱，下一次调用就会用最新状态
+        纠正过来。"""
         if not self._speech_active:
             return None
         base = self._total - len(self._buffer)
         lo = max(0, self._speech_start_abs - base)
         return bytes(self._buffer[lo:])
 
-    # ---------- 内部：接收 + 缓冲 + VAD ----------
+    # ---------- 内部：采集 + 缓冲 + VAD ----------
 
-    def _accept_loop(self):
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(("0.0.0.0", self.port))
-        srv.listen(1)
-        srv.settimeout(1.0)
-        self._server_sock = srv
-        print(f"[流式监听] TCP 服务器已启动 0.0.0.0:{self.port}，等待 StackChan 连接...")
-
-        while self._running:
-            try:
-                conn, addr = srv.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                break  # stop() 关掉了监听 socket
-
-            print(f"[流式监听] StackChan 已连接 {addr}")
-            self.connected = True
-            # 新连接开始，丢弃上一次连接里可能还没判定完的"正在说话"状态，
-            # 避免跨连接（比如中间断了好几分钟）把两段不相干的声音拼在一起。
-            self._speech_active = False
-            self._quiet_chunks = 0
-            self._recv_loop(conn)
-            self.connected = False
-            print("[流式监听] 连接断开，等待重连...")
-
-        srv.close()
-
-    def _recv_loop(self, conn):
-        conn.settimeout(5.0)
-        try:
-            while self._running:
-                data = conn.recv(4096)
-                if not data:
-                    break
-                self._feed(data)
-        except socket.timeout:
-            print("[流式监听] 5 秒没收到数据，断开重连")
-        except OSError as e:
-            print(f"[流式监听] 接收出错: {e}")
-        finally:
-            try:
-                conn.close()
-            except OSError:
-                pass
+    def _sd_callback(self, indata, frame_count, time_info, status):
+        if status:
+            print(f"[本地麦克风] sounddevice 状态告警: {status}")
+        mono = indata.mean(axis=1)
+        resampled = resample_poly(mono, self._resample_up, self._resample_down)
+        self._feed(resampled.astype(np.int16).tobytes())
 
     def _feed(self, data: bytes):
         self._buffer += data
@@ -1265,7 +1286,7 @@ class MicStream:
         segment = bytes(self._buffer[lo:hi])
         dur = len(segment) / self._bytes_per_sample / self.sample_rate
         rms = _pcm_rms(segment)
-        print(f"[流式监听] 捕捉到一段语音，时长 {dur:.2f}s，RMS={rms:.0f}")
+        print(f"[本地麦克风] 捕捉到一段语音，时长 {dur:.2f}s，RMS={rms:.0f}")
         self._utterance_queue.put(segment)
 
 
@@ -1365,13 +1386,10 @@ class PuppyEngine:
 
         ensure_audio_server()
 
-        # 语音流式监听：先在 host 端把 TCP 监听起来，再告诉 StackChan 开始
-        # 推流过来——顺序不能反，不然 StackChan 连过来的时候 host 这边端口
-        # 还没起来，第一次连接会失败（好在后台任务本身会自动重试，不是致命
-        # 问题，但先起监听更干净）。
+        # 语音流式监听：现在音频源是电脑本地的无线麦克风（见 MicStream 类
+        # 头部注释），不再需要告诉 StackChan 开始推流。
         self.mic_stream = MicStream()
         self.mic_stream.start()
-        api_get(f"/stream?port={STREAM_PORT}")
 
         # 增量字幕：用户还在说话期间，周期性地把目前录到的内容整段重新识别
         # 一次，见 _partial_transcribe_loop()。独立线程运行，不占用主 tick()
@@ -2690,12 +2708,10 @@ class PuppyEngine:
             play_idle_animation()
         finally:
             # 不管是正常 Ctrl+C 退出还是主循环里跑出了没接住的异常，都要把
-            # TCP 监听关掉、告诉 StackChan 别再往这边推流了——不然进程都退出
-            # 了，固件那边还在无意义地反复尝试重连一个没人听的端口。
+            # 本地麦克风的音频流关掉。
             print("[引擎] 清理流式监听...")
             self._running = False
             self.mic_stream.stop()
-            api_get("/stream?stop=1", timeout=3)
             print("[引擎] 已退出。")
 
 
