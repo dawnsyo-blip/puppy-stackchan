@@ -389,14 +389,21 @@ bool touchExprActive = false;
 unsigned long lastValidTap = 0;
 const unsigned long DOUBLE_TAP_WINDOW = 800;
 
-// Shake detection (BMI270 accelerometer)
+// Shake/pickup detection (BMI270 accelerometer)——见 CLAUDE.md "晕(dizzy)表情
+// / 摇晃检测"一节。这里只负责算出"当前是否正被明显晃动/拿起"这个连续布尔量
+// （g_shaking，通过 /status 暴露给 host），不在固件里直接触发任何表情/动作
+// 反应——旧版本摇够几次就自己在 loop() 里改表情、变灯、转舵机，会跟 host
+// 通过 /face 控制的表情打架，已经删掉，改成纯粹的"传感器状态上报"。
 bool imuReady = false;
 float prevAccelMag = 1.0f;
-int shakeCount = 0;
 unsigned long lastShakeCheck = 0;
-unsigned long lastShakeReaction = 0;
-const unsigned long SHAKE_COOLDOWN = 5000;
-const float SHAKE_THRESHOLD = 0.8f;
+const float SHAKE_THRESHOLD = 0.8f;      // 单次采样间隔内加速度模长变化超过这个值算一次"冲击"
+const unsigned long SHAKE_HOLD_MS = 600; // 最近一次冲击之后，还要保持"正在晃"这个状态多久——
+                                          // 摇晃动作本身节奏有间隙（比如来回摆动的两个波峰之间），
+                                          // 不加这个缓冲会导致 g_shaking 在真实的一次连续摇晃期间
+                                          // 反复 true/false 跳变
+bool g_shaking = false;
+unsigned long g_lastShakeImpulseMs = 0;
 
 // ============ Audio ============
 
@@ -699,7 +706,7 @@ void handleFace() {
   else if (expr == "doubt") { avatar.setExpression(Expression::Doubt); baseExpr = Expression::Doubt; }
   else if (expr == "love" || expr == "eyeroll" ||
            expr == "thinking" || expr == "excited" || expr == "privacy" ||
-           expr == "grieved" || expr == "peekaboo") {
+           expr == "grieved" || expr == "peekaboo" || expr == "dizzy") {
     avatar.setExpression(Expression::Neutral);
     baseExpr = Expression::Neutral;
     g_customExpr = expr;
@@ -917,7 +924,8 @@ void handleStatus() {
   snprintf(buf, sizeof(buf),
     "{\"battery_v\":%.2f,\"battery_ma\":%.2f,\"yaw\":%d,\"pitch\":%d,"
     "\"camera\":%s,\"camera_err\":\"%s\",\"mic_streaming\":%s,\"playing\":%s,"
-    "\"expr\":\"%s\",\"uptime_s\":%lu,\"ip\":\"%s\",\"rssi\":%d}",
+    "\"expr\":\"%s\",\"uptime_s\":%lu,\"ip\":\"%s\",\"rssi\":%d,"
+    "\"imu\":%s,\"shaking\":%s}",
     voltage, current, (int)angles.x, (int)angles.y,
     cameraReady ? "true" : "false",
     cameraError.c_str(),
@@ -926,7 +934,9 @@ void handleStatus() {
     currentExprName.c_str(),
     (unsigned long)(millis() / 1000),
     WiFi.localIP().toString().c_str(),
-    (int)WiFi.RSSI());
+    (int)WiFi.RSSI(),
+    imuReady ? "true" : "false",
+    g_shaking ? "true" : "false");
   server.send(200, "application/json", buf);
 }
 
@@ -1568,7 +1578,7 @@ void loop() {
 
   if (millis() < 5000) { delay(10); return; }
 
-  // Shake detection
+  // Shake/pickup detection：只算连续状态，不在这里直接触发反应，见声明处注释。
   if (imuReady && millis() - lastShakeCheck > 50) {
     lastShakeCheck = millis();
     float ax = 0, ay = 0, az = 0;
@@ -1578,30 +1588,9 @@ void loop() {
     prevAccelMag = mag;
 
     if (delta > SHAKE_THRESHOLD) {
-      shakeCount++;
-    } else if (shakeCount > 0) {
-      shakeCount--;
+      g_lastShakeImpulseMs = millis();
     }
-
-    if (shakeCount >= 3 && millis() - lastShakeReaction > SHAKE_COOLDOWN) {
-      lastShakeReaction = millis();
-      shakeCount = 0;
-      avatar.setExpression(Expression::Doubt);
-      touchExprActive = true;
-      touchExprTime = millis();
-      M5StackChan.showRgbColor(255, 255, 0);
-      M5StackChan.Motion.move(400, 450, 500);
-      delay(200);
-      M5StackChan.showRgbColor(0, 255, 255);
-      M5StackChan.Motion.move(-400, 450, 500);
-      delay(200);
-      M5StackChan.showRgbColor(255, 0, 255);
-      M5StackChan.Motion.move(200, 450, 500);
-      delay(200);
-      M5StackChan.showRgbColor(0, 0, 0);
-      M5StackChan.Motion.goHome(300);
-      notifyCallback("shake", TOUCH_PORT);
-    }
+    g_shaking = (millis() - g_lastShakeImpulseMs) < SHAKE_HOLD_MS;
   }
 
   // Touch reactions

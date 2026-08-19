@@ -15,9 +15,9 @@
  *   custom "excited"   → 兴奋（'><' 眼 + 舌头的静态表情，整体按 EXCITED_SCALE 缩小，
  *                         2s 后开始爪印动画，见下方 PuppyEar 顶部注释）
  *   custom "privacy"   → 隐私（闭眼、耳朵变形）
- *   custom "dizzy"     → 晕（设计中：漩涡眼 + 张嘴吐舌 + 双耳同步朝同一方向
- *                         轻晃，尚未接入 handleFace()/host，只在 expr_preview
- *                         里能看到）
+ *   custom "dizzy"     → 晕（漩涡眼，双眼同速自转、右眼领先左眼45°相位 +
+ *                         张嘴（不吐舌）+ 双耳同步朝同一方向轻晃；由 BMI270
+ *                         摇晃/拿起检测触发，见 puppy_engine_v4.py）
  *
  * 表情切换时，尺寸类参数（耳朵长宽、鼻子/嘴巴大小、旋转角度）会用
  * FloatTransition 在 500ms 内线性插值过渡；开心/好奇/思考时耳朵左右

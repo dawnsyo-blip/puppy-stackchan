@@ -183,6 +183,9 @@ SORRY_LED_PERIOD_MS = 1500            # 抱歉"缓慢闪烁"
 EXCITED_LED_PERIOD_MS = 300           # 兴奋"彩虹快闪"（具体颜色表内置在固件里）
 SLEEPY_LED_FADE_MS = 5000             # 困倦"渐暗至熄灭"
 PRIVACY_LED_FADE_MS = 2000            # 隐私"渐暗至熄灭"
+DIZZY_LED_RGB = (150, 120, 255)       # 晕：淡紫色呼吸灯，没有实机验证过，先跟其它
+                                       # 状态的颜色区分开
+DIZZY_LED_BREATHE_PERIOD_MS = 1200    # 晕呼吸灯周期
 
 # --- 抱歉(sorry)动画参数（数值参考表情映射v7.xlsx）---
 SORRY_PITCH = 200                # 微低头
@@ -456,7 +459,7 @@ AUDIO_DIR.mkdir(exist_ok=True)
 
 # --- 表情映射：key 是引擎内部状态名，value 是固件 /face?expr= 实际支持的名字
 #     （neutral/happy/sad/angry/sleepy/doubt/love/eyeroll/thinking/excited/
-#      privacy/curious/sorry，见 firmware.ino 的 handleFace()）---
+#      privacy/curious/sorry/dizzy，见 firmware.ino 的 handleFace()）---
 EXPRESSION_MAP = {
     "idle":     "neutral",
     "happy":    "happy",
@@ -468,6 +471,7 @@ EXPRESSION_MAP = {
     "privacy":  "privacy",
     "grieved":  "grieved",
     "peekaboo": "peekaboo",
+    "dizzy":    "dizzy",
 }
 
 
@@ -484,6 +488,7 @@ class State(Enum):
     CURIOUS  = "好奇"
     THINKING = "思考"
     SORRY    = "抱歉"
+    DIZZY    = "晕"
     GAME_HIDE_SEEK = "捉迷藏"
 
 
@@ -826,6 +831,13 @@ def play_grieved_reaction():
     set_expression("grieved")
     move_servo(pitch=SORRY_PITCH, yaw=SORRY_YAW, speed=SORRY_SPEED, mute=True)
     set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
+
+def play_dizzy_animation():
+    """被摇晃/拿起触发。故意不移动舵机——这个状态本来就是设备正在被外力
+    晃动/托举的时候触发的，这时候主动转头只会跟外力对抗，徒增舵机负担，
+    视觉上也会被摇晃动作本身淹没，没有实际意义。"""
+    set_expression("dizzy")
+    set_led_mode("breathe", *DIZZY_LED_RGB, period_ms=DIZZY_LED_BREATHE_PERIOD_MS)
 
 def play_nod_animation():
     """点头，模拟 qa_simple 的"是"。"""
@@ -1544,6 +1556,7 @@ class PuppyEngine:
         elif new_state == State.CURIOUS:  play_curious_animation()
         elif new_state == State.THINKING: play_thinking_animation()
         elif new_state == State.SORRY:    play_sorry_animation()
+        elif new_state == State.DIZZY:    play_dizzy_animation()
 
     def _settle_privacy_mic(self):
         """转进隐私姿势要转动舵机，转动本身的机械噪音很容易被 MicStream 的
@@ -1638,6 +1651,8 @@ class PuppyEngine:
             set_led_mode("breathe", *THINKING_GREEN_RGB, period_ms=CURIOUS_LED_BREATHE_PERIOD_MS)
         elif self.state == State.SORRY:
             set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
+        elif self.state == State.DIZZY:
+            set_led_mode("breathe", *DIZZY_LED_RGB, period_ms=DIZZY_LED_BREATHE_PERIOD_MS)
         else:  # IDLE
             set_led(off=True)
 
@@ -2027,6 +2042,18 @@ class PuppyEngine:
             self.enter_happy()
             self.run_conversation_turn(segment)
         return True
+
+    def check_shaking(self):
+        """轮询 /status 的 imu/shaking 字段，判断当前是否正被明显晃动/拿起。
+        判断本身在固件端连续完成（见 firmware.ino 里 g_shaking 声明处的
+        注释），host 端只读结果，不自己拿加速度原始数据重新判断——跟"触摸
+        事件：固件是权威真相"是同一个模式。IMU 没初始化成功（status 里
+        imu=false）或者这次请求本身失败，都当作"没有在晃"处理，不能因为
+        这个锦上添花的功能把整个状态机卡住。"""
+        status = get_status()
+        if status is None or not status.get("imu", False):
+            return False
+        return status.get("shaking", False)
 
     def run_conversation_turn(self, pcm_bytes):
         """run_conversation_turn() 内部涉及好几层网络调用（DeepSeek、edge-tts、
@@ -2738,6 +2765,19 @@ class PuppyEngine:
         if touch is not None and self.handle_touch_trigger(touch):
             return
 
+        # --- 摇晃/拿起（BMI270，优先级仅次于触摸）---
+        # is_shaking 这个 tick 只查一次、存下来，进入分支和下面"晕"状态内的
+        # 退出判断共用同一次结果，不用重复请求 /status。不管当前处于 tick()
+        # 能观察到的哪个状态（常态/开心/兴奋/困倦/隐私/抱歉）都可以被打断，
+        # 包括隐私——物理摇晃/拿起设备是很明确的"人在跟我互动"信号，比隐私
+        # 状态下偶尔混进来的杂散摄像头帧可信得多。对话/捉迷藏这类同步阻塞的
+        # 流程正在进行时 tick() 本身没有机会跑到这里，不需要额外排除。
+        is_shaking = self.check_shaking()
+        if is_shaking and self.state != State.DIZZY:
+            print("[触发] 检测到摇晃/拿起 → 晕")
+            self.transition(State.DIZZY)
+            return
+
         # --- 语音唤醒（好奇/思考期间已经在处理语音了，不重复检查；头顶正被
         #     按住时也跳过——check_voice_wake() 一旦捕捉到语音段就会同步跑完
         #     整个对话链路，好几秒起步，这几秒里 tick() 完全被占住，正在
@@ -2807,6 +2847,17 @@ class PuppyEngine:
             # 单纯看到人脸不会自动跳出，所以这里只更新追踪状态，不触发转移。
             if do_face_check:
                 self.check_face()
+
+        elif self.state == State.DIZZY:
+            # 不轮询摄像头——设备这时候正被摇晃/托举，拍到的画面大概率是
+            # 模糊的，没必要浪费一次 /camera 请求。is_shaking 是这个 tick
+            # 顶部已经查过的结果，摇晃/拿起的信号一旦消失就转"兴奋"（用户
+            # 要求的收尾顺序：晕 → 兴奋 → 开心+人脸追踪，兴奋结束后走
+            # tick() 里 EXCITED 分支已有的逻辑，人脸还在场就 enter_happy()，
+            # 不在场就回常态）。
+            if not is_shaking:
+                print("[触发] 摇晃/拿起结束 → 兴奋")
+                self.transition(State.EXCITED)
 
         # CURIOUS / THINKING 是瞬时状态：run_conversation_turn() 会同步跑完
         # 录音→识别→LLM→分支应对的整个过程才返回，tick() 观察不到这两个状态。
