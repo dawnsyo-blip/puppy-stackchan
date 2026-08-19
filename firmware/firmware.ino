@@ -1507,40 +1507,40 @@ void setup() {
   M5StackChan.Motion.goHome(300);
 }
 
-// 物理电源键长按关机的收尾动画：CoreS3 用的 AXP2101 电源管理芯片被 M5Unified
-// 配置成"长按 1 秒触发内部长按标记 / 长按满 4 秒芯片自己硬件断电"（见
-// setup() 里 Axp2101 那段初始化数组旁的注释 "0x27, 0x00 // PowerKey Hold=1sec
-// / PowerOff=4sec"）。4 秒这个硬件断电阈值完全没动，还是原来的安全兜底——
-// 这里只是蹭了芯片提前在 1 秒时给出的"长按"信号（M5.update() 会把它翻译成
-// M5.BtnPWR.wasHold()，读一次就自动清零，天然是边沿触发，不需要自己再管
-// 防抖/去重），在真正断电前的 ~3 秒窗口里抢先播一遍"闭眼→关屏幕"，跟 host
-// 端 Ctrl+C 退出时的 play_shutdown_animation() 是同一个视觉设计，但这里是
-// 纯固件实现——用户是直接按物理电源键关机，这时候电脑上的 host 脚本未必在
-// 跑，不能依赖它发 HTTP 指令。delay(1000) 会短暂卡住 server.handleClient()，
-// 但这时候设备最多几秒后就要断电，没有必要再处理新请求，avatar 的渲染任务
-// 在独立的 FreeRTOS 任务里跑，不受这里阻塞影响，闭眼表情照常能画出来。
-void playShutdownAnimation() {
-  avatar.setExpression(Expression::Neutral);
-  baseExpr = Expression::Neutral;
-  g_customExpr = "privacy";
-  currentExprName = "privacy";
-  touchExprActive = false;
-  g_currentMoveIsNoisy = true;
-  M5StackChan.Motion.goHome();
-  g_ledMode = LedMode::OFF;
-  M5StackChan.showRgbColor(0, 0, 0);
-  delay(1000);
-  M5StackChan.Display().sleep();
-}
+// 物理电源键长按触发屏幕自动黑屏的固件端"闭眼→关屏幕"反应——已撤销，见下面
+// 这段说明，为以后想重新尝试这个方向的人留个记录。
+//
+// 原设计：CoreS3 的 AXP2101 电源管理芯片被 M5Unified 配置成"长按 1 秒触发
+// 内部长按标记 / 长按满 4 秒芯片自己硬件断电"，`loop()` 里轮询
+// `M5.BtnPWR.wasHold()`（读一次自动清零，理论上应该是边沿触发），检测到就
+// 调 `playShutdownAnimation()` 播一遍"闭眼→关屏幕"（`M5StackChan.Display()
+// .sleep()`），指望能在真正断电前的 ~3 秒窗口里抢先看到收尾动画。
+//
+// 实测反馈：屏幕会在**没有长按电源键、设备也没有真正断电**的情况下自己
+// 黑屏，且发生时机不可预测（用户反馈"没有测试脚本连接时会自行黑屏"，按
+// 电源键关机再开机后表情正常，但过一阵子又会再次黑屏）——`Display().
+// sleep()` 只关背光/让面板休眠，ESP32 本身、WiFi、HTTP server 全部继续
+// 正常运行，跟"实际上没有关机"这个观察完全吻合，几乎可以确定是
+// `M5.BtnPWR.wasHold()` 在没有真实长按的情况下被误判为真（可能是 AXP2101
+// 那颗芯片的长按 IRQ 状态位被某种噪声/其它事件意外置位，具体机制没有条件
+// 深入排查——需要示波器或者至少能实时盯着串口日志、同时确认电源键完全没
+// 被碰过才能定位，这次没有这样的调试条件）。
+//
+// 教训：**给物理按键的芯片级中断状态位接一个会产生副作用的动作之前，先
+// 拿纯打印的方式在设备上跑至少几个小时、确认这个信号本身干净可靠，再接
+// 真正的反应逻辑**——这次是直接接了"关屏幕"这个有副作用的动作就上线，
+// 没有先观察过信号本身在无人触碰时是否保持稳定的 false，第一次真正暴露
+// 出问题已经是在用户日常使用中。
+//
+// 不影响的部分：`/display` 这个 HTTP 接口（`handleDisplay()`）本身、以及
+// host 端 Ctrl+C 退出时触发的 `play_shutdown_animation()`（纯粹靠 host
+// 主动发 HTTP 请求触发，不依赖设备自己判断有没有长按）完全没有问题，
+// 这次只撤销了"固件自己监听物理电源键"这一条路径。
 
 void loop() {
   M5StackChan.update();
   server.handleClient();
   updateLed();
-
-  if (M5.BtnPWR.wasHold()) {
-    playShutdownAnimation();
-  }
 
   // 每帧刷新真实 yaw，供 PuppyFace.h 的好奇表情镜像判断用（见声明处注释）。
   g_currentYaw = (int)M5StackChan.Motion.getCurrentAngles().x;
