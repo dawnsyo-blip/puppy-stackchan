@@ -1181,6 +1181,7 @@ class MicStream:
         self._stream = None        # sounddevice.InputStream 实例
         self._resample_up = 1
         self._resample_down = 1
+        self._muted = False        # 见 set_muted()
         self.connected = False     # 仅供主循环/调试查看，不用于同步
 
     def start(self):
@@ -1256,11 +1257,29 @@ class MicStream:
         lo = max(0, self._speech_start_abs - base)
         return bytes(self._buffer[lo:])
 
+    def set_muted(self, muted: bool):
+        """StackChan 播 TTS 时调用 True，播完/被打断后调用 False。机身麦克风
+        跟喇叭共用同一个 I2S 外设，播放期间物理上就听不到自己的声音（见
+        firmware.ino 的 g_i2sMutex）；这个无线麦克风是电脑本地独立的物理
+        设备，没有这层物理隔离，房间里放出来的 TTS 声音会被它原样录进去，
+        不静音的话会把 StackChan 自己在说的话当成用户在说话，误触发新一轮
+        对话、把正在播的这句打断。静音期间 `_sd_callback()` 直接丢弃收到的
+        数据，不写进缓冲区、不参与 VAD；取消静音后从下一帧数据开始正常
+        累积，不需要处理边界（内部状态全部基于相对字节数，不依赖墙钟
+        时间）。静音的同时顺手清掉"正在说话"的状态，避免静音前后的音频
+        被当成同一段拼起来。"""
+        self._muted = muted
+        if muted:
+            self._speech_active = False
+            self._quiet_chunks = 0
+
     # ---------- 内部：采集 + 缓冲 + VAD ----------
 
     def _sd_callback(self, indata, frame_count, time_info, status):
         if status:
             print(f"[本地麦克风] sounddevice 状态告警: {status}")
+        if self._muted:
+            return
         mono = indata.mean(axis=1)
         resampled = resample_poly(mono, self._resample_up, self._resample_down)
         self._feed(resampled.astype(np.int16).tobytes())
@@ -2200,7 +2219,16 @@ class PuppyEngine:
             wav_path = next_wav
             if wav_path:
                 set_led(*WARM_WHITE_RGB)
-                if start_play(wav_path) and not self.wait_for_playback():
+                # 播放期间静音本地麦克风——无线麦克风会把 StackChan 自己的
+                # TTS 声音原样录进去，不静音会把它当成用户在说话，误触发
+                # 新一轮对话、打断正在播的这一句。见 MicStream.set_muted()。
+                self.mic_stream.set_muted(True)
+                try:
+                    started = start_play(wav_path)
+                    finished_ok = started and self.wait_for_playback()
+                finally:
+                    self.mic_stream.set_muted(False)
+                if started and not finished_ok:
                     # 被触摸打断——handle_touch_trigger() 已经处理完这次
                     # 手势（叫停了播放、切到了新状态），这里只需要把还没念
                     # 完的关键词和按钮 UI 一起收掉，不能继续念下去，也不能
@@ -2336,10 +2364,17 @@ class PuppyEngine:
             wav_path = next_wav
             if wav_path:
                 set_led(*led_rgb)
-                if start_play(wav_path):
-                    if not self._game_wait_for_playback():
-                        set_button("off")
-                        return False
+                # 同 speak_keywords()：播放期间静音本地麦克风，见
+                # MicStream.set_muted()。
+                self.mic_stream.set_muted(True)
+                try:
+                    started = start_play(wav_path)
+                    finished_ok = started and self._game_wait_for_playback()
+                finally:
+                    self.mic_stream.set_muted(False)
+                if started and not finished_ok:
+                    set_button("off")
+                    return False
                 set_led(off=True)
             if i + 1 < len(keywords):
                 next_wav = self._game_tts(keywords[i + 1], f"game_kw_{i + 1}")
