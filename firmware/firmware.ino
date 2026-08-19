@@ -90,9 +90,17 @@ unsigned long g_speechDurMs = 0;
 // 字幕框几何：整体只有 50px 高（原来是 66px），但仍然比 16px 高的 CJK 字体
 // （efontCN_16）宽裕得多，两行文字加翻页圆点都放得下——SUB_BOX_Y 保持跟原来
 // 一样的 168，只往上收了底边，所以框的顶边位置不变。
+// SUB_BOX_W 从 308（几乎跟屏幕等宽，320px 屏）收窄到 224（屏幕宽度的
+// 70%）——animalese 换掉 edge-tts 以后，speak_keywords()/_game_speak_
+// keywords() 会在每个关键词播放期间同时显示字幕框和屏幕右下角的关键词
+// 按钮（BUTTON_CX=270, BUTTON_RX=23，见 PuppyFace.h），字幕框改窄前右边界
+// 在 314，跟按钮区域（约 247~293）直接重叠，字幕框会整个盖住按钮；改成
+// 224 后右边界落在 230，跟按钮之间留出十几像素间隙。**改这个数字必须
+// 同时改 buildSubtitle() 里硬编码的换行宽度阈值 292（同一个改动的另一半，
+// 见那边注释）**，只改一处的话文字还会按旧宽度换行、超出新的更窄的框。
 static const int SUB_BOX_X = 6;
 static const int SUB_BOX_Y = 168;
-static const int SUB_BOX_W = 308;
+static const int SUB_BOX_W = 224;
 static const int SUB_BOX_H = 50;
 static const int SUB_BOX_R = 10;
 static const int SUB_LINE1_Y = 176;   // 两行文字时，第一行的 y
@@ -115,7 +123,9 @@ volatile int g_buttonState = 0;
 uint32_t g_headDoubleTapCount = 0;
 uint32_t g_screenTapCount = 0;
 
-// UTF-8 line breaking: CJK (3 bytes) = 16px, ASCII = 8px, max line width 292px
+// UTF-8 line breaking: CJK (3 bytes) = 16px, ASCII = 8px, max line width 208px
+// （SUB_BOX_W 224 减去左右留白，见 SUB_BOX_W 声明处的注释——这个阈值必须
+// 跟着 SUB_BOX_W 一起改，不是独立的数字）
 static void buildSubtitle(const String &text) {
   g_subNLines = 0;
   memset(g_subLineChars, 0, sizeof(g_subLineChars));
@@ -126,7 +136,7 @@ static void buildSubtitle(const String &text) {
     int clen = (c < 0x80) ? 1 : (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
     if (i + clen > text.length()) break;
     int cw = (clen == 1) ? 8 : 16;
-    if (lineW + cw > 292 || lineLen + clen > 60) {
+    if (lineW + cw > 208 || lineLen + clen > 60) {
       g_subLines[li][lineLen] = '\0';
       if (++li >= SUB_MAX_LINES) { full = true; break; }
       lineW = 0; lineLen = 0;

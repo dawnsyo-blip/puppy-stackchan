@@ -3,8 +3,9 @@ StackChan 小狗行为引擎 v4
 ========================
 新增内容 (v3 → v4)：
 - 整合 voice_test.py 的语音链路：FunASR SenseVoice STT（启动时预加载一次）、
-  DeepSeek LLM（API key 从项目根目录 .env 手动解析，不读环境变量）、edge-tts
-  语音合成、HTTP 音频服务器播放。
+  DeepSeek LLM（API key 从项目根目录 .env 手动解析，不读环境变量）、animalese
+  拟声词合成（纯本地计算，不可懂，见 tts_to_wav()/set_subtitle() 配套的字幕
+  联动）、HTTP 音频服务器播放。
 - 新增 CURIOUS（好奇/录音中）、THINKING（思考/LLM处理中）、SORRY（抱歉）三个状态。
 - 音量唤醒（方案A）：主循环持续轮询 /volume，音量突增直接扫描找人 → HAPPY →
   进入 CURIOUS 开始真正的问题录音（不再单独录一段做唤醒词校验）。
@@ -21,8 +22,10 @@ StackChan 小狗行为引擎 v4
 
 依赖（此项目用的是 anaconda "stackchan" 环境，基础环境没装这些）：
     conda activate stackchan
-    pip install funasr torch torchaudio edge-tts pydub sounddevice scipy
-ffmpeg 需要在系统 PATH 里（pydub 转 WAV 要用）。
+    pip install funasr torch torchaudio pypinyin sounddevice scipy
+animalese.wav 字母音频库首次运行会自动从 GitHub 下载并缓存到 host/ 目录
+（~172KB），不需要手动下载；edge-tts/pydub/ffmpeg 这三个依赖随着 TTS 换成
+animalese 已经不再需要。
 语音输入现在走电脑本地无线麦克风（sounddevice 采集，见 MicStream 类），不
 再依赖 StackChan 机身麦克风——Windows 需要能看到一个名字包含
 WIRELESS_MIC_NAME_HINT 的输入设备（无线麦克风接收器），否则语音唤醒不可用。
@@ -49,6 +52,7 @@ import queue
 import wave
 import io
 import math
+import urllib.request
 from pathlib import Path
 from enum import Enum
 from urllib.parse import quote
@@ -454,8 +458,27 @@ DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_TIMEOUT = 30
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"   # 项目根目录的 .env
 
-# --- 语音合成 (edge-tts) ---
-TTS_VOICE = "zh-CN-XiaoxiaoNeural"
+# --- 语音合成 (animalese) ---
+# 从可懂的中文人声 TTS（edge-tts）换成 animalese（《集合啦！动物森友会》风格
+# 的无字义拟声词）——声音本身不可懂，用户必须靠屏幕字幕才能理解小狗在说
+# 什么，见 speak_keywords()/_game_speak_keywords() 里配套的字幕联动。纯本地
+# 计算（逐字母拼接现成的音频片段），合成耗时 <10ms，不像 edge-tts 那样要经过
+# 一次网络往返；_prewarm_game_tts() 那套预热缓存机制因此不再是必需的，但
+# 继续用也无害（缓存命中时依然会跳过一次合成，只是省下的时间已经很少了），
+# 这次没有顺手删掉它。
+ANIMALESE_WAV_URL = "https://github.com/Acedio/animalese.js/raw/master/animalese.wav"
+ANIMALESE_LIBRARY_PATH = Path(__file__).resolve().parent / "animalese.wav"
+ANIMALESE_LIBRARY_SAMPLE_RATE = 44100   # animalese.wav 字母库本身的采样率（26 个
+                                         # 英文字母各一段，8-bit/单声道）
+ANIMALESE_LIBRARY_LETTER_SECS = 0.15    # 库中每个字母片段的时长
+ANIMALESE_OUTPUT_LETTER_SECS = 0.075    # 输出每个字母的时长——只取库里每段的前半
+                                         # 部分（原版的一半），念起来更快更像"叽里
+                                         # 呱啦"，而不是拖长的原始采样
+ANIMALESE_PITCH = 1.0                   # 音高：1.0 正常，<1 更低沉/慢，>1 更高亢/快
+ANIMALESE_VOLUME_BOOST = 3.0            # 音量放大倍数——1W 小喇叭偏小声，这个值是
+                                         # host/animalese_test.py 里实机试出来的，
+                                         # 不是最初设计草案里写的 1.0，两边对不上时
+                                         # 以这个实测值为准
 TTS_SAMPLE_RATE = 16000          # 转成 StackChan /record 同款格式：16kHz/单声道/16bit
 
 AUDIO_DIR = Path(tempfile.gettempdir()) / "stackchan_audio"
@@ -965,26 +988,94 @@ def stop_play():
     api_get("/play?stop=1")
 
 
+_animalese_library = None
+
+def ensure_animalese_library():
+    """加载 animalese.wav 字母音频库（26 个英文字母各一段，8-bit/44100Hz/单
+    声道），返回归一化到 [-1,1] 的 float32 数组。首次调用时如果本地还没有
+    这个文件会先从 GitHub 下载一次（~172KB，之后常驻复用，不用每次合成都
+    重新加载/下载）。跟 ensure_audio_server() 是同一个"全局单例+惰性初始化"
+    模式。"""
+    global _animalese_library
+    if _animalese_library is not None:
+        return _animalese_library
+
+    if not ANIMALESE_LIBRARY_PATH.exists():
+        print(f"  [animalese] 首次运行，正在从 GitHub 下载字母音频库...")
+        urllib.request.urlretrieve(ANIMALESE_WAV_URL, ANIMALESE_LIBRARY_PATH)
+
+    with wave.open(str(ANIMALESE_LIBRARY_PATH), "rb") as wf:
+        raw = wf.readframes(wf.getnframes())
+    # 8-bit unsigned → float32 (-1.0~1.0)，静音基线在 128
+    samples = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+    _animalese_library = (samples - 128.0) / 128.0
+    return _animalese_library
+
+
+def chinese_to_animalese_letters(text):
+    """中文→拼音字母（音节之间加空格→animalese 里会变成停顿，让每个字听起来
+    是分开的"词"），英文原样小写保留，其它字符（标点等）一律当空格处理。
+    例如"想 零食" → "xiang ling shi"。缺 pypinyin 时中文字符会被跳过，只剩
+    英文字母能正常发声。"""
+    from pypinyin import pinyin, Style
+    result = []
+    for char in text:
+        if '一' <= char <= '鿿':
+            py = pinyin(char, style=Style.NORMAL, errors='ignore')
+            if py and py[0]:
+                if result and result[-1] != ' ':
+                    result.append(' ')
+                result.append(py[0][0])
+                result.append(' ')
+        elif char.isascii() and char.isalpha():
+            result.append(char.lower())
+        else:
+            result.append(' ')
+    return ' '.join(''.join(result).split())
+
+
+def synthesize_animalese_audio(library, letters, pitch=ANIMALESE_PITCH):
+    """把字母串合成为 animalese 音频（float32, 44100Hz）。算法直接移植自
+    animalese.js：逐字母从字母库里截取一小段（ANIMALESE_OUTPUT_LETTER_SECS，
+    只取库里原始 0.15s 片段的前半部分，念起来更快），非字母字符（含空格）
+    留空白（保持 0，形成停顿）。"""
+    lib_samples_per_letter = int(ANIMALESE_LIBRARY_LETTER_SECS * ANIMALESE_LIBRARY_SAMPLE_RATE)
+    out_samples_per_letter = int(ANIMALESE_OUTPUT_LETTER_SECS * ANIMALESE_LIBRARY_SAMPLE_RATE)
+    output = np.zeros(len(letters) * out_samples_per_letter, dtype=np.float32)
+    for idx, ch in enumerate(letters.upper()):
+        if not ('A' <= ch <= 'Z'):
+            continue
+        start = idx * out_samples_per_letter
+        letter_offset = (ord(ch) - ord('A')) * lib_samples_per_letter
+        for i in range(out_samples_per_letter):
+            src_idx = letter_offset + int(i * pitch)
+            if src_idx < len(library):
+                output[start + i] = library[src_idx]
+    return output
+
+
 def tts_to_wav(text, out_stem):
-    """用 edge-tts 合成语音，转换成 16kHz/单声道/16bit WAV，返回文件路径（失败返回 None）。"""
-    mp3_path = AUDIO_DIR / f"{out_stem}.mp3"
+    """合成 animalese 拟声词音频，转换成 16kHz/单声道/16bit WAV，返回文件
+    路径（失败返回 None）。纯本地计算，没有网络往返。"""
     wav_path = AUDIO_DIR / f"{out_stem}.wav"
     try:
-        import edge_tts
+        library = ensure_animalese_library()
+        letters = chinese_to_animalese_letters(text)
+        audio_44k = synthesize_animalese_audio(library, letters)
 
-        async def _generate():
-            communicate = edge_tts.Communicate(text, TTS_VOICE)
-            await communicate.save(str(mp3_path))
+        # 44100Hz → TTS_SAMPLE_RATE(16000)：跟无线麦克风那边一样，按
+        # math.gcd 现算 up/down 比例，不要硬编码 441/160——虽然这两个采样率
+        # 都是固定常量不会变，但保持同一套写法，以后改 TTS_SAMPLE_RATE 时
+        # 不用记得来回改这里。
+        g = math.gcd(ANIMALESE_LIBRARY_SAMPLE_RATE, TTS_SAMPLE_RATE)
+        audio_16k = resample_poly(audio_44k, TTS_SAMPLE_RATE // g, ANIMALESE_LIBRARY_SAMPLE_RATE // g)
+        audio_16k = np.clip(audio_16k * ANIMALESE_VOLUME_BOOST, -1.0, 1.0)
+        pcm_bytes = (audio_16k * 32767).astype(np.int16).tobytes()
 
-        asyncio.run(_generate())
-
-        from pydub import AudioSegment
-        audio = AudioSegment.from_mp3(str(mp3_path))
-        audio = audio.set_frame_rate(TTS_SAMPLE_RATE).set_channels(1).set_sample_width(2)
-        audio.export(str(wav_path), format="wav")
+        wav_path.write_bytes(pcm_to_wav_bytes(pcm_bytes, sample_rate=TTS_SAMPLE_RATE))
         return wav_path
     except Exception as e:
-        print(f"  [TTS] 合成失败: {e}")
+        print(f"  [TTS] animalese 合成失败: {e}")
         return None
 
 
@@ -1491,6 +1582,11 @@ class PuppyEngine:
             print("[引擎] 没有 Qwen-VL API key，捉迷藏游戏会退化成只用颜色直方图判断")
         self.game_ref_hist = None
         self.game_ref_desc = None
+        # animalese 字母库（172KB，读一次转成 numpy 数组，耗时可忽略）：在这里
+        # 同步加载一次，保证第一次 speak_keywords() 调用时不用再付一次首次
+        # 加载的延迟——不像 SenseVoice 模型/TTS 预热那样耗时到需要放后台线程。
+        print("[引擎] 加载 animalese 字母音频库...")
+        ensure_animalese_library()
         # 捉迷藏游戏固定词汇（"小狗""看""闭眼"、倒计时数字）的 TTS 预热缓存，
         # 见 GAME_FIXED_PHRASES 和 _prewarm_game_tts()。后台线程跑，不拖慢
         # 引擎启动；万一游戏在预热完成前就被触发，_game_tts() 会自动退化成
@@ -2263,8 +2359,10 @@ class PuppyEngine:
         return False
 
     def speak_keywords(self, keywords):
-        """依次合成并播放每个关键词，关键词之间间隔 KEYWORD_GAP_SEC。不再用字幕
-        提示——思考一结束就让屏幕右下角的爪印按钮出现，之后每念一个关键词前
+        """依次合成并播放每个关键词，关键词之间间隔 KEYWORD_GAP_SEC。每个关键词
+        播放期间屏幕上会显示对应的字幕（animalese 声音本身不可懂，字幕是用户
+        理解"小狗说了什么"的唯一途径，见下面播放循环里 set_subtitle() 那段）。
+        思考一结束就让屏幕右下角的爪印按钮出现，之后每念一个关键词前
         （包括第一个）按钮都先"按一下"（down 保持 BUTTON_PRESS_MS 后弹回 up，
         固件那边会把这一段渲染成缩小再放大的动画），关键词音频要在按钮
         "放大"的同一刻开始播——如果像之前那样等按钮弹回 up 以后才现合成
@@ -2304,6 +2402,13 @@ class PuppyEngine:
             wav_path = next_wav
             if wav_path:
                 set_led(*WARM_WHITE_RGB)
+                # animalese 不可懂，字幕是用户理解"小狗说了什么"的唯一途径
+                # （按钮只是视觉装饰）——必须在 start_play() 之前显示，不然
+                # 用户会先听到声音才看到字幕，体验上是"字幕追着声音跑"；
+                # 播完/被打断后都要清掉（放进下面的 finally，不管是自然播完
+                # 还是被触摸打断都会执行），不能让上一个词的字幕停留到下一个
+                # 词开始播放。
+                set_subtitle(keywords[i])
                 # 播放期间静音本地麦克风——无线麦克风会把 StackChan 自己的
                 # TTS 声音原样录进去，不静音会把它当成用户在说话，误触发
                 # 新一轮对话、打断正在播的这一句。见 MicStream.set_muted()。
@@ -2318,6 +2423,7 @@ class PuppyEngine:
                     if finished_ok:
                         time.sleep(MIC_UNMUTE_COOLDOWN_SEC)
                     self.mic_stream.set_muted(False)
+                    set_subtitle("")
                 if started and not finished_ok:
                     # 被触摸打断——handle_touch_trigger() 已经处理完这次
                     # 手势（叫停了播放、切到了新状态），这里只需要把还没念
@@ -2454,6 +2560,9 @@ class PuppyEngine:
             wav_path = next_wav
             if wav_path:
                 set_led(*led_rgb)
+                # 同 speak_keywords()：animalese 不可懂，字幕是唯一能看懂
+                # "小狗说了什么"的途径，必须在 start_play() 之前显示。
+                set_subtitle(keywords[i])
                 # 同 speak_keywords()：播放期间静音本地麦克风，见
                 # MicStream.set_muted()。
                 self.mic_stream.set_muted(True)
@@ -2467,6 +2576,7 @@ class PuppyEngine:
                     if finished_ok:
                         time.sleep(MIC_UNMUTE_COOLDOWN_SEC)
                     self.mic_stream.set_muted(False)
+                    set_subtitle("")
                 if started and not finished_ok:
                     set_button("off")
                     return False
