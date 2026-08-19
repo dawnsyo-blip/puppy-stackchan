@@ -161,6 +161,12 @@ PRIVACY_YAW = 800
 PRIVACY_PITCH = 100
 PRIVACY_SPEED = 150
 
+# --- 关机（退出程序）动画参数 ---
+SHUTDOWN_EYES_CLOSE_DELAY_SEC = 1.0    # 闭眼表情先停留这么久，让"眼皮合上"的
+                                        # 视觉效果真正被看到，再关屏幕——不能
+                                        # 闭眼和关屏幕之间不留时间差，不然看
+                                        # 起来就是直接黑屏，没有"睡着"的过渡感
+
 # --- LED（对照表情映射v7.xlsx）---
 # 固件的 /led 现在支持 mode 参数（solid/blink/breathe/rainbow/fade），呼吸/
 # 闪烁/彩虹/渐暗这些需要"持续"播放的效果由固件自己在本地 loop() 里驱动（见
@@ -253,13 +259,13 @@ GAME_COUNTDOWN_LED_PERIOD_MS = 2000
 GAME_SCAN_LED_PERIOD_MS = 3000
 
 # --- 游戏固定词汇 TTS 预热 ---
-# "小狗""看""闭眼"和倒计时数字这几个词，内容从来不随游戏而变，没必要每次
-# 触发游戏都现合成一次——TTS 合成是一次网络往返，几百毫秒到一两秒不等，
+# "小狗""看""闭眼""没有"和倒计时数字这几个词，内容从来不随游戏而变，没必要
+# 每次触发游戏都现合成一次——TTS 合成是一次网络往返，几百毫秒到一两秒不等，
 # 用户反馈"从听到邀请到说出'小狗 看'中间等太久"，这段网络延迟是主因之一。
 # PuppyEngine.__init__() 后台预热合成好并缓存路径（_prewarm_game_tts()），
 # _game_speak_keywords() 优先用缓存，只有缓存未命中（预热还没跑完，或者是
 # LLM 生成的动态关键词，比如识别到的物品/位置）才现合成。
-GAME_FIXED_PHRASES = ["小狗", "看", "闭眼"] + GAME_COUNTDOWN_NUMBERS
+GAME_FIXED_PHRASES = ["小狗", "看", "闭眼", "没有"] + GAME_COUNTDOWN_NUMBERS
 
 # --- 视觉大模型（Qwen-VL，通过阿里云 DashScope 的 OpenAI 兼容端点）---
 # 用途有三处：①注册阶段把拍到的物品压缩成 1 个关键词念出来（比如"橘子"）
@@ -355,6 +361,26 @@ STREAM_RMS_THRESHOLD = 180          # 换成电脑无线麦克风后的校准值
                                     # 隔离的诊断脚本测很容易失真（比如脚本自己
                                     # 20 秒窗口跑完了，人才刚看到"现在说话"的
                                     # 提示，采到的全是没人说话的安静数据）。
+MIC_UNMUTE_COOLDOWN_SEC = 0.35     # wait_for_playback() 看到 /status 的 playing
+                                    # 变 false 就以为"播完了"，其实固件那边
+                                    # playTaskFn() 最后一块音频是用
+                                    # M5.Speaker.playRaw() 非阻塞喂给 I2S 就直接
+                                    # 退出任务、把 playTaskRunning 清 false 的
+                                    # （firmware.ino 里的分块循环只在喂下一块前
+                                    # 等上一块播完，最后一块喂完不等），最后一个
+                                    # CHUNK_BYTES=6400 字节（16kHz/16bit 下约
+                                    # 0.2s）在 playing 已经变 false 之后仍在物理
+                                    # 播放。之前 set_muted(False) 紧跟着
+                                    # wait_for_playback() 返回就执行，这段尾音会
+                                    # 被无线麦克风原样录进去、当成用户在说话——
+                                    # 这就是"静音了还是会把小狗自己的话录进去"
+                                    # 的根因，不是 set_muted() 本身没生效。只有
+                                    # 自然播完（finished_ok=True）才需要这个冷却
+                                    # ——被触摸打断走的是 M5.Speaker.stop() 硬
+                                    # 切断（stopPlayTaskAndWait()），没有这条尾巴。
+                                    # 跟固件那边处理舵机噪音的 SERVO_MUTE_
+                                    # COOLDOWN_MS(300ms) 是同一个思路：状态标志
+                                    # 变化不等于物理效果立刻消失，需要留一点缓冲。
 # --- 完整对话链路 ---
 KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
 BUTTON_PRESS_MS = 200            # 每个关键词播放前，按钮"按下"状态维持的时长
@@ -638,6 +664,15 @@ def set_led_mode(mode, r=0, g=0, b=0, period_ms=None, fade_ms=None):
         q += f"&fade_ms={int(fade_ms)}"
     api_get(q)
 
+def set_display(off=False, on=False):
+    """调用固件的 /display 关闭（off=True）/唤醒（on=True）屏幕背光+面板睡眠。
+    目前只在退出程序的关机动画收尾用一次，见 PuppyEngine.play_shutdown_
+    animation()。"""
+    if off:
+        api_get("/display?off=1")
+    elif on:
+        api_get("/display?on=1")
+
 def set_button(state):
     """调用固件的 /button 控制关键词播报按钮：up/down/off。"""
     api_get(f"/button?state={state}")
@@ -749,6 +784,19 @@ def play_idle_animation():
     go_home()
     # 常态的灯效关掉了（原来是"微弱暖白常亮"）——按要求直接熄灯。
     set_led(off=True)
+
+def play_shutdown_animation():
+    """程序退出（"关机"）收尾动画：先闭眼，停留一下，再关屏幕——顺序不能反，
+    直接关屏幕看起来是纯黑一片，跟"睡着了"的直觉不符；先闭眼再关屏幕，视觉
+    上才是完整的"闭上眼睛→睡过去"过程。闭眼复用"隐私"表情（项目里唯一双眼
+    完全闭合的表情，见 PuppyFace.h 里 privacy 的实现），但只要这个视觉效果，
+    不需要隐私模式那个转头看向一侧的姿势，所以头先回正（go_home()）而不是
+    转到 PRIVACY_YAW/PRIVACY_PITCH。"""
+    set_expression("privacy")
+    go_home()
+    set_led(off=True)
+    time.sleep(SHUTDOWN_EYES_CLOSE_DELAY_SEC)
+    set_display(off=True)
 
 def play_curious_animation():
     """好奇：显示表情即可——语音已经由后台流式监听（MicStream）捕捉完毕，
@@ -2223,10 +2271,15 @@ class PuppyEngine:
                 # TTS 声音原样录进去，不静音会把它当成用户在说话，误触发
                 # 新一轮对话、打断正在播的这一句。见 MicStream.set_muted()。
                 self.mic_stream.set_muted(True)
+                finished_ok = False
                 try:
                     started = start_play(wav_path)
                     finished_ok = started and self.wait_for_playback()
                 finally:
+                    # 自然播完时物理尾音还没停（见 MIC_UNMUTE_COOLDOWN_SEC），
+                    # 先等一下再取消静音；被打断时是硬切断，没有尾音，不用等。
+                    if finished_ok:
+                        time.sleep(MIC_UNMUTE_COOLDOWN_SEC)
                     self.mic_stream.set_muted(False)
                 if started and not finished_ok:
                     # 被触摸打断——handle_touch_trigger() 已经处理完这次
@@ -2367,10 +2420,15 @@ class PuppyEngine:
                 # 同 speak_keywords()：播放期间静音本地麦克风，见
                 # MicStream.set_muted()。
                 self.mic_stream.set_muted(True)
+                finished_ok = False
                 try:
                     started = start_play(wav_path)
                     finished_ok = started and self._game_wait_for_playback()
                 finally:
+                    # 见 speak_keywords()/MIC_UNMUTE_COOLDOWN_SEC：自然播完
+                    # 时最后一块音频还有物理尾音，先等一下再取消静音。
+                    if finished_ok:
+                        time.sleep(MIC_UNMUTE_COOLDOWN_SEC)
                     self.mic_stream.set_muted(False)
                 if started and not finished_ok:
                     set_button("off")
@@ -2591,24 +2649,33 @@ class PuppyEngine:
 
     def _game_on_timeout(self):
         """没找到：用"委屈"表情做反应（play_grieved_reaction()，动作/灯效
-        跟"抱歉"状态一样，只是换一张脸），不经过 self.transition(State.
-        SORRY)——self.state 全程留在 GAME_HIDE_SEEK，跟 _game_settle_after_
-        result() 的收尾方式无关。停留一下再跟 _game_on_found() 一样收尾。"""
+        跟"抱歉"状态一样，只是换一张脸），按钮说一句"没有"（跟游戏里其它
+        播报同一套按钮+关键词 TTS 机制），不经过 self.transition(State.
+        SORRY)——self.state 全程留在 GAME_HIDE_SEEK。收尾故意不用
+        _game_settle_after_result()：那个方法没找到人脸时会调
+        self.transition(State.IDLE)，会顺带把表情切回中性、舵机归位——用户
+        明确要求委屈表情要一直保持到真的重新看到人脸，不能被这一步盖掉，
+        所以改用专门的 _game_settle_after_timeout()。"""
         print("[游戏] 超时，没找到")
         play_grieved_reaction()
+        if not self._game_speak_keywords(["没有"]):
+            return
         time.sleep(GAME_TIMEOUT_LINGER_SEC)
-        self._game_settle_after_result()
+        self._game_settle_after_timeout()
 
     def _game_settle_after_result(self):
-        """游戏结束（找到/没找到）以后的收尾：恢复到正常状态、继续追踪人脸。
-        故意不复用 _settle_happy()——那是给普通对话结束设计的，追踪丢失时
-        会调 scan_for_face()（切"好奇"表情 + 转头扫描 SCAN_POSITIONS 好几个
-        位置），直接接在刚播完的兴奋/抱歉表情后面，会打断用户正在看的表情
-        反馈，感觉像"庆祝到一半突然又开始东张西望"。这里改成只拍一帧轻量
-        确认（不切表情、不转头扫描）：确认到人脸就直接 enter_happy()（如果
+        """游戏找到目标以后的收尾：恢复到正常状态、继续追踪人脸。故意不复用
+        _settle_happy()——那是给普通对话结束设计的，追踪丢失时会调
+        scan_for_face()（切"好奇"表情 + 转头扫描 SCAN_POSITIONS 好几个
+        位置），直接接在刚播完的兴奋表情后面，会打断用户正在看的表情反馈，
+        感觉像"庆祝到一半突然又开始东张西望"。这里改成只拍一帧轻量确认
+        （不切表情、不转头扫描）：确认到人脸就直接 enter_happy()（如果
         session_active 已经是 True，只是安静地切换状态，不会重播开心动画，
         更不会有额外的转头动作打断刚才的表情）；没确认到也不强行扫，直接
-        回到常态，交给后续 tick() 里的被动人脸检测自然接管。"""
+        回到常态，交给后续 tick() 里的被动人脸检测自然接管。
+
+        只用于找到（_game_on_found()）——没找到用 _game_settle_after_
+        timeout()，两者收尾方式不一样，见那边的说明。"""
         found, face_x = self.detect_face_once()
         if found:
             self.face_detected = True
@@ -2618,6 +2685,27 @@ class PuppyEngine:
             self.enter_happy()
         else:
             self.transition(State.IDLE)
+
+    def _game_settle_after_timeout(self):
+        """游戏没找到目标以后的收尾：跟 _game_settle_after_result() 不同——
+        用户明确要求"委屈"表情要一直保持，不能被这一步的常态归位盖掉。不调
+        self.transition(State.IDLE)（会顺带播 play_idle_animation()，把表情
+        切回中性、舵机归位），改成直接把 self.state 设成 IDLE 交给 tick()
+        里已有的被动人脸检测逻辑接管（State.IDLE 分支每隔一个 tick 就会拍照
+        检查一次，检测到人脸会自动走 enter_happy() 切过去）——委屈表情和
+        当前舵机姿势（play_grieved_reaction() 里的微低头）都原样保留，直到
+        真的重新看到人脸才会被 enter_happy() 自然换掉。state_enter_time 也
+        要跟着更新，IDLE_TO_SLEEPY_SEC 这类依赖它计时的判断才不会算错。"""
+        found, face_x = self.detect_face_once()
+        if found:
+            self.face_detected = True
+            self.face_confirm_count = FACE_CONFIRM_FRAMES
+            self.last_face_seen_time = time.time()
+            self.record_interaction()
+            self.enter_happy()
+        else:
+            self.state = State.IDLE
+            self.state_enter_time = time.time()
 
     # ---------- 计时器 ----------
 
@@ -2724,6 +2812,11 @@ class PuppyEngine:
         # 录音→识别→LLM→分支应对的整个过程才返回，tick() 观察不到这两个状态。
 
     def run(self):
+        # 上一轮进程退出如果走的是关机动画（play_shutdown_animation()），屏幕
+        # 会停在关闭状态；这一轮如果设备本身没有重启（只是重启了 host 脚本），
+        # 屏幕不会自己醒过来。开机第一步先显式唤醒，不管上次是怎么退出的都能
+        # 保证屏幕这次是亮着的。
+        set_display(on=True)
         # 开机迎接：主动抬头扫描找人，而不是像以前那样直接进常态被动等待
         # ——如果开机时人已经在设备前面，应该立刻被看到、进入人脸追踪，不用
         # 等第一次 IDLE 状态下的被动 check_face()（最多要等 FACE_CHECK_
@@ -2764,8 +2857,8 @@ class PuppyEngine:
                 time.sleep(max(0.0, MAIN_LOOP_INTERVAL_SEC - elapsed))
 
         except KeyboardInterrupt:
-            print("\n[引擎] Ctrl+C，归位中...")
-            play_idle_animation()
+            print("\n[引擎] Ctrl+C，关机动画中...")
+            play_shutdown_animation()
         finally:
             # 不管是正常 Ctrl+C 退出还是主循环里跑出了没接住的异常，都要把
             # 本地麦克风的音频流关掉。

@@ -27,6 +27,7 @@
  *                     loop() via updateLed() — caller sets the mode once per
  *                     state change, no need to keep polling /led.
  *   GET /button     — show/hide the on-screen paw button (state=up/down/off)
+ *   GET /display    — turn LCD backlight+panel off (off=1) or back on (on=1)
  */
 #include <M5StackChan.h>
 #include <WiFi.h>
@@ -837,6 +838,24 @@ void handleLed() {
   server.send(200, "application/json", buf);
 }
 
+// 关闭/唤醒屏幕背光+面板睡眠（M5GFX LGFXBase::sleep()/wakeup()，setBrightness(0)
+// 顺带把亮度也清零）。host 端退出程序（"关机"）流程的最后一步用；avatar 的
+// 渲染任务不需要跟着停，睡眠状态下面板不显示画面，唤醒后会立刻显示渲染任务
+// 这段时间一直在画的最新一帧，不需要额外刷新。
+void handleDisplay() {
+  if (server.hasArg("off") && server.arg("off") == "1") {
+    M5StackChan.Display().sleep();
+    server.send(200, "application/json", "{\"ok\":true,\"off\":true}");
+    return;
+  }
+  if (server.hasArg("on") && server.arg("on") == "1") {
+    M5StackChan.Display().wakeup();
+    server.send(200, "application/json", "{\"ok\":true,\"on\":true}");
+    return;
+  }
+  server.send(400, "application/json", "{\"error\":\"missing off=1 or on=1\"}");
+}
+
 void handleServo() {
   int yaw = server.hasArg("yaw") ? server.arg("yaw").toInt() : 0;
   int pitch = server.hasArg("pitch") ? server.arg("pitch").toInt() : 450;
@@ -1453,6 +1472,7 @@ void setup() {
   server.on("/speech", handleSpeech);
   server.on("/led", handleLed);
   server.on("/button", handleButton);
+  server.on("/display", handleDisplay);
   server.begin();
 
   M5StackChan.Display().println("Server started!");

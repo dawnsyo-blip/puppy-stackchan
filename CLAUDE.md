@@ -60,6 +60,13 @@
   `fade_ms`）：呼吸/闪烁/彩虹快闪/渐暗这些"持续"效果由固件自己在 `loop()`
   里的 `updateLed()` 本地驱动，host 端只要在状态切换那一刻调一次，不需要
   持续轮询，见下面"LED 系统"一节。
+- `/display?off=1` / `/display?on=1` — 关闭/唤醒 LCD 背光+面板睡眠
+  （`M5GFX`/`LGFXBase::sleep()`/`wakeup()`，`handleDisplay()`）。目前只有
+  `host/puppy_engine_v4.py` 退出程序时的 `play_shutdown_animation()` 会调
+  `off=1`，`run()` 开机第一步会无条件调一次 `on=1`（防止上一轮是靠这条
+  路径退出、这一轮设备本身没重启的情况下屏幕还停在关闭状态）。avatar 的
+  渲染任务不需要跟着停，面板睡眠期间不显示画面，唤醒后直接显示这段时间
+  一直在画的最新一帧。
 
 ## 表情系统
 PuppyFace.h 中每个组件的 draw() 根据 Expression 枚举和 g_customExpr 字符串画不同图形：
@@ -187,6 +194,22 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   给固件/host 加任何新的"设备主动出声"的地方（不只是关键词播报），只要
   改成了本地麦克风采集，都要照这个模式补一次静音，不能想当然地认为"设备
   播放"和"host 端语音采集"互不影响。
+- **上面这条静音修完以后实测还是偶尔会把自己说的话录进去，根因是取消静音
+  的时机比声音真正停止早了一步**：`wait_for_playback()` 靠轮询 `/status`
+  的 `playing` 字段判断"播完了"，但固件 `playTaskFn()`（`firmware.ino`）分块
+  播放循环里，只在喂下一块前才等上一块播完（`M5.Speaker.isPlaying(0)>=2`
+  的等待循环），最后一块音频是用 `M5.Speaker.playRaw()` 非阻塞喂给 I2S 就
+  直接退出任务、把 `g_playTaskRunning` 清 false——最后一个 `CHUNK_BYTES`
+  （6400 字节，16kHz/16bit 下约 0.2s）在 `playing` 已经变 false 之后仍在
+  物理播放。`set_muted(False)` 如果紧跟着 `wait_for_playback()` 返回就执行，
+  这~0.2s 的尾音会被无线麦克风原样录进去。修法是 `speak_keywords()`/
+  `_game_speak_keywords()` 里加一个 `MIC_UNMUTE_COOLDOWN_SEC`(0.35s) 冷却期：
+  只有自然播完（`finished_ok=True`）才等这段时间再取消静音，被触摸打断走的
+  是 `M5.Speaker.stop()` 硬切断（`stopPlayTaskAndWait()`），没有这条尾巴，
+  不需要等。跟固件那边处理舵机噪音的 `SERVO_MUTE_COOLDOWN_MS`(300ms) 是
+  同一个思路——**"状态标志变化"不等于"物理效果立刻消失"，这类靠轮询状态
+  位判断"是否还在输出"的场景，都要留一点缓冲，不能状态一变就立刻放行**，
+  以后再遇到类似"标志已经翻转但物理动作还有尾巴"的情况，先往这个方向想。
 - **ESP32 的 `WebServer` 是单线程的**（`loop()` 里同步调用
   `server.handleClient()`）：任何 handler 只要阻塞得久，就会让设备在那段
   时间内完全无法响应其它请求（表情、舵机、触摸、摄像头全部卡住）。
@@ -572,6 +595,21 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
 `play_idle_animation()`。`scan_for_face()` 因此多了一个 `pitch` 形参（默认
 值还是 450，其它调用方不用改）。
 
+## 关机动画
+`run()` 主循环收到 `KeyboardInterrupt`（Ctrl+C 退出程序）时，原来直接调
+`play_idle_animation()`（回正、切中性表情、关灯），一步到位没有过渡。改成
+`play_shutdown_animation()`：先切"闭眼"（复用 `privacy` 表情——项目里唯一
+双眼完全闭合的表情，但头先回正 `go_home()` 而不是转到隐私那个转头看向一侧
+的姿势，只要"闭眼"这个视觉效果）、关灯，停留 `SHUTDOWN_EYES_CLOSE_DELAY_
+SEC`(1s) 让"眼皮合上"的效果真正被看到，最后才调 `/display?off=1` 关闭屏幕
+背光——顺序不能反，直接关屏幕看起来是纯黑一片，先闭眼再关屏幕才有"睡着了"
+的过渡感。`/display`（`handleDisplay()`，`firmware.ino`）是这次新加的固件
+接口，包一层 `M5GFX`/`LGFXBase` 自带的 `sleep()`/`wakeup()`（顺带把亮度也
+清零），avatar 的渲染任务不需要跟着停，面板睡眠期间不显示画面，唤醒后直接
+显示这段时间一直在画的最新一帧。`run()` 开机第一步会无条件调一次
+`set_display(on=True)`——如果上一轮是靠这条路径退出、这一轮设备本身没有
+重启（只是重启了 host 脚本），屏幕不会自己醒过来，需要显式唤醒兜底。
+
 ## 捉迷藏找物品游戏
 `puppy_engine_v4.py` 里的一个新游戏模式：听到"我们玩捉迷藏吧"先开心点头
 回应 → 按钮播报"小狗 看"（看的时候LED绿灯，拍照记住物品，VLM 识别结果也
@@ -644,9 +682,23 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   （"责备"语音意图，见 `_run_conversation_turn_body()` 的 `scold` 分支）仍然
   要保留"抱歉"（`sad`）表情，两个场景视觉上应该不一样，所以没有改共享的
   `State.SORRY`，而是给游戏单独写了一个不经过状态机的反应函数，`self.state`
-  全程留在 `GAME_HIDE_SEEK`，不影响 `_game_settle_after_result()` 的收尾。
+  全程留在 `GAME_HIDE_SEEK`。播完委屈反应后按钮再说一句"没有"
+  （`_game_speak_keywords(["没有"])`），跟游戏里其它播报同一套按钮+关键词
+  TTS 机制，说完才收尾。
+- **没找到的收尾故意不用 `_game_settle_after_result()`，改用专门的
+  `_game_settle_after_timeout()`**：前者在没确认到人脸时会调
+  `self.transition(State.IDLE)`，会顺带播 `play_idle_animation()`——把表情
+  切回中性、舵机归位，这样"委屈"表情播完立刻就被盖掉了，用户明确要求委屈
+  表情要一直保持到真的重新看到人脸为止。`_game_settle_after_timeout()`
+  不调 `transition()`，直接把 `self.state` 设成 `IDLE`（`state_enter_time`
+  跟着更新）交给 `tick()` 里已有的 `State.IDLE` 分支被动接管——那个分支
+  每隔一个 tick 就拍照检查一次人脸，检测到就自动走 `enter_happy()` 切
+  过去，跳过 `transition(State.IDLE)` 只是不再顺带播放归位动画，人脸检测/
+  追踪这条路径本身没有绕开。`_game_settle_after_result()` 现在只给
+  `_game_on_found()`（找到）用，两者的收尾方式因为这个改动第一次不一样，
+  改的时候别搞混。
 - **固定词汇 TTS 预热**（`_prewarm_game_tts()`/`_game_tts()`）：`GAME_FIXED_
-  PHRASES`（"小狗""看""闭眼"+倒计时数字）内容从来不变，`PuppyEngine.__init__()`
+  PHRASES`（"小狗""看""闭眼""没有"+倒计时数字）内容从来不变，`PuppyEngine.__init__()`
   用后台线程提前合成好并缓存路径，`_game_speak_keywords()` 优先用缓存，
   跳过一次网络 TTS 往返（几百毫秒到一两秒）。这是为了解决"从听到邀请到
   说出'小狗 看'中间等太久"的延迟反馈加的——**以后任何"每次触发都要念的
