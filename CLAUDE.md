@@ -616,10 +616,14 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   杂散摄像头帧可信得多。`is_shaking` 这个 tick 只查一次、存下来，进入分支
   和"晕"状态内部判断"摇晃是否已经结束"共用同一次结果，不重复请求。
 - **收尾顺序按要求做成 晕 → 兴奋 → 开心+人脸追踪**：`State.DIZZY` 分支里
-  一旦 `is_shaking` 变 false 就 `transition(State.EXCITED)`；"兴奋"结束后
-  走的是 `tick()` 里 `EXCITED` 分支已有的逻辑（`state_duration()` 超过
-  `EXCITED_DURATION_SEC` 就按人脸是否还在场决定 `enter_happy()` 还是回
-  常态），不需要另外写。
+  `is_shaking` 变 false 不是立刻切走，而是先记下这一刻的时间戳
+  （`self.dizzy_shake_stopped_at`），在"晕"表情上继续停留 `DIZZY_LINGER_
+  SEC`(1.0s) 才 `transition(State.EXCITED)`——这是第二版反馈加的，第一版
+  信号一消失就立刻切，被要求改成"晃完还在晕一下"的缓冲；信号中途又恢复
+  （摇一下停一下）会把计时器清掉重新等，不会让已经走了一半的停留时间继续
+  算数。"兴奋"结束后走的是 `tick()` 里 `EXCITED` 分支已有的逻辑
+  （`state_duration()` 超过 `EXCITED_DURATION_SEC` 就按人脸是否还在场决定
+  `enter_happy()` 还是回常态），不需要另外写。
 - **`play_dizzy_animation()` 不移动舵机**：这个状态触发的前提就是设备正在
   被外力摇晃/托举，这时候舵机再主动转头只会跟外力对抗、徒增机械负担，
   视觉上也会被摇晃动作本身淹没，没有实际意义——跟"舵机噪音防误触发语音"
