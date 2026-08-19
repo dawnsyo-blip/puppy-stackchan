@@ -186,6 +186,9 @@ PRIVACY_LED_FADE_MS = 2000            # 隐私"渐暗至熄灭"
 DIZZY_LED_RGB = (150, 120, 255)       # 晕：淡紫色呼吸灯，没有实机验证过，先跟其它
                                        # 状态的颜色区分开
 DIZZY_LED_BREATHE_PERIOD_MS = 1200    # 晕呼吸灯周期
+DIZZY_LINGER_SEC = 1.0                # 摇晃/拿起信号消失后，"晕"表情还要
+                                       # 继续停留这么久才转"兴奋"，不是信号
+                                       # 一消失就立刻切走
 
 # --- 抱歉(sorry)动画参数（数值参考表情映射v7.xlsx）---
 SORRY_PITCH = 200                # 微低头
@@ -1439,6 +1442,12 @@ class PuppyEngine:
         # 校准基线，不当成事件触发。
         self.last_double_tap_count = None
         self.last_screen_tap_count = None
+
+        # "晕"状态：摇晃/拿起信号消失后，不立刻转"兴奋"，要在"晕"表情上
+        # 再停留 DIZZY_LINGER_SEC 秒——None 表示信号还在（或者还没进过一次
+        # "晕"），tick() 里 is_shaking 第一次变 false 时记下这一刻的时间戳，
+        # 之后每个 tick 比较过去了多久，见 tick() 的 DIZZY 分支。
+        self.dizzy_shake_stopped_at = None
 
         # 主循环计数（用于轮流轮询 + 心跳打印）
         self.tick_count = 0
@@ -2775,6 +2784,7 @@ class PuppyEngine:
         is_shaking = self.check_shaking()
         if is_shaking and self.state != State.DIZZY:
             print("[触发] 检测到摇晃/拿起 → 晕")
+            self.dizzy_shake_stopped_at = None
             self.transition(State.DIZZY)
             return
 
@@ -2851,13 +2861,23 @@ class PuppyEngine:
         elif self.state == State.DIZZY:
             # 不轮询摄像头——设备这时候正被摇晃/托举，拍到的画面大概率是
             # 模糊的，没必要浪费一次 /camera 请求。is_shaking 是这个 tick
-            # 顶部已经查过的结果，摇晃/拿起的信号一旦消失就转"兴奋"（用户
-            # 要求的收尾顺序：晕 → 兴奋 → 开心+人脸追踪，兴奋结束后走
+            # 顶部已经查过的结果，摇晃/拿起信号消失后不立刻转"兴奋"，要在
+            # "晕"表情上继续停留 DIZZY_LINGER_SEC 秒（不是瞬间切走，给观众
+            # 一个"晃完还在晕"的缓冲）——第一次观察到信号变 false 时记下
+            # 这一刻的时间戳，之后每个 tick 比较过去了多久，够了才真正切到
+            # "兴奋"（收尾顺序：晕 → 兴奋 → 开心+人脸追踪，兴奋结束后走
             # tick() 里 EXCITED 分支已有的逻辑，人脸还在场就 enter_happy()，
-            # 不在场就回常态）。
-            if not is_shaking:
-                print("[触发] 摇晃/拿起结束 → 兴奋")
-                self.transition(State.EXCITED)
+            # 不在场就回常态，这一段不用另外写）。如果信号中途又恢复了
+            # （摇了一下又停、又摇），把计时器清掉重新等，不能让上一次已经
+            # 走了一半的停留时间继续算数。
+            if is_shaking:
+                self.dizzy_shake_stopped_at = None
+            else:
+                if self.dizzy_shake_stopped_at is None:
+                    self.dizzy_shake_stopped_at = time.time()
+                elif time.time() - self.dizzy_shake_stopped_at >= DIZZY_LINGER_SEC:
+                    print("[触发] 晕表情停留结束 → 兴奋")
+                    self.transition(State.EXCITED)
 
         # CURIOUS / THINKING 是瞬时状态：run_conversation_turn() 会同步跑完
         # 录音→识别→LLM→分支应对的整个过程才返回，tick() 观察不到这两个状态。
