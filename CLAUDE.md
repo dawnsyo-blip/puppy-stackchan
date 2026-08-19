@@ -12,6 +12,10 @@
 ## 关键文件
 - `firmware/firmware.ino` — 主固件，包含 HTTP API 服务器和表情渲染
 - `firmware/PuppyFace.h` — 自定义小狗表情组件（PuppyEye, PuppyNose, PuppyEar）
+- `firmware/expr_preview/expr_preview.ino` — 设计新表情用的独立最小 sketch
+  （不含 WiFi/HTTP/摄像头/麦克风，只有屏幕渲染），`#include "../PuppyFace.h"`
+  引用主固件那一份，串口按回车切换表情，见"表情系统"一节里"设计全新表情"
+  那段流程；`grieved`/`peekaboo`/`dizzy` 都是这么迭代出来的。
 - `firmware/config.h` — WiFi 配置（SSID: DAWN, 密码: 12121212）
 - `host/puppy_engine_v4.py` — 行为状态机（人脸检测、触摸、空闲计时、语音唤醒），当前最新版
 - `host/voice_test.py` — 语音链路独立测试（录音→STT→LLM→TTS→播放）
@@ -45,7 +49,17 @@
   立刻打断"根本做不到）。host 端因此不能再假设"HTTP 响应回来=播完了"，要靠
   轮询 `/status` 的 `playing` 字段判断是否还在播，见下面"讲话时触摸立刻
   打断"一节和 `puppy_engine_v4.py` 的 `wait_for_playback()`。
-- `/status` 现在多一个 `playing` 字段（当前是否有播放任务在跑）。
+- `/status` 字段随功能增加陆续加了几个，容易散在各功能自己的章节里、这里
+  的顶层说明反而没跟上，列一份当前的完整清单：`battery_v`/`battery_ma`
+  （电池电压/电流）、`yaw`/`pitch`（舵机当前真实角度）、`camera`/
+  `camera_err`（摄像头是否就绪）、`mic_streaming`（`/stream` 是否在推流，
+  当前 host 端已经不用这条了，见"语音唤醒"一节的方案 C）、`playing`（是否
+  有 `/play` 播放任务在跑，见"讲话时触摸立刻打断"一节）、`expr`（当前表情
+  名）、`uptime_s`、`ip`、`rssi`、`imu`（`M5.Imu.isEnabled()`，BMI270 是否
+  初始化成功）、`shaking`（是否正被明显晃动/拿起，见"晕(dizzy)表情/摇晃
+  检测"一节）。以后再给 `/status` 加字段，记得回来更新这份清单，不要只在
+  功能自己的章节里提一句就完事——这里才是有人想知道"这个接口现在到底吐
+  出什么"时第一个会看的地方。
 - `/record?seconds=N` — 录音（一次性、有限时长；puppy_engine_v4.py 不再用它做语音
   唤醒，改用下面的 `/stream`，仅保留给独立测试脚本用）
 - `/stream?port=N` / `/stream?stop=1` — 语音唤醒的核心：StackChan 主动连到
@@ -118,7 +132,13 @@ WiFi/HTTP/摄像头/麦克风，只有屏幕渲染，`PuppyFace.h` 直接用相�
 `#include "../PuppyFace.h"` 引用主固件那一份（不是复制一份改，改完直接就在
 正确的地方，不需要"搬"），编译（~575KB/18% flash）和烧录（~3s）都比完整版
 firmware.ino（~1.76MB/55% flash，~10s）快很多；串口按回车键切换表情（不依赖
-计时器自动轮播，因为调参往往需要盯着某一个表情看好几秒）。这套"改
+计时器自动轮播，因为调参往往需要盯着某一个表情看好几秒）。看串口输出/发
+回车用 `arduino-cli` 自带的监视器，不需要装 Arduino IDE：
+`"C:\Users\89823\arduino-cli\arduino-cli.exe" monitor -p COM3 -c baudrate=115200`，
+退出按 `Ctrl+C`。**这个监视器会独占串口**：只要它还开着，`arduino-cli
+upload` 就会报 `Could not open COM3, the port is busy`——每一轮改完常量要
+重新烧录前，先确认监视器已经关掉，烧完再重新打开监视器继续看效果，这一步
+在这次开发"晕"表情时被漏过好几次。这套"改
 `PuppyFace.h` 里的常量/绘制逻辑 → 编译烧录 expr_preview → 实机看效果 →
 根据反馈继续改常量"的循环可以跑很多轮（这两个表情实测跑了将近十轮），
 每轮的改动都应该配一条简短的常量注释说明"这一轮改了什么、依据是什么"，
@@ -899,3 +919,13 @@ HTTP 接口本身、以及 host 端 Ctrl+C 退出时触发的 `play_shutdown_ani
   host 端新增任何直接发请求给 StackChan 的代码，都必须走这个共享
   `_session`（或者同样设置 `trust_env=False`），不要图省事直接
   `requests.get(...)`。
+- **本机 PATH 里的 `python`（`where python` 第一个命中）是 Anaconda3 的
+  base 环境，没装 cv2/mediapipe/funasr 这些 `puppy_engine_v4.py` 依赖的库**
+  ——直接 `python host/puppy_engine_v4.py` 或者用它 `import` 这个文件都会在
+  `import cv2` 那行报 `ModuleNotFoundError`。真正装好完整依赖的是一个专门
+  的 conda 环境，可执行文件在
+  `C:\Users\89823\anaconda3\envs\stackchan\python.exe`——写任何独立诊断/
+  测试脚本（比如用 `importlib.util.spec_from_file_location` 单独加载
+  `puppy_engine_v4.py` 里的某个函数验证行为，这次调试关机音效/摇晃检测时
+  用过好几次这个手法）都要显式用这个路径调用，不能依赖 `python`/`python3`
+  这些裸命令解析到正确的环境。
