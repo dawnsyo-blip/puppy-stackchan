@@ -577,6 +577,14 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"人"
 # 对 ESP32 本来就紧张的 WiFi/LWIP 连接资源是额外压力；用同一个 Session 让
 # urllib3 复用连接，减少设备侧频繁建连/拆连的开销。
 _session = requests.Session()
+# trust_env=False：不读环境变量/系统代理设置（本机跑着一个本地沙盒代理，
+# HTTP_PROXY/HTTPS_PROXY 指向 127.0.0.1，requests 默认会自动用它）。StackChan
+# 是同一个局域网内的设备，永远不该走代理——真正踩过的坑：代理把到设备的请求
+# 转走以后返回了某个响应（不是连接失败），requests.get() 不会抛异常，
+# api_get() 也不检查返回内容，所以 move_servo() 这类"发了就不管"的调用
+# 看起来"成功"了，实际上命令根本没到设备，表现出来就是"没报错但舵机
+# 没转"。这行修好之后同样的请求会绕开代理直连设备。
+_session.trust_env = False
 
 def api_get(endpoint, timeout=None, _retry=True):
     """GET 请求失败（连不上/超时）时不要立刻重试——先等 API_RETRY_DELAY_SEC，
