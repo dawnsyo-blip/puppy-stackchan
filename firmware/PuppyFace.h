@@ -199,13 +199,20 @@ static const int GRIEVED_BROW_TILT = 5;    // 眉毛倾斜幅度：内侧（靠�
 static const int GRIEVED_BROW_ARC = 18;    // 眉毛中点相对两端连线再往下凹多少像素（"⌣"的弯曲程度，
                                             // 宽度不变，只继续加深凹陷）
 
-// 晕（dizzy，设计中）：漩涡眼半径/圈数、鼻子嘴巴缩放比例。第一版反馈：
-// 漩涡整体再大40%（同时线圈间距要比"只是等比例放大"更宽一点，所以圈数也
-// 跟着减少，不是单纯把半径乘大）；鼻子、嘴巴（含舌头，舌头依附嘴巴宽度，
-// 会自动跟着缩，只有深度 tongueDepth 需要额外乘同一个缩放系数）缩小20%。
-static const float DIZZY_SPIRAL_MAX_R = 13.0f;     // 螺旋最终半径：初版9，"再大40%"→9*1.4=12.6，取整13
-static const float DIZZY_SPIRAL_TURNS = 1.3f;      // 螺旋圈数：初版1.6圈减到1.3圈，让线圈间距比单纯放大半径更宽
-static const float DIZZY_NOSE_MOUTH_SCALE = 0.8f;  // 鼻子、嘴巴（含舌头）整体缩小20%
+// 晕（dizzy，设计中）：漩涡眼半径/圈数/旋转、鼻子嘴巴缩放比例。
+// 第一版反馈：漩涡整体再大40%（同时线圈间距要比"只是等比例放大"更宽一点，
+// 所以圈数也跟着减少，不是单纯把半径乘大）；鼻子、嘴巴（含舌头，舌头依附
+// 嘴巴宽度，会自动跟着缩，只有深度 tongueDepth 需要额外乘同一个缩放系数）
+// 缩小20%。
+// 第二版反馈：圈数改回 1.6 圈，但线圈间距要保持第一版调出来的数值不变——
+// 间距（每转一圈半径增加多少）= MAX_R / TURNS，第一版是 13/1.3 = 10，圈数
+// 改回 1.6 后要维持同样的 10，所以 MAX_R = 10 * 1.6 = 16。另外加了一个缓慢
+// 顺时针自转（DIZZY_SPIRAL_ROTATE_PERIOD_MS 转一整圈），周期先按"慢悠悠"的
+// 直觉估了 4 秒，没有实机验证过快慢是否合适。
+static const float DIZZY_SPIRAL_MAX_R = 16.0f;      // 螺旋最终半径：13/1.3(上一版间距)*1.6(圈数改回1.6) = 16
+static const float DIZZY_SPIRAL_TURNS = 1.6f;       // 螺旋圈数：改回初版的1.6圈
+static const unsigned long DIZZY_SPIRAL_ROTATE_PERIOD_MS = 4000;  // 整条螺旋顺时针自转一圈所需时间
+static const float DIZZY_NOSE_MOUTH_SCALE = 0.8f;   // 鼻子、嘴巴（含舌头）整体缩小20%
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -540,14 +547,19 @@ class PuppyEye : public Drawable {
     }
 
     // ---- 晕：从中心向外的螺旋折线（漩涡），用短直线段近似一条连续曲线；
-    //      DIZZY_SPIRAL_TURNS/DIZZY_SPIRAL_MAX_R 见顶部常量定义处的调整记录。----
+    //      DIZZY_SPIRAL_TURNS/DIZZY_SPIRAL_MAX_R 见顶部常量定义处的调整记录。
+    //      整条螺旋叠加一个随时间线性增长的相位（rotationPhase），让它缓慢
+    //      自转——屏幕坐标系 y 轴向下，theta 增大在这个坐标系下视觉效果是
+    //      顺时针（跟 DOUBT_ROTATE_RAD 那条注释的约定一致），如果实机看到
+    //      转反了，把 rotationPhase 取负号即可。----
     if (style == 8) {
       const int DIZZY_SPIRAL_STEPS = 28;      // 折线段数，越多越平滑
       int maxR = (int)roundf(DIZZY_SPIRAL_MAX_R * s);
+      float rotationPhase = 2.0f * PI * (float)(millis() % DIZZY_SPIRAL_ROTATE_PERIOD_MS) / (float)DIZZY_SPIRAL_ROTATE_PERIOD_MS;
       int lastX = cx, lastY = cy;
       for (int i = 1; i <= DIZZY_SPIRAL_STEPS; i++) {
         float t = (float)i / DIZZY_SPIRAL_STEPS;
-        float theta = t * DIZZY_SPIRAL_TURNS * 2.0f * PI;
+        float theta = t * DIZZY_SPIRAL_TURNS * 2.0f * PI + rotationPhase;
         float r = maxR * t;
         int x = cx + (int)roundf(r * cosf(theta));
         int y = cy + (int)roundf(r * sinf(theta));
