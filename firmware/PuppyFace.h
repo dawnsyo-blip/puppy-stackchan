@@ -199,6 +199,14 @@ static const int GRIEVED_BROW_TILT = 5;    // 眉毛倾斜幅度：内侧（靠�
 static const int GRIEVED_BROW_ARC = 18;    // 眉毛中点相对两端连线再往下凹多少像素（"⌣"的弯曲程度，
                                             // 宽度不变，只继续加深凹陷）
 
+// 晕（dizzy，设计中）：漩涡眼半径/圈数、鼻子嘴巴缩放比例。第一版反馈：
+// 漩涡整体再大40%（同时线圈间距要比"只是等比例放大"更宽一点，所以圈数也
+// 跟着减少，不是单纯把半径乘大）；鼻子、嘴巴（含舌头，舌头依附嘴巴宽度，
+// 会自动跟着缩，只有深度 tongueDepth 需要额外乘同一个缩放系数）缩小20%。
+static const float DIZZY_SPIRAL_MAX_R = 13.0f;     // 螺旋最终半径：初版9，"再大40%"→9*1.4=12.6，取整13
+static const float DIZZY_SPIRAL_TURNS = 1.3f;      // 螺旋圈数：初版1.6圈减到1.3圈，让线圈间距比单纯放大半径更宽
+static const float DIZZY_NOSE_MOUTH_SCALE = 0.8f;  // 鼻子、嘴巴（含舌头）整体缩小20%
+
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
 // 布尔运算，具体做法见下面 draw() 里的实现注释），碗口正中间画一个白色实心
@@ -532,12 +540,10 @@ class PuppyEye : public Drawable {
     }
 
     // ---- 晕：从中心向外的螺旋折线（漩涡），用短直线段近似一条连续曲线；
-    //      DIZZY_SPIRAL_TURNS 圈数、DIZZY_SPIRAL_MAX_R 最终半径都是第一版
-    //      估的，还没实机看过，参数偏保守，方便照 expr_preview 里的反馈调。----
+    //      DIZZY_SPIRAL_TURNS/DIZZY_SPIRAL_MAX_R 见顶部常量定义处的调整记录。----
     if (style == 8) {
-      const float DIZZY_SPIRAL_TURNS = 1.6f;  // 螺旋圈数
       const int DIZZY_SPIRAL_STEPS = 28;      // 折线段数，越多越平滑
-      int maxR = (int)roundf(9 * s);
+      int maxR = (int)roundf(DIZZY_SPIRAL_MAX_R * s);
       int lastX = cx, lastY = cy;
       for (int i = 1; i <= DIZZY_SPIRAL_STEPS; i++) {
         float t = (float)i / DIZZY_SPIRAL_STEPS;
@@ -616,11 +622,13 @@ class PuppyNose : public Drawable {
     float targetRx = isPrivacy
                           ? 9.0f
                           : (exciteLike ? 10.0f * EXCITED_SCALE * sizeMul * noseMouthMul
-                                        : (isGrieved ? 10.0f * GRIEVED_NOSE_SCALE : 10.0f));
+                                        : (isGrieved ? 10.0f * GRIEVED_NOSE_SCALE
+                                                      : (isDizzy ? 10.0f * DIZZY_NOSE_MOUTH_SCALE : 10.0f)));
     float targetRy = isPrivacy
                           ? 6.0f
                           : (exciteLike ? 7.0f * EXCITED_SCALE * sizeMul * noseMouthMul
-                                        : (isGrieved ? 7.0f * GRIEVED_NOSE_SCALE : 7.0f));
+                                        : (isGrieved ? 7.0f * GRIEVED_NOSE_SCALE
+                                                      : (isDizzy ? 7.0f * DIZZY_NOSE_MOUTH_SCALE : 7.0f)));
     float targetOffX = isPrivacy ? -8.0f : 0.0f;
     float targetOffY = isPrivacy ? -5.0f : 0.0f;
 
@@ -639,10 +647,10 @@ class PuppyNose : public Drawable {
       targetCw = 10.0f;
       targetCd = 5.0f;
     } else if (isDizzy) {
-      // 晕：张嘴吐舌，尺寸跟"开心"的嘴巴一样宽（不像 exciteLike 那样整体
-      // 按 EXCITED_SCALE 缩小），下面舌头那段要跟着不缩小。
-      targetCw = 20.0f;
-      targetCd = 12.0f;
+      // 晕：张嘴吐舌，基础尺寸跟"开心"的嘴巴一样宽，再按反馈整体缩小20%
+      // （DIZZY_NOSE_MOUTH_SCALE），下面舌头深度也要乘同一个系数。
+      targetCw = 20.0f * DIZZY_NOSE_MOUTH_SCALE;
+      targetCd = 12.0f * DIZZY_NOSE_MOUTH_SCALE;
     }
 
     // ---- 过渡插值 ----
@@ -709,7 +717,7 @@ class PuppyNose : public Drawable {
       // 嘴巴弧线是二次贝塞尔 (0,mouthOffY) -> (curveWidth/2, mouthOffY+curveDepth)
       // -> (curveWidth, mouthOffY+2)，在 x=curveWidth/2 处（t=0.5）的精确 y：
       float tongueAttachY = mouthOffY + curveDepth * 0.5f + 0.5f;
-      float tongueScaleMul = exciteLike ? (EXCITED_SCALE * sizeMul) : 1.0f;
+      float tongueScaleMul = exciteLike ? (EXCITED_SCALE * sizeMul) : (isDizzy ? DIZZY_NOSE_MOUTH_SCALE : 1.0f);
       const int tongueDepth = (int)roundf(8 * tongueScaleMul);  // U 形往下鼓出的深度
       for (int t = -1; t <= 1; t++) {
         int t0x, t0y, t1x, t1y, t2x, t2y;
