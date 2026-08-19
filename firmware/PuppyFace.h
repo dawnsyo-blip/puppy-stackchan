@@ -214,11 +214,16 @@ static const int GRIEVED_BROW_ARC = 18;    // 眉毛中点相对两端连线再�
 // 领先左眼 30°，不是同步转到一模一样的角度；②圈数从 1.6 增加到 2（这次
 // 反馈没有像上一轮那样要求保持间距，所以只改圈数，半径不变，间距会自然
 // 变窄）；③嘴巴去掉舌头（鼻子/嘴巴本身的缩放尺寸不变，只是不再画舌头）。
+// 第四版反馈：①右眼领先角度从 30° 加大到 45°（转速不变，还是同一个周期，
+// 只是相位差变大）；②鼻子/嘴巴整体朝眼睛方向靠拢一点——复用跟"兴奋朝眼睛
+// 靠拢"同一个思路（noseUpAnim_），幅度先按 GRIEVED_NOSE_CLOSER_PX(6px) 和
+// EXCITED_NOSE_UP_PX(10px) 之间取了个中间值，没有实机验证过是否够/太多。
 static const float DIZZY_SPIRAL_MAX_R = 16.0f;      // 螺旋最终半径：13/1.3(上一版间距)*1.6(圈数改回1.6) = 16
 static const float DIZZY_SPIRAL_TURNS = 2.0f;       // 螺旋圈数：从1.6增加到2
 static const unsigned long DIZZY_SPIRAL_ROTATE_PERIOD_MS = 4000;  // 整条螺旋顺时针自转一圈所需时间
-static const float DIZZY_RIGHT_EYE_PHASE_DEG = 30.0f;  // 右眼在左眼同一相位基础上额外领先的角度
+static const float DIZZY_RIGHT_EYE_PHASE_DEG = 45.0f;  // 右眼在左眼同一相位基础上额外领先的角度：30->45
 static const float DIZZY_NOSE_MOUTH_SCALE = 0.8f;   // 鼻子、嘴巴整体缩小20%（这一版嘴巴不画舌头了，但缩放比例还是同一个）
+static const float DIZZY_NOSE_CLOSER_PX = 8.0f;     // 鼻子（连带嘴巴）朝眼睛方向靠拢的像素数
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -689,10 +694,11 @@ class PuppyNose : public Drawable {
 
     // ---- 兴奋/peekaboo：鼻子连带嘴巴/舌头整体往上挪，贴近眼睛（眼睛的锚点 y
     //      比鼻子小，即在眼睛上方；这里统一改 cy，鼻子和嘴巴会一起挪动，不会
-    //      跟嘴巴脱节）。委屈：鼻子也朝眼睛方向靠拢一点，幅度单独调（不是
-    //      exciteLike，不共用 EXCITED_NOSE_UP_PX）----
+    //      跟嘴巴脱节）。委屈/晕：鼻子也朝眼睛方向靠拢一点，幅度各自单独调
+    //      （不是 exciteLike，不共用 EXCITED_NOSE_UP_PX）----
     float noseCloserPx = exciteLike ? EXCITED_NOSE_UP_PX * sizeMul
-                                     : (isGrieved ? GRIEVED_NOSE_CLOSER_PX : 0.0f);
+                                     : (isGrieved ? GRIEVED_NOSE_CLOSER_PX
+                                                   : (isDizzy ? DIZZY_NOSE_CLOSER_PX : 0.0f));
     float noseUp = noseUpAnim_.update(noseCloserPx);
     cy -= (int)roundf(noseUp);
 
