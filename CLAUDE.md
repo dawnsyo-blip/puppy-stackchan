@@ -708,6 +708,118 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   跟表情映射表里其它新功能一样，先给了一版能跑的默认值，等实机测过真实的
   摇晃/拿起手感以后再按反馈调整。
 
+## 装死(dead)表情 / 手指枪手势检测
+新的交互链路：碰屏幕触发"小开心"后，小狗进入 `GESTURE_WINDOW_SEC`(15s) 的
+"手势扫描窗口"，期间通过 `/camera` 加速轮询检测"手指枪"（finger gun）手势，
+检测到就播放"装死"（XX 眼 + 吐舌头）并停留在这个状态，直到用户双击头顶
+唤醒回"兴奋"。走的是 CLAUDE.md"设计全新表情"一节的标准流程：先在
+`expr_preview.ino` 里迭代视觉效果，满意后再接入固件和 host 端状态机。
+
+- **视觉设计**（`PuppyFace.h`，`DEAD_` 前缀常量）：XX 眼（两条交叉短线，
+  不眨眼）+ 吐舌头（复用 `excited` 的舌头画法，`DEAD_TONGUE_SCALE=0.7`）。
+  入场动画分两段：T+0~500ms 整张脸绕鼻子锚点顺时针转 `DEAD_ROTATION_DEG`
+  (30°)——跟"好奇"（`Expression::Doubt`）共用同一套整体旋转机制
+  （`DOUBT_PIVOT_X/Y` 锚点、`rotateLocalOffset`/`applyRotationAroundPivot`），
+  但角度固定顺时针、不随 `doubtMirrorSign()` 镜像；T+500~800ms
+  （`DEAD_EAR_DROOP_DELAY_MS`）两只耳朵各自绕自己耳根下垂
+  `DEAD_EAR_DROOP_DEG`(30°)，按 `dir` 镜像角度让两耳对称往外垂，用独立的
+  `deadEarDroopAnim_`（跟"好奇"长耳那个 `earTwistAnim_` 分开，过渡时长不同，
+  300ms 而不是默认 500ms）。经过几轮反馈调整：眼睛累计缩小到初版的 72%
+  （14→12.6→10.08）并朝鼻子方向靠拢（`DEAD_EYE_INWARD_PX`，复用兴奋表情
+  "两眼互相靠拢"的机制）；两侧耳朵朝中轴线靠拢（`DEAD_EAR_INWARD_PX`，同一
+  机制复用，从 10px 加大到 16px）；鼻子从"跟常态一样大"改成缩小 20%
+  （`DEAD_NOSE_SCALE`）并朝眼睛方向靠拢（`DEAD_NOSE_CLOSER_PX`，复用
+  兴奋/委屈/晕表情"鼻子朝眼睛靠拢"的同一套机制）；左耳下垂完成后不再
+  定格，改成绕耳根（跟下垂用同一个铰链点）叠加一个 ±5°
+  （`DEAD_EAR_WOBBLE_DEG`）的正弦来回轻微旋转（**不是**整只耳朵水平
+  平移——最初做成平移，反馈明确要求改成绕耳根旋转），只有左耳有这个效果、
+  右耳保持定格。
+- **`handleFace()` 注册**：收到 `expr=dead` 时设 `Expression::Neutral` +
+  `g_customExpr="dead"`，跟 `thinking`/`excited`/`privacy`/`grieved`/
+  `peekaboo`/`dizzy` 同一个模式，没有新增其它固件逻辑（LED/舵机全部由
+  host 端现有 HTTP API 驱动）。
+- **`State.DEAD` 状态机**（`puppy_engine_v4.py`）：
+  - `enter_dead()` 同步阻塞播完整套收尾动作（跟 `enter_excited_from_
+    touch()` 是同一个模式）：切表情 → 舵机低头（`DEAD_PITCH_DOWN=80`，
+    `mute=True`，大幅度移动会有噪音）→ LED 闪两下红灯再渐灭 → 最后才
+    `transition(State.DEAD)`——`transition()` 的 if/elif 链里没有给
+    `DEAD` 加分支，落到这个状态时什么都不做，避免动画重复播放。
+  - **装死状态下人脸/语音/摇晃检测全部跳过**，触摸只认头顶双击：
+    `handle_touch_trigger()` 在判断 `is_screen_trigger`/长按分支的条件里
+    都排除了 `State.DEAD`（碰屏幕、长按头顶被直接忽略），双击本来就是
+    不分状态的全局触发，不需要加分支，落进现成的双击处理逻辑，自然调用
+    `enter_excited_from_touch()`。`check_voice_wake()` 内部也把 `DEAD`
+    并进了 `PRIVACY` 那个"忽略语音但仍要调用以排空队列"的分支——**不能
+    在 `tick()` 顶层直接跳过 `check_voice_wake()` 的调用**，否则装死期间
+    说的话会一直堆在 `MicStream` 队列里排不空，状态切走以后突然冒出一段
+    "旧"语音被当成刚说的话处理，跟隐私状态是同一个坑。触摸的按下/松开
+    反馈灯（`check_touch()` 的 press/release 边沿）**仍然保留**——即使
+    "死了"，碰头顶时亮一下灯确认"设备感应到了"依然合理，`restore_
+    state_led()` 因此也补了一个 `DEAD` 分支（效果是熄灯，虽然跟兜底的
+    `else` 分支一样，但显式写出来避免"靠 else 隐式生效"）。
+  - **从装死恢复不需要新写逻辑**：双击触发 `enter_excited_from_touch()`
+    时，判断条件从"只有 `PRIVACY`"扩展成"`PRIVACY` 或 `DEAD`"都要先调
+    `_face_person_before_excited()` 转回正对人脸——装死时头是低垂朝下的
+    （跟隐私转头看向一侧同理），且装死期间没有做人脸检测，
+    `self.face_detected` 可能是旧值，复用隐私那套"先回正、再拍一帧确认、
+    找到就微调朝向"的处理，不需要为装死单独写一份。
+- **手势扫描窗口**（`enter_xiaokaixin()` 末尾设置
+  `self.gesture_scan_until = time.time() + GESTURE_WINDOW_SEC`，配一个
+  柔和暖白呼吸灯提示"小狗在等你比手势"）：`tick()` 里窗口开着的时候
+  **不做人脸检测**（`do_face_check` 额外加了 `and not gesture_window_
+  active`），改成每个 tick 都调 `check_gesture()`（自己按
+  `GESTURE_POLL_SEC=0.8s` 节流，调用方不用关心频率）。**不做人脸检测的
+  理由不是省 ESP32 负载**（MediaPipe 推理在电脑端跑，ESP32 端拍照传图
+  不管给谁用开销都一样），**而是人脸检测会触发 `track_face_servo()`
+  移动舵机，画面跟着偏移会让手势检测的取景不稳定**。窗口关闭有两条路径，
+  处理不一样：检测成功由 `check_gesture()` 自己把 `gesture_scan_until`
+  置 0 主动关闭（LED 交给 `enter_dead()` 自己的红灯动画接管，不能再调
+  `restore_state_led()` 覆盖掉）；自然过期则由 `tick()` 里
+  `gesture_window_active` 变 False 但 `gesture_scan_until != 0.0` 这个
+  分支处理（清空 `finger_gun_count`、`restore_state_led()`、把
+  `gesture_scan_until` 归零标记"已处理"，避免每个 tick 重复调）。
+- **`check_gesture()` 手势判定**：用 MediaPipe 的 **Hand Landmarker**
+  （不是 Gesture Recognizer——"手指枪"不在预训练的 7 种手势里：
+  Closed_Fist/Open_Palm/Pointing_Up/Thumb_Down/Thumb_Up/Victory/
+  ILoveYou），跟 `self.face_detector` 一样在 `__init__()` 里创建好、
+  之后复用，不每次检测都重新建。判定规则基于 21 个手部关键点的归一化
+  坐标（0~1，MediaPipe 的 y 轴向下为正）：食指伸直（指尖 landmark 8 的
+  y 小于 PIP 关节 landmark 6 的 y）、拇指伸展（指尖 landmark 4 与食指
+  根部 landmark 5 的水平距离大于 `FINGER_GUN_THUMB_SPREAD_THRESHOLD`
+  =0.08）、中指/无名指/小指弯曲（指尖 12/16/20 的 y 大于各自 PIP 关节
+  10/14/18 的 y），五个条件同时满足才算这一帧命中。要求连续
+  `FINGER_GUN_CONFIRM_FRAMES`(2) 帧都命中才真正触发，用
+  `self.finger_gun_count` 计数，没命中就归零；窗口自然过期时如果这个
+  计数器还没归零（凑够确认帧数之前窗口就到期了），`tick()` 里也会显式
+  清零，避免残留到下一次开窗口时被当成"本来就有"的确认帧数。
+- **`hand_landmarker.task` 模型文件不提交进 git**：从 Google 官方 CDN
+  下载（`curl -o host/hand_landmarker.task "https://storage.googleapis.
+  com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/
+  hand_landmarker.task"`，约 7.8MB），放在 `host/` 目录——这跟
+  `self.face_detector` 用的 `FACE_MODEL_PATH`（`C:/tmp/blaze_face_
+  short_range.tflite`，同样在仓库之外）是同一个惯例：MediaPipe 模型
+  文件是本地依赖，不是仓库内容，重新拉取仓库/换机器需要重新下载这个
+  文件才能跑手势检测（人脸检测同理）。
+- **验证状态**：`enter_dead()`（表情/舵机/LED）、装死状态下触摸手势的
+  隔离（碰屏幕/长按被忽略）、双击→兴奋的完整恢复链路，都已经用一个
+  独立的临时验证脚本在真机上跑通过（不是在生产代码里插一个"长按 5 秒
+  强制装死"这类调试后门——那样需要事后记得删掉，容易忘；独立脚本测完
+  就丢，不留痕迹）。**手指枪手势识别本身还没有用真实手势实机验证过**
+  ——`check_gesture()` 的代码路径已经跑通（不崩溃、逻辑正确），但
+  `FINGER_GUN_THUMB_SPREAD_THRESHOLD` 等几何阈值是不是真的能可靠识别
+  手指枪、`DEAD_PITCH_DOWN`/`DEAD_EAR_WOBBLE_DEG` 等没有实机验证过的
+  参数具体合不合适，都需要真人举着手指枪对着摄像头测过才知道，跟表情
+  映射表里其它新功能一样，先给了一版能跑的默认值。**引擎初始化时
+  `landmark_projection_calculator.cc` 打过一条警告**："Using NORM_RECT
+  without IMAGE_DIMENSIONS is only supported for the square ROI"——
+  StackChan 摄像头画面不是正方形，理论上可能影响手部关键点定位精度，
+  是不是真的有实际影响、要不要显式传 `IMAGE_DIMENSIONS`/裁剪成正方形
+  再检测，也需要等真实手势测试的结果来判断，不要在没有实机数据的情况
+  下先动手改。
+- **`表情映射v8.xlsx` 还没有同步更新**——装死这个功能目前还处于
+  "手势识别未经实机验证"的阶段，等真人测试确认手势识别可靠、参数调过
+  一轮之后再一起补表格，避免表格记录一个还在变动中的半成品。
+
 ## 开机自动找人
 `PuppyEngine.run()` 开头以前是 `play_idle_animation()`（回正、常态表情、
 关灯），纯被动等第一次 IDLE 状态下的 `check_face()` 才会看到人（最多要等
