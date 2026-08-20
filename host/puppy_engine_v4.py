@@ -931,18 +931,29 @@ def load_deepseek_api_key():
 
 _audio_server = None
 
+class _QuietAudioRequestHandler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(AUDIO_DIR), **kwargs)
+
+    def log_message(self, *args):
+        pass  # 抑制访问日志
+
+
 def ensure_audio_server():
-    """启动一个 HTTP 文件服务器，让 StackChan 能下载要播放的音频。"""
+    """启动一个 HTTP 文件服务器，让 StackChan 能下载要播放的音频。用
+    ThreadingHTTPServer 而不是普通 HTTPServer——后者单线程同步处理请求，
+    一旦某次连接卡住（比如设备端 WiFi 抖动、开了 TCP 连接但没有及时发出
+    请求、或者下载中途被打断没干净关闭），唯一的服务线程会永久阻塞在等
+    这一个连接的数据上，之后所有音频下载请求都进不来、也不会自己恢复——
+    表现就是"能正常说几轮话，之后声音彻底消失"。ThreadingHTTPServer 给
+    每个连接单开一个线程，一个卡住的连接不会拖累其它请求。"""
     global _audio_server
     if _audio_server is not None:
         return
 
-    handler = lambda *args: http.server.SimpleHTTPRequestHandler(
-        *args, directory=str(AUDIO_DIR)
+    _audio_server = http.server.ThreadingHTTPServer(
+        ("0.0.0.0", AUDIO_SERVER_PORT), _QuietAudioRequestHandler
     )
-    handler.log_message = lambda *args: None  # 抑制日志输出
-
-    _audio_server = http.server.HTTPServer(("0.0.0.0", AUDIO_SERVER_PORT), handler)
     thread = threading.Thread(target=_audio_server.serve_forever, daemon=True)
     thread.start()
     print(f"  [音频服务器] http://{COMPUTER_IP}:{AUDIO_SERVER_PORT}/")

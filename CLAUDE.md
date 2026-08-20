@@ -921,6 +921,20 @@ Animation()` 这个固件函数也一并删掉（删掉触发源以后已经没�
 连带影响。
 
 ## 其它注意事项
+- **`ensure_audio_server()`（`puppy_engine_v4.py`）给 StackChan 下载 TTS 音频
+  用的本地 HTTP 服务器必须用 `http.server.ThreadingHTTPServer`，不能用普通
+  `http.server.HTTPServer`**——后者单线程同步处理请求，且 accept 到的连接
+  没有设置任何 socket 超时；只要有一次连接卡住（设备端 WiFi 抖动、开了 TCP
+  连接但没有及时发出请求、下载中途被打断没干净关闭……），唯一的服务线程
+  会永久阻塞在等这一个连接的数据上，之后所有音频下载请求都进不来、也不会
+  自己恢复——表现出来是"能正常说上几轮话，之后小狗的声音彻底消失，不会
+  自愈"，且设备本身没有崩溃（`/status` 照常能查询到，只是新音频下不下来）。
+  已经改成 `ThreadingHTTPServer`（每个连接单开一个线程，一个卡住的连接不
+  会拖累其它请求），用一个模拟"连接了但不发数据"的卡住连接验证过修复有效
+  （旧代码下这个测试会直接把新请求也一起卡死，改完以后新请求 0.2s 内正常
+  返回）。以后 host 端再起任何"设备会主动来连"的本地 HTTP 服务器，都应该
+  默认用 `ThreadingHTTPServer`（或至少显式设置 socket 超时），不要用裸的
+  `HTTPServer`。
 - vendored 的 M5Stack-Avatar 库文件 `C:\Users\89823\Documents\Arduino\libraries\
   M5Stack_Avatar\src\Effect.h` 里禁用了 Doubt/Angry/Happy/Sad/Sleepy 五个表情
   自带的装饰动画（汗滴/怒气/爱心/竖线/气泡），因为小狗脸不需要这些。这个文件
