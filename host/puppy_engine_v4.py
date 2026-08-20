@@ -166,12 +166,6 @@ PRIVACY_YAW = 800
 PRIVACY_PITCH = 100
 PRIVACY_SPEED = 150
 
-# --- 关机（退出程序）动画参数 ---
-SHUTDOWN_EYES_CLOSE_DELAY_SEC = 1.0    # 闭眼表情先停留这么久，让"眼皮合上"的
-                                        # 视觉效果真正被看到，再关屏幕——不能
-                                        # 闭眼和关屏幕之间不留时间差，不然看
-                                        # 起来就是直接黑屏，没有"睡着"的过渡感
-
 # --- LED（对照表情映射v7.xlsx）---
 # 固件的 /led 现在支持 mode 参数（solid/blink/breathe/rainbow/fade），呼吸/
 # 闪烁/彩虹/渐暗这些需要"持续"播放的效果由固件自己在本地 loop() 里驱动（见
@@ -817,19 +811,6 @@ def play_idle_animation():
     go_home()
     # 常态的灯效关掉了（原来是"微弱暖白常亮"）——按要求直接熄灯。
     set_led(off=True)
-
-def play_shutdown_animation():
-    """程序退出（"关机"）收尾动画：先闭眼，停留一下，再关屏幕——顺序不能反，
-    直接关屏幕看起来是纯黑一片，跟"睡着了"的直觉不符；先闭眼再关屏幕，视觉
-    上才是完整的"闭上眼睛→睡过去"过程。闭眼复用"隐私"表情（项目里唯一双眼
-    完全闭合的表情，见 PuppyFace.h 里 privacy 的实现），但只要这个视觉效果，
-    不需要隐私模式那个转头看向一侧的姿势，所以头先回正（go_home()）而不是
-    转到 PRIVACY_YAW/PRIVACY_PITCH。"""
-    set_expression("privacy")
-    go_home()
-    set_led(off=True)
-    time.sleep(SHUTDOWN_EYES_CLOSE_DELAY_SEC)
-    set_display(off=True)
 
 def play_curious_animation():
     """好奇：显示表情即可——语音已经由后台流式监听（MicStream）捕捉完毕，
@@ -2995,10 +2976,8 @@ class PuppyEngine:
         # 录音→识别→LLM→分支应对的整个过程才返回，tick() 观察不到这两个状态。
 
     def run(self):
-        # 上一轮进程退出如果走的是关机动画（play_shutdown_animation()），屏幕
-        # 会停在关闭状态；这一轮如果设备本身没有重启（只是重启了 host 脚本），
-        # 屏幕不会自己醒过来。开机第一步先显式唤醒，不管上次是怎么退出的都能
-        # 保证屏幕这次是亮着的。
+        # 兜底显式唤醒屏幕——万一上次是手动 curl /display?off=1 关掉的，或者
+        # 设备本身没重启（只是重启了 host 脚本），屏幕不会自己醒过来。
         set_display(on=True)
         # 开机迎接：主动抬头扫描找人，而不是像以前那样直接进常态被动等待
         # ——如果开机时人已经在设备前面，应该立刻被看到、进入人脸追踪，不用
@@ -3040,8 +3019,8 @@ class PuppyEngine:
                 time.sleep(max(0.0, MAIN_LOOP_INTERVAL_SEC - elapsed))
 
         except KeyboardInterrupt:
-            print("\n[引擎] Ctrl+C，关机动画中...")
-            play_shutdown_animation()
+            print("\n[引擎] Ctrl+C，回到常态...")
+            play_idle_animation()
         finally:
             # 不管是正常 Ctrl+C 退出还是主循环里跑出了没接住的异常，都要把
             # 本地麦克风的音频流关掉。
