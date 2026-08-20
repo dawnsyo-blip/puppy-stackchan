@@ -18,6 +18,10 @@
  *   custom "dizzy"     → 晕（漩涡眼，双眼同速自转、右眼领先左眼45°相位 +
  *                         张嘴（不吐舌）+ 双耳同步朝同一方向轻晃；由 BMI270
  *                         摇晃/拿起检测触发，见 puppy_engine_v4.py）
+ *   custom "dead"      → 装死（×× 眼 + 吐舌头；入场时整张脸先顺时针转
+ *                         DEAD_ROTATION_DEG，转完两只耳朵再各自绕耳根
+ *                         下垂 DEAD_EAR_DROOP_DEG；由碰屏幕后的手势扫描
+ *                         窗口检测到"手指枪"触发，见 puppy_engine_v4.py）
  *
  * 表情切换时，尺寸类参数（耳朵长宽、鼻子/嘴巴大小、旋转角度）会用
  * FloatTransition 在 500ms 内线性插值过渡；开心/好奇/思考时耳朵左右
@@ -225,6 +229,39 @@ static const float DIZZY_RIGHT_EYE_PHASE_DEG = 45.0f;  // 右眼在左眼同一�
 static const float DIZZY_NOSE_MOUTH_SCALE = 0.8f;   // 鼻子、嘴巴整体缩小20%（这一版嘴巴不画舌头了，但缩放比例还是同一个）
 static const float DIZZY_NOSE_CLOSER_PX = 8.0f;     // 鼻子（连带嘴巴）朝眼睛方向靠拢的像素数
 
+// 死（dead，设计中）：×× 眼 + 吐舌头，入场时整张脸先绕鼻子锚点顺时针转一个
+// 比"好奇"更大的角度，转完后两只耳朵再各自绕自己耳根松弛下垂。第一版默认值，
+// 没有实机验证过，等 expr_preview.ino 里反复调过之后再回来更新这段记录。
+static const float DEAD_ROTATION_DEG = 30.0f;              // 整体旋转角度：比好奇的15°更大，顺时针（正角度，
+                                                             // 沿用 DOUBT_ROTATE_RAD 顶部注释的"正=顺时针"约定，
+                                                             // 已经在代码里被"好奇：整体绕鼻子锚点顺时针转15°"
+                                                             // 这条注释验证过，不需要反号）
+static const unsigned long DEAD_ROTATION_DURATION_MS = 500;  // 整体旋转动画时长，跟 FloatTransition 默认时长一致
+static const float DEAD_EAR_DROOP_DEG = 30.0f;              // 两只耳朵各自绕自己耳根下垂旋转的角度
+static const unsigned long DEAD_EAR_DROOP_DURATION_MS = 300; // 耳朵下垂动画时长
+static const unsigned long DEAD_EAR_DROOP_DELAY_MS = 500;    // 耳朵下垂开始时间 = 整体旋转结束时间
+// 第一轮反馈：眼睛缩小10%（14→12.6）+ 朝鼻子方向靠拢一点；两侧耳朵也朝中轴线
+// 靠拢一点；左耳下垂完成后保持微微晃动（不是转完就定格）。靠拢的像素数和
+// EXCITED_EYE_INWARD_PX(8)/EXCITED_EAR_INWARD_PX(12) 同一量级估的，没有实机
+// 验证过具体是否够/太多。
+// 第二轮反馈：眼睛在第一轮基础上再缩小20%（12.6*0.8=10.08）；左耳的"晃动"
+// 改成绕耳根轻微旋转（±5°），不再是整只耳朵水平平移——见 PuppyEar 里
+// DEAD_EAR_WOBBLE_DEG 那段。
+static const float DEAD_X_EYE_SIZE = 10.08f;                // ×× 眼交叉线的半长：12.6*0.8（第二轮反馈再缩小20%）
+static const int DEAD_X_EYE_THICKNESS = 1;                  // ×× 眼线条粗细：实际画的时候用 [-THICKNESS,THICKNESS]
+                                                             // 偏移循环加粗，跟其它表情的描边粗细写法一致
+static const float DEAD_TONGUE_SCALE = 0.7f;                // 舌头缩放比例，相对 excited 舌头（EXCITED_SCALE=0.7）再 0.7 倍
+static const float DEAD_EYE_INWARD_PX = 6.0f;               // 眼睛缩小后朝鼻子方向靠拢的像素数
+static const float DEAD_EAR_INWARD_PX = 16.0f;              // 两侧耳朵朝中轴线靠拢的像素数（第三轮反馈从10加大到16）
+static const float DEAD_EAR_WOBBLE_DEG = 5.0f;               // 左耳下垂完成后绕耳根轻微旋转的幅度（±5°）
+static const float DEAD_EAR_WOBBLE_PERIOD_MS = 1200.0f;      // 摆动周期，跟 earSwingOffset() 的默认周期一致
+// 第三轮反馈：鼻子缩小20%并朝眼睛方向靠拢——鼻子第一次从"跟常态相同"改成
+// 有自己的专属尺寸，缩放系数和靠拢像素数分别跟 GRIEVED_NOSE_SCALE(1.1，
+// 这里反过来缩小)、DIZZY_NOSE_CLOSER_PX(8)/GRIEVED_NOSE_CLOSER_PX(6) 同一
+// 量级估的，没有实机验证过。
+static const float DEAD_NOSE_SCALE = 0.8f;                  // 鼻子整体缩小20%
+static const float DEAD_NOSE_CLOSER_PX = 8.0f;              // 鼻子朝眼睛方向靠拢的像素数
+
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
 // 布尔运算，具体做法见下面 draw() 里的实现注释），碗口正中间画一个白色实心
@@ -343,10 +380,10 @@ class PuppyEye : public Drawable {
   bool isLeft;  // true=屏幕左侧的眼睛, false=屏幕右侧
 
   // 眼睛款式编号：0隐私 1兴奋/peekaboo 2思考 3开心 4困倦 5抱歉
-  // 6常态/生气/好奇 7委屈 8晕（螺旋）
+  // 6常态/生气/好奇 7委屈 8晕（螺旋） 9死（××）
   int lastStyle_ = -1;
   unsigned long styleStartMs_ = 0;
-  FloatTransition doubtAngleAnim_;
+  FloatTransition doubtAngleAnim_;  // 好奇/死共用：整张脸绕鼻子锚点的旋转过渡
 
   bool wasExcited_ = false;
   unsigned long excitedStartMs_ = 0;
@@ -367,17 +404,25 @@ class PuppyEye : public Drawable {
     bool isPeekaboo = custom && g_customExpr == "peekaboo";
     bool exciteLike = isExcited || isPeekaboo;
     bool isDizzy = custom && g_customExpr == "dizzy";
+    bool isDead = custom && g_customExpr == "dead";
     // peekaboo 比"兴奋"整体再放大 PEEKABOO_SIZE_MUL（10%），乘在所有用到
     // EXCITED_SCALE/EXCITED_*_PX 的地方；真正的"兴奋"不受影响（sizeMul=1）。
     float sizeMul = isPeekaboo ? PEEKABOO_SIZE_MUL : 1.0f;
     unsigned long excitedElapsed = elapsedSinceTrue(isExcited, wasExcited_, excitedStartMs_);
 
-    float doubtAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD * doubtMirrorSign() : 0.0f);
+    // 死：跟好奇共用同一个整体旋转机制（rotTotal），但角度更大、固定顺时针
+    // （不随 yaw 镜像——好奇的镜像是为了配合舵机扫描时的歪头方向，死不需要）。
+    float doubtAngle = doubtAngleAnim_.update(
+        exp == Expression::Doubt ? DOUBT_ROTATE_RAD * doubtMirrorSign()
+        : (isDead ? DEAD_ROTATION_DEG * PI / 180.0f : 0.0f));
     applyRotationAroundPivot(doubtAngle, DOUBT_PIVOT_X, DOUBT_PIVOT_Y, cx, cy);
     float rotTotal = doubtAngle;
 
     // 兴奋/peekaboo：两只眼睛各自朝对方靠拢一点（左眼往右挪，右眼往左挪）。
-    int eyeInward = (int)roundf(eyeInwardAnim_.update(exciteLike ? EXCITED_EYE_INWARD_PX * sizeMul : 0.0f));
+    // 死：眼睛缩小以后也朝鼻子（中轴线）方向靠拢一点，同一个机制复用。
+    float eyeInwardTarget = exciteLike ? EXCITED_EYE_INWARD_PX * sizeMul
+                                        : (isDead ? DEAD_EYE_INWARD_PX : 0.0f);
+    int eyeInward = (int)roundf(eyeInwardAnim_.update(eyeInwardTarget));
     cx += isLeft ? eyeInward : -eyeInward;
 
     uint16_t col = ctx->getColorDepth() == 1
@@ -398,6 +443,7 @@ class PuppyEye : public Drawable {
     else if (exp == Expression::Sad) style = 5;
     else if (custom && g_customExpr == "grieved") style = 7;
     else if (isDizzy) style = 8;
+    else if (isDead) style = 9;
     else style = 6;
 
     unsigned long now = millis();
@@ -586,6 +632,24 @@ class PuppyEye : public Drawable {
       return;
     }
 
+    // ---- 死：×× 形，两条交叉短线，不眨眼（openRatio 无效果）。整张脸的
+    //      旋转（rotTotal）在这里体现为 X 本身两条线端点跟着一起转，
+    //      而不只是位置平移——用 rotateLocalOffset 对四个端点局部坐标
+    //      分别旋转，写法跟 grieved 的眉毛弧线（style 7）是同一个思路。----
+    if (style == 9) {
+      int len = (int)roundf(DEAD_X_EYE_SIZE * s);
+      for (int t = -DEAD_X_EYE_THICKNESS; t <= DEAD_X_EYE_THICKNESS; t++) {
+        int a1x, a1y, a2x, a2y, b1x, b1y, b2x, b2y;
+        rotateLocalOffset(rotTotal, -len, -len + t, a1x, a1y);
+        rotateLocalOffset(rotTotal, len, len + t, a2x, a2y);
+        rotateLocalOffset(rotTotal, -len, len + t, b1x, b1y);
+        rotateLocalOffset(rotTotal, len, -len + t, b2x, b2y);
+        spi->drawLine(cx + a1x, cy + a1y, cx + a2x, cy + a2y, col);
+        spi->drawLine(cx + b1x, cy + b1y, cx + b2x, cy + b2y, col);
+      }
+      return;
+    }
+
     // ---- 常态 / 生气 / 好奇：竖向椭圆，带眨眼动画；好奇时椭圆本身也跟着转 ----
     float openRatio = isLeft ? ctx->getLeftEyeOpenRatio() : ctx->getRightEyeOpenRatio();
     int rx = (int)roundf(8 * s);
@@ -632,6 +696,7 @@ class PuppyNose : public Drawable {
     bool isExcited = custom && g_customExpr == "excited";
     bool isGrieved = custom && g_customExpr == "grieved";
     bool isDizzy = custom && g_customExpr == "dizzy";
+    bool isDead = custom && g_customExpr == "dead";
     // peekaboo："基础表情和兴奋一样"——鼻子/嘴巴/舌头这些跟"兴奋"共用同一套
     // 参数，用 exciteLike 统一判断；跟 PuppyEye 里的用法保持一致。
     bool isPeekaboo = custom && g_customExpr == "peekaboo";
@@ -649,12 +714,14 @@ class PuppyNose : public Drawable {
                           ? 9.0f
                           : (exciteLike ? 10.0f * EXCITED_SCALE * sizeMul * noseMouthMul
                                         : (isGrieved ? 10.0f * GRIEVED_NOSE_SCALE
-                                                      : (isDizzy ? 10.0f * DIZZY_NOSE_MOUTH_SCALE : 10.0f)));
+                                                      : (isDizzy ? 10.0f * DIZZY_NOSE_MOUTH_SCALE
+                                                                 : (isDead ? 10.0f * DEAD_NOSE_SCALE : 10.0f))));
     float targetRy = isPrivacy
                           ? 6.0f
                           : (exciteLike ? 7.0f * EXCITED_SCALE * sizeMul * noseMouthMul
                                         : (isGrieved ? 7.0f * GRIEVED_NOSE_SCALE
-                                                      : (isDizzy ? 7.0f * DIZZY_NOSE_MOUTH_SCALE : 7.0f)));
+                                                      : (isDizzy ? 7.0f * DIZZY_NOSE_MOUTH_SCALE
+                                                                 : (isDead ? 7.0f * DEAD_NOSE_SCALE : 7.0f))));
     float targetOffX = isPrivacy ? -8.0f : 0.0f;
     float targetOffY = isPrivacy ? -5.0f : 0.0f;
 
@@ -686,7 +753,11 @@ class PuppyNose : public Drawable {
     float offYF = offYAnim_.update(targetOffY);
     float curveWidthF = cwAnim_.update(targetCw);
     float curveDepthF = cdAnim_.update(targetCd);
-    float rotAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD * doubtMirrorSign() : 0.0f);
+    // 死：跟好奇共用同一个整体旋转机制，角度更大、固定顺时针，见 PuppyEye 里
+    // 同一处改动的注释。
+    float rotAngle = doubtAngleAnim_.update(
+        exp == Expression::Doubt ? DOUBT_ROTATE_RAD * doubtMirrorSign()
+        : (isDead ? DEAD_ROTATION_DEG * PI / 180.0f : 0.0f));
 
     // 好奇表情下鼻子/嘴巴自身也跟着转。枢轴就是鼻子自己的锚点，
     // 所以鼻子中心的位置不动，但形状（椭圆朝向、嘴巴弧线）会跟着转。
@@ -698,7 +769,8 @@ class PuppyNose : public Drawable {
     //      （不是 exciteLike，不共用 EXCITED_NOSE_UP_PX）----
     float noseCloserPx = exciteLike ? EXCITED_NOSE_UP_PX * sizeMul
                                      : (isGrieved ? GRIEVED_NOSE_CLOSER_PX
-                                                   : (isDizzy ? DIZZY_NOSE_CLOSER_PX : 0.0f));
+                                                   : (isDizzy ? DIZZY_NOSE_CLOSER_PX
+                                                              : (isDead ? DEAD_NOSE_CLOSER_PX : 0.0f)));
     float noseUp = noseUpAnim_.update(noseCloserPx);
     cy -= (int)roundf(noseUp);
 
@@ -739,13 +811,15 @@ class PuppyNose : public Drawable {
     //      上的真实位置（不是估算值），保证舌头和嘴巴严丝合缝地连在一起、围成
     //      一个封闭的空间。晕最初也画过舌头，反馈"去掉舌头"以后改回只有
     //      exciteLike 才画——嘴巴本身的张开尺寸（含 DIZZY_NOSE_MOUTH_SCALE
-    //      缩放）不受影响，只是不再往嘴巴里加这一笔。----
-    if (exciteLike) {
+    //      缩放）不受影响，只是不再往嘴巴里加这一笔。死（isDead）复用同一段
+    //      舌头画法，嘴巴本身是常态弧线大小（curveWidth/curveDepth 没有被
+    //      isDead 改过），只是缩放系数换成 DEAD_TONGUE_SCALE。----
+    if (exciteLike || isDead) {
       int tongueHalfW = curveWidth / 2;
       // 嘴巴弧线是二次贝塞尔 (0,mouthOffY) -> (curveWidth/2, mouthOffY+curveDepth)
       // -> (curveWidth, mouthOffY+2)，在 x=curveWidth/2 处（t=0.5）的精确 y：
       float tongueAttachY = mouthOffY + curveDepth * 0.5f + 0.5f;
-      float tongueScaleMul = EXCITED_SCALE * sizeMul;
+      float tongueScaleMul = isDead ? DEAD_TONGUE_SCALE : (EXCITED_SCALE * sizeMul);
       const int tongueDepth = (int)roundf(8 * tongueScaleMul);  // U 形往下鼓出的深度
       for (int t = -1; t <= 1; t++) {
         int t0x, t0y, t1x, t1y, t2x, t2y;
@@ -792,9 +866,16 @@ class PuppyEar : public Drawable {
   FloatTransition doubtAngleAnim_;
   FloatTransition earTwistAnim_;        // 好奇：主体旋转结束后，"长耳"额外多转 15°
                                          // ——哪只耳朵是"长耳"由 doubtMirrorSign()
-                                         // 决定，不固定是左耳还是右耳，见 draw()
+                                         // 决定，不固定是左耳还是右耳
+  FloatTransition deadEarDroopAnim_{DEAD_EAR_DROOP_DURATION_MS};  // 死：主体旋转结束
+                                         // 后两只耳朵各自绕耳根下垂，用独立的过渡
+                                         // 实例（时长跟好奇的长耳过渡不一样，
+                                         // 300ms 而不是默认 500ms），不跟
+                                         // earTwistAnim_ 共用，避免互相影响
   bool wasDoubt_ = false;
   unsigned long doubtStartMs_ = 0;
+  bool wasDead_ = false;
+  unsigned long deadStartMs_ = 0;
 
   bool wasExcited_ = false;
   unsigned long excitedStartMs_ = 0;
@@ -927,6 +1008,7 @@ class PuppyEar : public Drawable {
     bool exciteLike = isExcited || isPeekaboo;
     bool isGrieved = custom && g_customExpr == "grieved";
     bool isDizzy = custom && g_customExpr == "dizzy";
+    bool isDead = custom && g_customExpr == "dead";
     // peekaboo 比"兴奋"整体再放大 PEEKABOO_SIZE_MUL（10%），乘在所有用到
     // EXCITED_SCALE/EXCITED_*_PX 的地方；真正的"兴奋"不受影响（sizeMul=1）。
     float sizeMul = isPeekaboo ? PEEKABOO_SIZE_MUL : 1.0f;
@@ -941,7 +1023,11 @@ class PuppyEar : public Drawable {
       pawPhaseStartMs_ = 0;
     }
 
-    float doubtAngle = doubtAngleAnim_.update(exp == Expression::Doubt ? DOUBT_ROTATE_RAD * doubtMirrorSign() : 0.0f);
+    // 死：跟好奇共用同一个整体旋转机制，角度更大、固定顺时针，见 PuppyEye 里
+    // 同一处改动的注释。
+    float doubtAngle = doubtAngleAnim_.update(
+        exp == Expression::Doubt ? DOUBT_ROTATE_RAD * doubtMirrorSign()
+        : (isDead ? DEAD_ROTATION_DEG * PI / 180.0f : 0.0f));
     applyRotationAroundPivot(doubtAngle, DOUBT_PIVOT_X, DOUBT_PIVOT_Y, cx, cy);
     float rotTotal = doubtAngle;
 
@@ -1023,8 +1109,10 @@ class PuppyEar : public Drawable {
     int topY = (int)roundf(topYAnim_.update((float)topYTarget));
 
     // ---- 兴奋/peekaboo：耳朵整体朝眼睛方向靠拢一点（水平方向），静态常驻，
-    //      不随时间变化 ----
-    int earInward = (int)roundf(earInwardAnim_.update(exciteLike ? EXCITED_EAR_INWARD_PX * sizeMul : 0.0f));
+    //      不随时间变化。死：耳朵朝中轴线靠拢一点，同一个机制复用 ----
+    float earInwardTarget = exciteLike ? EXCITED_EAR_INWARD_PX * sizeMul
+                                        : (isDead ? DEAD_EAR_INWARD_PX : 0.0f);
+    int earInward = (int)roundf(earInwardAnim_.update(earInwardTarget));
     cx -= dir * earInward;
 
     // ---- 摆动动画：开心 / 好奇 / 思考时耳朵左右轻轻摆动（水平平移）；
@@ -1033,7 +1121,16 @@ class PuppyEar : public Drawable {
     //      earSwingOffset() 对左右两只耳朵返回同一个偏移量，不像 dir 那样按
     //      isLeft 镜像，两只耳朵的端点会一起朝屏幕同一侧平移，天然就是"同步
     //      同一方向"，不需要额外的镜像/反相处理。----
+    // 死：主体旋转（DEAD_ROTATION_DURATION_MS）结束以后开始下垂，见下面
+    // deadEarDroopAnim_ 那段；这里先算出"是否已经到下垂开始时间"，摆动和
+    // 下垂共用同一个时间判断（第一轮反馈：左耳下垂之后要保持微微晃动，不是
+    // 转完就定格，所以摆动的起点跟下垂的起点用同一个时机）。
+    unsigned long deadElapsed = elapsedSinceTrue(isDead, wasDead_, deadStartMs_);
+    bool deadReadyToDroop = deadElapsed >= DEAD_EAR_DROOP_DELAY_MS;
+
     bool excitedSwingReady = isExcited && excitedElapsed >= EXCITED_BLINK_SWING_START_MS;
+    // 死不参与这条水平平移的摆动——第二轮反馈明确要求左耳的动画不是整只耳朵
+    // 平移，而是绕耳根旋转，见下面 earTwist 那段的 deadWobble。
     bool swinging = (exp == Expression::Happy) || (exp == Expression::Doubt) ||
                     (custom && g_customExpr == "thinking") || excitedSwingReady || isDizzy;
     int swing = swinging ? earSwingOffset() : 0;
@@ -1049,6 +1146,26 @@ class PuppyEar : public Drawable {
                              ? DOUBT_EAR_TWIST_RAD
                              : 0.0f;
     float earTwist = earTwistAnim_.update(twistTarget);
+
+    // 死：两只耳朵各自绕自己耳根松弛下垂 DEAD_EAR_DROOP_DEG——跟好奇的
+    // "长耳"不同，这里两只耳朵都要转，所以按 dir 镜像角度（而不是只给其中
+    // 一只非零目标），让两只耳朵对称地往外下垂，不是同方向一起偏转。用独立
+    // 的 deadEarDroopAnim_，跟 earTwist 分开加在一起（好奇和死不会同时成立，
+    // 正常情况下每一刻只有一个非零，直接相加等价于二选一，不会互相干扰）。
+    // 基准方向（左耳逆时针）没有实机验证过，如果看到耳朵往里勾而不是往外垂，
+    // 把 DEAD_EAR_DROOP_DEG 前面的负号去掉即可整体翻转。
+    float deadDroopTarget = (isDead && deadReadyToDroop) ? (-DEAD_EAR_DROOP_DEG * PI / 180.0f * dir) : 0.0f;
+    earTwist += deadEarDroopAnim_.update(deadDroopTarget);
+
+    // 死：左耳下垂完成后不再定格，绕耳根（跟上面下垂用的是同一个铰链点）
+    // 叠加一个 ±DEAD_EAR_WOBBLE_DEG 的轻微来回旋转，第二轮反馈明确要求
+    // 不是整只耳朵平移，所以直接加在 earTwist 这个角度上，跟 hingeThenRotate
+    // 现成的铰链旋转机制复用，不需要额外的平移量。只有左耳有这个效果，
+    // 右耳保持定格。
+    if (isDead && isLeft && deadReadyToDroop) {
+      earTwist += (DEAD_EAR_WOBBLE_DEG * PI / 180.0f) *
+                  sinf(2.0f * PI * (float)millis() / DEAD_EAR_WOBBLE_PERIOD_MS);
+    }
 
     float pivotLX = dir * earW;  // 耳根顶点（远离头部一侧的顶部端点）局部坐标
     float pivotLY = topY;

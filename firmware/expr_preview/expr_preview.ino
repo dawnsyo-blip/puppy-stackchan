@@ -49,13 +49,13 @@ void drawSubtitle(M5Canvas *spi, uint16_t fg) {}
 Avatar avatar;
 Expression baseExpr = Expression::Neutral;
 
-const char* EXPR_NAMES[] = {"neutral", "grieved", "peekaboo", "dizzy"};
-const int NUM_EXPR = 4;
+const char* EXPR_NAMES[] = {"neutral", "grieved", "peekaboo", "dizzy", "dead"};
+const int NUM_EXPR = 5;
 int exprIdx = 0;
 
 void applyExpr(const char* name) {
   g_customExpr = "";
-  if (strcmp(name, "grieved") == 0 || strcmp(name, "peekaboo") == 0 || strcmp(name, "dizzy") == 0) {
+  if (strcmp(name, "grieved") == 0 || strcmp(name, "peekaboo") == 0 || strcmp(name, "dizzy") == 0 || strcmp(name, "dead") == 0) {
     avatar.setExpression(Expression::Neutral);
     baseExpr = Expression::Neutral;
     g_customExpr = name;

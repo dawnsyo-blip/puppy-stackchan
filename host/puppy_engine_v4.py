@@ -190,6 +190,27 @@ DIZZY_LINGER_SEC = 2.0                # 摇晃/拿起信号消失后，"晕"表�
                                        # 一消失就立刻切走（第一版1.0s，反馈
                                        # 加长到2.0s）
 
+# --- 装死(dead)动画参数 ---
+DEAD_PITCH_DOWN = 80             # 低头角度，参考 CLAUDE.md 里 Y 轴舵机建议范围
+                                  # 5~85°，用接近下限的保守值，没有实机验证过
+DEAD_SPEED = 100                 # 跟 SORRY_SPEED 同量级
+DEAD_LED_RGB = (255, 0, 0)       # 红色，没有实机验证过
+DEAD_LED_BLINK_PERIOD_MS = 300
+DEAD_LED_BLINK_HOLD_SEC = 0.6    # 闪两下红灯保持的时长，之后切渐灭
+DEAD_LED_FADE_MS = 1500
+
+# --- 手势扫描窗口（碰屏幕"小开心"之后的互动期待期，检测"手指枪"触发装死）---
+GESTURE_WINDOW_SEC = 15.0        # 窗口持续时间
+GESTURE_POLL_SEC = 0.8           # 窗口期内摄像头轮询间隔——瓶颈是 /camera 本身
+                                  # 的响应速度（200-500ms），不是 MediaPipe 推理
+                                  # 速度（20-50ms），这个间隔留了余量，不会请求堆积
+FINGER_GUN_CONFIRM_FRAMES = 2    # 连续多少帧判定成立才真正触发，防止单帧误判
+FINGER_GUN_THUMB_SPREAD_THRESHOLD = 0.08  # 拇指指尖与食指根部的归一化水平距离阈值
+                                  # （手部关键点坐标是 0~1 归一化的），没有实机
+                                  # 验证过，需要拿真实手势测过再调
+HAND_MODEL_PATH = str(Path(__file__).resolve().parent / "hand_landmarker.task")
+GESTURE_LED_BREATHE_PERIOD_MS = 2000  # 窗口期"等待手势"的柔和暖白呼吸灯周期
+
 # --- 抱歉(sorry)动画参数（数值参考表情映射v7.xlsx）---
 SORRY_PITCH = 200                # 微低头
 SORRY_YAW = 100                  # 微微偏转，避开视线
@@ -494,6 +515,7 @@ EXPRESSION_MAP = {
     "grieved":  "grieved",
     "peekaboo": "peekaboo",
     "dizzy":    "dizzy",
+    "dead":     "dead",
 }
 
 
@@ -511,6 +533,7 @@ class State(Enum):
     THINKING = "思考"
     SORRY    = "抱歉"
     DIZZY    = "晕"
+    DEAD     = "装死"
     GAME_HIDE_SEEK = "捉迷藏"
 
 
@@ -1502,6 +1525,18 @@ class PuppyEngine:
         self.last_retrack_time = 0
         self.face_detected = False
         self.face_confirm_count = 0
+
+        # 手势检测（"手指枪" → 装死，见 check_gesture()）：跟人脸检测是两个
+        # 独立的 MediaPipe 模型实例，互不共享状态，在开机初始化时就创建好，
+        # 不在每次检测时重新创建——跟 self.face_detector 同一个模式。
+        hand_opts = vision.HandLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=HAND_MODEL_PATH),
+            num_hands=1,
+        )
+        self.hand_landmarker = vision.HandLandmarker.create_from_options(hand_opts)
+        self.gesture_scan_until = 0.0
+        self.last_gesture_check = 0
+        self.finger_gun_count = 0
         self.last_face_seen_time = 0
 
         # 一次"来访"期间是否已经打过招呼——第一次进 HAPPY 播完整开心动画后
@@ -1731,6 +1766,13 @@ class PuppyEngine:
         if old != State.HAPPY:
             print(f"[转移] {old.value} → 开心（{reason}）")
         play_xiaokaixin_animation()
+        # "小开心"动画播完，开一个手势扫描窗口——期待接下来几秒用户可能会
+        # 比"手指枪"手势逗小狗装死，见 check_gesture()/tick() 里的窗口机制。
+        # 柔和的暖白呼吸灯给用户一个"小狗在等你比手势"的提示，覆盖掉
+        # play_xiaokaixin_animation() 刚设的开心常亮；窗口关闭时（自然过期
+        # 或者检测成功触发装死）都会把 LED 换掉，见 tick() 里的处理。
+        self.gesture_scan_until = time.time() + GESTURE_WINDOW_SEC
+        set_led_mode("breathe", *WARM_WHITE_RGB, period_ms=GESTURE_LED_BREATHE_PERIOD_MS)
 
     def restore_state_led(self):
         """把 LED 恢复成当前状态本该有的常驻效果——任何"临时借用" LED 的地方
@@ -1752,18 +1794,42 @@ class PuppyEngine:
             set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
         elif self.state == State.DIZZY:
             set_led_mode("breathe", *DIZZY_LED_RGB, period_ms=DIZZY_LED_BREATHE_PERIOD_MS)
+        elif self.state == State.DEAD:
+            # enter_dead() 播完闪两下红灯之后本来就是渐灭到熄灭，这里显式
+            # 写出来（虽然效果跟下面 IDLE 的兜底一样），不要让 DEAD 只靠
+            # "else" 兜底隐式生效——碰屏幕的触摸反馈灯松开时会调这个方法，
+            # 装死状态下这条路径是真的会被走到的（见 handle_touch_trigger()
+            # 的 DEAD 分支说明），不是纯理论上的兜底。
+            set_led(off=True)
         else:  # IDLE
             set_led(off=True)
 
     def enter_excited_from_touch(self):
-        """从触摸手势进兴奋。如果是从隐私状态触发的（头顶双击），先把舵机
-        转到正对人脸再开始兴奋动画——隐私姿势本身刻意把头转开（PRIVACY_
-        YAW/PITCH），不这样处理的话兴奋的摇摆动作会从一个背对着人的诡异
-        角度开始；其它状态触发时头本来就大致朝前，不需要这
+        """从触摸手势进兴奋。如果是从隐私或装死状态触发的（头顶双击），先把
+        舵机转到正对人脸再开始兴奋动画——隐私姿势本身刻意把头转开
+        （PRIVACY_YAW/PITCH），装死则是低头看地（DEAD_PITCH_DOWN），两种都
+        不适合直接从那个角度开始兴奋的摇摆动作；装死状态下摄像头本来就没在
+        轮询（见 tick() 的 DEAD 分支），self.face_detected 可能是装死之前
+        残留的旧值，跟隐私状态"摄像头关着、人脸信息过时"是同一个问题，直接
+        复用同一个方法处理。其它状态触发时头本来就大致朝前，不需要这
         一步。"""
-        if self.state == State.PRIVACY:
+        if self.state in (State.PRIVACY, State.DEAD):
             self._face_person_before_excited()
         self.transition(State.EXCITED)
+
+    def enter_dead(self):
+        """手势扫描窗口检测到"手指枪"手势时触发（见 check_gesture()，还没
+        接入）。同步阻塞执行完整的装死收尾动作，跟 enter_excited_from_
+        touch() 是同一个模式——动画在这里手动播完，transition(State.DEAD)
+        只负责记录状态本身、更新 state_enter_time，不会重复播放任何动画
+        （transition() 的 if/elif 链里没有 DEAD 分支，落到这个状态时什么
+        都不做）。"""
+        set_expression("dead")
+        move_servo(pitch=DEAD_PITCH_DOWN, speed=DEAD_SPEED, mute=True)
+        set_led_mode("blink", *DEAD_LED_RGB, period_ms=DEAD_LED_BLINK_PERIOD_MS)
+        time.sleep(DEAD_LED_BLINK_HOLD_SEC)
+        set_led_mode("fade", *DEAD_LED_RGB, fade_ms=DEAD_LED_FADE_MS)
+        self.transition(State.DEAD)
 
     def _face_person_before_excited(self):
         """隐私状态下摄像头是关的，不知道人具体在哪——先回正（比停留在隐私
@@ -1803,11 +1869,19 @@ class PuppyEngine:
         触摸头顶才能退出"了。双击本来就是不分状态的全局触发，隐私状态下
         自然也生效，不需要单独处理——这里原来试过给隐私状态额外做一个"头顶
         单击"专属退出手势（`wasSingleClicked()`），实测这个单击判定很难可靠
-        触发，改回了双击。"""
-        is_screen_trigger = touch["screen_tap"] and self.state != State.PRIVACY
+        触发，改回了双击。
+
+        装死状态下收得比隐私更紧：碰屏幕、头顶长按都直接忽略（跟隐私共用
+        的 `and self.state != State.PRIVACY`/长按分支的 `and` 条件里都
+        补一个排除 DEAD），只认头顶双击——双击本来就是不分状态的全局触发，
+        不需要专门加分支，落进下面 `elif touch["double_tap"]:` 那一支，
+        自然会调 enter_excited_from_touch()（见那个方法里对 DEAD 状态的
+        额外处理：先转回正对人脸，因为装死时头是低垂朝下的）。"""
+        is_screen_trigger = touch["screen_tap"] and self.state not in (State.PRIVACY, State.DEAD)
         is_trigger = (
             is_screen_trigger or touch["double_tap"]
-            or (touch["held_ms"] >= PRIVACY_HOLD_SEC * 1000 and not self.privacy_hold_fired)
+            or (touch["held_ms"] >= PRIVACY_HOLD_SEC * 1000 and not self.privacy_hold_fired
+                and self.state != State.DEAD)
         )
         if not is_trigger:
             return False
@@ -1893,6 +1967,62 @@ class PuppyEngine:
         new_yaw = max(-1280, min(1280, int(current_yaw + delta)))
         print(f"[追踪] 人脸位置={face_x:.2f}，yaw {current_yaw}→{new_yaw}")
         move_servo(yaw=new_yaw, speed=200)
+
+    def check_gesture(self):
+        """手势扫描窗口期内调用（见 tick()），拍一帧检测"手指枪"（finger
+        gun）手势。用 Hand Landmarker（不是 Gesture Recognizer——"手指枪"
+        不在预训练的 7 种手势里：Closed_Fist/Open_Palm/Pointing_Up/
+        Thumb_Down/Thumb_Up/Victory/ILoveYou），自己写一套基于 21 个手部
+        关键点归一化坐标（0~1）的几何规则：
+          - 食指伸直：指尖(8) y 小于 PIP 关节(6) y——MediaPipe 的 y 轴向下
+            为正，指尖比关节更靠上（y 更小）才算伸直。
+          - 拇指伸展：拇指指尖(4)与食指根部(5)的水平距离大于
+            FINGER_GUN_THUMB_SPREAD_THRESHOLD——拇指张开而不是贴着手掌。
+          - 中指/无名指/小指弯曲：指尖(12/16/20) y 大于各自 PIP 关节
+            (10/14/18) y——指尖低于关节即弯曲。
+        五个条件同时满足才判定为这一帧命中。自己按 GESTURE_POLL_SEC 节流
+        （跟 check_touch() 的 TOUCH_POLL_SEC 是同一个写法），调用方（tick()）
+        不需要关心频率，只要窗口开着就可以每个 tick 都调，不会因为节流而
+        漏调。连续 FINGER_GUN_CONFIRM_FRAMES 帧都命中才真正触发（防止单帧
+        误判），用 self.finger_gun_count 计数，没命中就归零；命中后立刻
+        关闭窗口（self.gesture_scan_until = 0）并调用 enter_dead()——计数器
+        本身在这里也清零，避免下次开窗口时残留这次用剩的计数，等窗口过期
+        没触发时的归零则交给 tick() 里窗口过期那个分支处理（见那边的说明）。
+        """
+        now = time.time()
+        if now - self.last_gesture_check < GESTURE_POLL_SEC:
+            return
+        self.last_gesture_check = now
+
+        img = capture_frame()
+        if img is None:
+            self.finger_gun_count = 0
+            return
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        results = self.hand_landmarker.detect(mp_img)
+
+        detected = False
+        if results.hand_landmarks:
+            lm = results.hand_landmarks[0]
+            index_straight = lm[8].y < lm[6].y
+            thumb_spread = abs(lm[4].x - lm[5].x) > FINGER_GUN_THUMB_SPREAD_THRESHOLD
+            middle_curled = lm[12].y > lm[10].y
+            ring_curled = lm[16].y > lm[14].y
+            pinky_curled = lm[20].y > lm[18].y
+            detected = index_straight and thumb_spread and middle_curled and ring_curled and pinky_curled
+
+        if detected:
+            self.finger_gun_count += 1
+            print(f"[手势] 检测到手指枪（{self.finger_gun_count}/{FINGER_GUN_CONFIRM_FRAMES}）")
+        else:
+            self.finger_gun_count = 0
+
+        if self.finger_gun_count >= FINGER_GUN_CONFIRM_FRAMES:
+            print("[触发] 手指枪确认 → 装死")
+            self.gesture_scan_until = 0.0
+            self.finger_gun_count = 0
+            self.enter_dead()
 
     def track_face_once(self):
         """CURIOUS/THINKING 状态下的轻量级人脸追踪：检测到人脸就用
@@ -2116,13 +2246,17 @@ class PuppyEngine:
         print(f"[唤醒] 捕捉到语音段（{dur:.2f}s）")
         self.record_interaction()
 
-        if self.state == State.PRIVACY:
-            # 隐私状态下不接受语音唤醒——退出隐私只认触摸头顶（长按/双击，
-            # 见 handle_touch_trigger()）。这段语音（不管是真的在说话还是
-            # 环境噪音误触发）直接丢弃，不进对话流程；MicStream 的滚动
-            # 缓冲/VAD 本身继续正常跑，不受影响，只是 host 端不理会这次
-            # take_utterance() 的结果。
-            print("[唤醒] 隐私状态下忽略语音（只有触摸头顶能退出隐私）")
+        if self.state in (State.PRIVACY, State.DEAD):
+            # 隐私/装死状态下都不接受语音唤醒——退出这两个状态只认触摸头顶
+            # （隐私：长按/双击；装死：只有双击，见 handle_touch_trigger()）。
+            # 这段语音（不管是真的在说话还是环境噪音/装死时舵机低头动作的
+            # 噪音误触发）直接丢弃，不进对话流程；MicStream 的滚动缓冲/VAD
+            # 本身继续正常跑，不受影响，只是 host 端不理会这次
+            # take_utterance() 的结果——这也是为什么 tick() 里不能直接跳过
+            # 调用 check_voice_wake()：不调用的话，这段时间里说完的话会一直
+            # 堆在队列里排不空，等状态切走以后下一次调用会突然吐出一段"旧"
+            # 语音，被当成用户刚说的话处理，跟隐私状态是同一个坑。
+            print(f"[唤醒] {self.state.value}状态下忽略语音（只有触摸头顶能退出）")
             return False
 
         if self.face_detected:
@@ -2884,9 +3018,11 @@ class PuppyEngine:
         # 能观察到的哪个状态（常态/开心/兴奋/困倦/隐私/抱歉）都可以被打断，
         # 包括隐私——物理摇晃/拿起设备是很明确的"人在跟我互动"信号，比隐私
         # 状态下偶尔混进来的杂散摄像头帧可信得多。对话/捉迷藏这类同步阻塞的
-        # 流程正在进行时 tick() 本身没有机会跑到这里，不需要额外排除。
+        # 流程正在进行时 tick() 本身没有机会跑到这里，不需要额外排除。装死
+        # 例外：小狗"死了"，不应该被晃醒，只认头顶双击（上面触摸分支已经
+        # 处理过了）。
         is_shaking = self.check_shaking()
-        if is_shaking and self.state != State.DIZZY:
+        if is_shaking and self.state not in (State.DIZZY, State.DEAD):
             print("[触发] 检测到摇晃/拿起 → 晕")
             self.dizzy_shake_stopped_at = None
             self.transition(State.DIZZY)
@@ -2899,15 +3035,42 @@ class PuppyEngine:
         #     再来看 held_ms，用户多半已经松手了。self.touch_pressed 由
         #     check_touch() 维护，不要求本轮 tick 恰好轮到触摸这个 poll_slot
         #     也能读到最近一次的按住状态，最多滞后一个轮询周期，长按持续
-        #     3 秒以上，这点滞后不影响判断）---
+        #     3 秒以上，这点滞后不影响判断）。装死状态不排除在外——理由见
+        #     check_voice_wake() 内部 DEAD 分支的说明，跟隐私状态是同一个
+        #     "必须继续调用才能持续排空队列"的道理，不能简单地在这里跳过。
         if self.state not in (State.CURIOUS, State.THINKING) and not self.touch_pressed:
             if self.check_voice_wake():
                 return
 
+        # --- 手势扫描窗口（碰屏幕"小开心"之后的互动期待期，见
+        #     enter_xiaokaixin() 末尾设置 self.gesture_scan_until）---
+        # 窗口期内每个 tick 都调 check_gesture()（自己按 GESTURE_POLL_SEC
+        # 节流，不会真的每 tick 都发请求），检测到手指枪就在里面直接触发
+        # enter_dead() 并关闭窗口。窗口期内故意不做人脸检测——不是为了省
+        # ESP32 负载（MediaPipe 推理在电脑端跑，ESP32 端不管拍的照片给谁用
+        # 开销都一样），而是人脸检测会触发 track_face_servo() 移动舵机，
+        # 画面跟着偏移会让手势检测的取景不稳定。
+        gesture_window_active = time.time() < self.gesture_scan_until
+        if gesture_window_active:
+            self.check_gesture()
+        elif self.gesture_scan_until != 0.0:
+            # 窗口自然过期（不是被 check_gesture() 检测成功后主动关闭——那
+            # 种情况 gesture_scan_until 已经在 check_gesture() 里被设成
+            # 0.0，不会再进这个分支，LED 交给 enter_dead() 自己的红灯动画
+            # 接管，不需要也不应该在这里覆盖）：清掉残留的确认帧计数，避免
+            # 留到下一次开窗口时被当成"本来就有"的确认帧数；LED 换回当前
+            # 状态本该有的常驻效果，还回去给 restore_state_led() 管。
+            # gesture_scan_until 归零标记"已经处理过"，避免每个 tick 都
+            # 重复调 restore_state_led()。
+            self.finger_gun_count = 0
+            self.gesture_scan_until = 0.0
+            self.restore_state_led()
+
         # --- 状态内行为 ---
-        # 人脸检测（会发 /camera 请求）只在轮到 poll_slot==1 时真正执行；
-        # 计时器类判断（空闲/困倦/兴奋持续时间）不发请求，每轮都可以正常判断。
-        do_face_check = (poll_slot == 1)
+        # 人脸检测（会发 /camera 请求）只在轮到 poll_slot==1 时真正执行，且
+        # 手势扫描窗口开着的时候整个跳过（理由见上面那段）；计时器类判断
+        # （空闲/困倦/兴奋持续时间）不发请求，每轮都可以正常判断，不受影响。
+        do_face_check = (poll_slot == 1) and not gesture_window_active
 
         if self.state == State.IDLE:
             if do_face_check:
@@ -2982,6 +3145,15 @@ class PuppyEngine:
                 elif time.time() - self.dizzy_shake_stopped_at >= DIZZY_LINGER_SEC:
                     print("[触发] 晕表情停留结束 → 兴奋")
                     self.transition(State.EXCITED)
+
+        elif self.state == State.DEAD:
+            # 不做任何事——不轮询摄像头（人脸/手势检测都不需要在这个状态下
+            # 跑）、不判断状态持续时间、不累加空闲计时。退出只认头顶双击，
+            # 已经在最上面的触摸分支里处理过了（handle_touch_trigger() 对
+            # DEAD 状态的早期返回逻辑），这里到达时说明双击还没发生，继续
+            # 保持装死姿势，什么都不用做，跟 PRIVACY 分支的 pass 是同一个
+            # 写法。
+            pass
 
         # CURIOUS / THINKING 是瞬时状态：run_conversation_turn() 会同步跑完
         # 录音→识别→LLM→分支应对的整个过程才返回，tick() 观察不到这两个状态。
