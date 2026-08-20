@@ -1601,6 +1601,15 @@ class PuppyEngine:
         self.last_retrack_time = 0
         self.face_detected = False
         self.face_confirm_count = 0
+        # detect_face_once() 本身耗时可达 1~2s（/camera 下载 + mediapipe 推理，
+        # 见 check_face()/retrack_face() 改成后台线程那段说明），必须靠这个锁
+        # 防止两处调用（tick() 触发的后台 worker、以及 scan_for_face() /
+        # track_face_once() / _face_person_before_excited() 这些仍然同步阻塞
+        # 调用的路径）同时调用同一个 self.face_detector 实例——跟 self._asr_lock
+        # 保护 SenseVoice 并发调用是同一个理由。_face_worker_busy 防止上一个
+        # 后台检测还没跑完时又叠加启动下一个。
+        self.face_detect_lock = threading.Lock()
+        self._face_worker_busy = False
 
         # 手势检测（"手指枪" → 装死，见 check_gesture()）：跟人脸检测是两个
         # 独立的 MediaPipe 模型实例，互不共享状态，在开机初始化时就创建好，
@@ -1985,17 +1994,26 @@ class PuppyEngine:
             self.enter_xiaokaixin()
         elif touch["double_tap"]:
             print("[触发] 头顶双击 → 兴奋！")
-            # 双击是个瞬时手势，press/release 边沿那套触摸反馈灯（见
-            # check_touch()）不一定能可靠地在双击的两次快速点按之间抓到；
-            # 这里显式点一次暖白灯确认"感应到了"，再进兴奋状态本该有的彩虹
-            # 快闪。如果已经在 EXCITED 状态（transition() 对"目标状态跟
-            # 当前一样"是空操作，不会重播彩虹快闪），不加这个兜底的话，
-            # 双击既不会有暖白反馈、也不会有任何其它可见变化，感觉像完全
-            # 没反应；restore_state_led() 保证不管是不是空操作，最终都会
-            # 落回兴奋该有的彩虹快闪，不会卡在这次反馈用的暖白上。
-            set_led_mode("solid", *WARM_WHITE_RGB)
-            self.enter_excited_from_touch()
-            self.restore_state_led()
+            if self.state == State.EXCITED:
+                # 已经在兴奋状态，transition() 对"目标状态跟当前一样"是空
+                # 操作，不会重播彩虹快闪——双击不会有任何其它可见变化，感觉
+                # 像完全没反应，这里才需要显式点一次暖白灯确认"感应到了"，
+                # 再用 restore_state_led() 落回兴奋本该有的彩虹快闪。
+                set_led_mode("solid", *WARM_WHITE_RGB)
+                self.enter_excited_from_touch()
+                self.restore_state_led()
+            else:
+                # 真正会发生状态切换的情况（从装死/隐私/其它任何状态双击进
+                # 兴奋）：transition()→play_excited_animation() 马上就会把
+                # LED 换成彩虹快闪、表情换成兴奋，这个变化本身已经足够明显、
+                # 足够快（一次 HTTP 往返，~100ms 级），不需要再额外点一次
+                # 暖白灯"确认收到"。**之前统一都点这一下，是这次用户反馈
+                # "装死→兴奋之间会先变成开心"的真正原因**：暖白灯正好是
+                # "开心"状态的招牌配色，这次预先点亮跟紧随其后的真正状态
+                # 切换撞在一起，视觉上第一眼会读成"先开心了一下、再兴奋"，
+                # 不是真的有过渡动画或者触摸延迟，是这次多余的确认闪光本身
+                # 制造出的错觉。
+                self.enter_excited_from_touch()
         else:
             self.privacy_hold_fired = True
             if self.state == State.PRIVACY:
@@ -2025,19 +2043,21 @@ class PuppyEngine:
 
     def detect_face_once(self):
         """拍一帧检测人脸，返回 (是否检测到, 人脸中心的水平归一化坐标)。
-        坐标范围 0.0(最左)~1.0(最右)；没检测到人脸时坐标为 None。"""
-        img = capture_frame()
-        if img is None:
-            return False, None
-        h, w = img.shape[:2]
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        results = self.face_detector.detect(mp_img)
-        if not results.detections:
-            return False, None
-        bbox = results.detections[0].bounding_box
-        face_center_x = bbox.origin_x + bbox.width / 2
-        return True, face_center_x / w
+        坐标范围 0.0(最左)~1.0(最右)；没检测到人脸时坐标为 None。用锁串行化
+        （见 face_detect_lock 声明处注释），调用方不用关心并发安全。"""
+        with self.face_detect_lock:
+            img = capture_frame()
+            if img is None:
+                return False, None
+            h, w = img.shape[:2]
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            results = self.face_detector.detect(mp_img)
+            if not results.detections:
+                return False, None
+            bbox = results.detections[0].bounding_box
+            face_center_x = bbox.origin_x + bbox.width / 2
+            return True, face_center_x / w
 
     def track_face_servo(self, face_x):
         """把人脸水平位置(0.0=最左, 1.0=最右)相对画面中心(0.5)的偏差，
@@ -2111,47 +2131,91 @@ class PuppyEngine:
         return True
 
     def check_face(self):
-        """带连续确认的人脸检测。"""
+        """带连续确认的人脸检测——只负责决定"这个 tick 要不要发起一次检测"，
+        真正的拍照+推理丢给后台线程做（见 _check_face_worker()）。
+
+        **这是为了修复"碰屏幕→小开心"延迟明显（实测 ~2s）的问题**：
+        detect_face_once() 单次耗时可达 1~2s（/camera 下载一张 JPEG +
+        mediapipe 推理），之前是在 tick() 里同步阻塞调用的——tick() 内触摸
+        检查虽然排在人脸检查前面、优先处理，但这防不住"用户碰屏幕的那一刻，
+        恰好上一步的人脸检测正卡在阻塞调用里"：这种情况下这次触摸要等到
+        当前这个（慢）tick() 整个跑完、下一个 tick() 重新开始时才会被
+        check_touch() 看到，等待时长最坏情况就是这次人脸检测实际耗时，
+        跟用户反馈的 ~2s 延迟对得上。之前"触摸响应特别慢"那次修复解决的是
+        轮询节奏和 sleep 计算的问题，没有解决这个"触摸恰好撞上一次慢检测"
+        的情况。
+
+        改成后台线程后，check_face() 本身只做时间判断+起一个线程，几乎立刻
+        返回，tick() 不会再被这一步卡住；检测结果通过 face_confirm_count/
+        face_detected 这些实例属性异步写回，跟原来的效果一致，只是时序上
+        从"这个 tick 内看到最新结果"变成"下一两个 tick 才看到"——检测间隔
+        本来就有 FACE_CHECK_INTERVAL_SEC(3s) 这么长，晚一两个 tick（≤1s）
+        不影响实际行为。"""
         now = time.time()
         if now - self.last_face_check < FACE_CHECK_INTERVAL_SEC:
             return
+        if self._face_worker_busy:
+            return
         self.last_face_check = now
+        self._face_worker_busy = True
+        threading.Thread(target=self._check_face_worker, daemon=True).start()
 
-        found, _ = self.detect_face_once()
-
-        if found:
-            self.face_confirm_count += 1
-            if self.face_confirm_count >= FACE_CONFIRM_FRAMES:
-                if not self.face_detected:
-                    print("[检测] 人脸确认")
-                self.face_detected = True
-                self.last_face_seen_time = now
-                self.record_interaction()
-        else:
-            self.face_confirm_count = 0
-            if self.face_detected and (now - self.last_face_seen_time > FACE_LOST_GRACE_SEC):
-                print(f"[检测] 人脸丢失（超过 {FACE_LOST_GRACE_SEC}s 未检到）")
-                self.face_detected = False
+    def _check_face_worker(self):
+        try:
+            found, _ = self.detect_face_once()
+            now = time.time()
+            if found:
+                self.face_confirm_count += 1
+                if self.face_confirm_count >= FACE_CONFIRM_FRAMES:
+                    if not self.face_detected:
+                        print("[检测] 人脸确认")
+                    self.face_detected = True
+                    self.last_face_seen_time = now
+                    self.record_interaction()
+            else:
+                self.face_confirm_count = 0
+                if self.face_detected and (now - self.last_face_seen_time > FACE_LOST_GRACE_SEC):
+                    print(f"[检测] 人脸丢失（超过 {FACE_LOST_GRACE_SEC}s 未检到）")
+                    self.face_detected = False
+        finally:
+            self._face_worker_busy = False
 
     def retrack_face(self):
         """开心状态下定期检测人脸并跟随：检测到就用 track_face_servo 微调
         朝向，而不是每次都先把头转回 yaw=0 再检测——那样每隔
         FACE_RETRACK_INTERVAL_SEC 就会有一次生硬的"回正"动作，人脸不在正
-        前方时看起来像在甩头。现在只做增量微调，跟随更平滑。"""
+        前方时看起来像在甩头。现在只做增量微调，跟随更平滑。
+
+        跟 check_face() 同样的原因（见那边的说明）改成后台线程发起，不在
+        tick() 里同步阻塞——HAPPY 状态下摸屏幕触发"小开心"同样会撞上这个
+        问题，这里不改的话，开心状态下碰屏幕依然会有 ~2s 延迟。跟
+        check_face() 共用同一个 _face_worker_busy 忙碌标记：两者分属不同
+        状态（IDLE/SLEEPY/SORRY 用 check_face，HAPPY 用 retrack_face），
+        同一时刻只会有一个在跑，不会互相抢占，只是防止上一次还没做完就
+        叠加起下一次。"""
         now = time.time()
         if now - self.last_retrack_time < FACE_RETRACK_INTERVAL_SEC:
             return
+        if self._face_worker_busy:
+            return
         self.last_retrack_time = now
+        self._face_worker_busy = True
+        threading.Thread(target=self._retrack_face_worker, daemon=True).start()
 
-        found, face_x = self.detect_face_once()
-        if found:
-            self.last_face_seen_time = now
-            self.face_detected = True
-            self.record_interaction()
-            self.track_face_servo(face_x)
-            print("[追踪] 人脸仍在")
-        else:
-            print("[追踪] 本次未检到人脸")
+    def _retrack_face_worker(self):
+        try:
+            found, face_x = self.detect_face_once()
+            now = time.time()
+            if found:
+                self.last_face_seen_time = now
+                self.face_detected = True
+                self.record_interaction()
+                self.track_face_servo(face_x)
+                print("[追踪] 人脸仍在")
+            else:
+                print("[追踪] 本次未检到人脸")
+        finally:
+            self._face_worker_busy = False
 
     # ---------- 扫描找人 ----------
 
