@@ -73,7 +73,8 @@ from scipy.signal import resample_poly
 BASE_URL = "http://192.168.137.100"
 COMPUTER_IP = "192.168.137.1"   # 电脑在热点网络上的 IP（StackChan 用它来下载要播放的音频，
                                  # 也是 /stream 推流要连过来的地址）
-AUDIO_SERVER_PORT = 8080
+AUDIO_SERVER_PORT = 8090  # 8080 会被本机的沙盒代理/VPN 工具（Jamjams）保留，bind 会报
+                           # WinError 10013（拒绝访问，不是端口占用），换一个不常见端口即可
 TIMEOUT = 5                     # 普通请求（/face、/servo、/touch）超时
 PLAY_TIMEOUT = 30               # /play 本身现在是非阻塞的（固件后台任务播放，
                                  # 见 firmware.ino 的 playTaskFn()），这个超时是
@@ -393,7 +394,7 @@ MIC_UNMUTE_COOLDOWN_SEC = 0.35     # wait_for_playback() 看到 /status 的 play
                                     # COOLDOWN_MS(300ms) 是同一个思路：状态标志
                                     # 变化不等于物理效果立刻消失，需要留一点缓冲。
 # --- 完整对话链路 ---
-KEYWORD_GAP_SEC = 0.5            # qa_complex 逐个念关键词，两个关键词之间的间隔
+KEYWORD_GAP_SEC = 0.8            # qa_complex 逐个念关键词，两个关键词之间的间隔
 BUTTON_PRESS_MS = 200            # 每个关键词播放前，按钮"按下"状态维持的时长
 KEYWORD_MAX_CHARS = 10           # 单个关键词允许的最大字符数——SYSTEM_PROMPT 要求
                                   # 每个关键词 1-3 个字，词库里最长的合法例外是英文
@@ -475,10 +476,10 @@ ANIMALESE_OUTPUT_LETTER_SECS = 0.075    # 输出每个字母的时长——只�
                                          # 部分（原版的一半），念起来更快更像"叽里
                                          # 呱啦"，而不是拖长的原始采样
 ANIMALESE_PITCH = 1.0                   # 音高：1.0 正常，<1 更低沉/慢，>1 更高亢/快
-ANIMALESE_VOLUME_BOOST = 3.0            # 音量放大倍数——1W 小喇叭偏小声，这个值是
-                                         # host/animalese_test.py 里实机试出来的，
-                                         # 不是最初设计草案里写的 1.0，两边对不上时
-                                         # 以这个实测值为准
+ANIMALESE_VOLUME_BOOST = 1.0            # 音量放大倍数——host/animalese_test.py 里试出来
+                                         # 的 3.0 实机听起来偏大声（而且 3x 放大配合
+                                         # np.clip 到 [-1,1] 会有明显削波失真），改回
+                                         # 不放大
 TTS_SAMPLE_RATE = 16000          # 转成 StackChan /record 同款格式：16kHz/单声道/16bit
 
 AUDIO_DIR = Path(tempfile.gettempdir()) / "stackchan_audio"
