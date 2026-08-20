@@ -205,9 +205,20 @@ GESTURE_POLL_SEC = 0.8           # 窗口期内摄像头轮询间隔——瓶颈
                                   # 的响应速度（200-500ms），不是 MediaPipe 推理
                                   # 速度（20-50ms），这个间隔留了余量，不会请求堆积
 FINGER_GUN_CONFIRM_FRAMES = 2    # 连续多少帧判定成立才真正触发，防止单帧误判
-FINGER_GUN_THUMB_SPREAD_THRESHOLD = 0.08  # 拇指指尖与食指根部的归一化水平距离阈值
-                                  # （手部关键点坐标是 0~1 归一化的），没有实机
-                                  # 验证过，需要拿真实手势测过再调
+# 手指枪判定用的都是"距离比例"而不是绝对坐标差（原因见 classify_finger_
+# gun_pose() 顶部的详细说明：绝对坐标差被实测证明对手离摄像头的距离/画面
+# 里的旋转角度太敏感，同一个手势换个距离/角度判定结果会飘）。这几个比例
+# 阈值是根据手部关键点的典型几何比例估的第一版，没有实机验证过具体是否
+# 合适——host/gesture_test.py 诊断脚本会把这几个比例的实际数值都打印
+# 出来，需要拿真实手势测过、看着实际比例数值再调。
+FINGER_EXTEND_RATIO = 1.2        # 手指"伸展比例"（指尖到手腕距离 / PIP到手腕距离）
+                                  # 大于这个值才算伸直，用于食指
+FINGER_CURL_RATIO = 0.9          # 手指"伸展比例"小于这个值才算弯曲，用于中指/
+                                  # 无名指/小指——三根里至少两根弯曲就算数（不要求
+                                  # 三根全弯，见 classify_finger_gun_pose() 的说明）
+FINGER_GUN_THUMB_SPREAD_RATIO = 0.6  # 拇指指尖到食指根部的距离，相对手掌尺度
+                                  # （手腕到中指根部的距离）的比例，大于这个值
+                                  # 才算张开
 HAND_MODEL_PATH = str(Path(__file__).resolve().parent / "hand_landmarker.task")
 GESTURE_LED_BREATHE_PERIOD_MS = 2000  # 窗口期"等待手势"的柔和暖白呼吸灯周期
 
@@ -1505,6 +1516,71 @@ class MicStream:
         self._utterance_queue.put(segment)
 
 
+def _landmark_dist(a, b):
+    return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
+
+
+def classify_finger_gun_pose(lm):
+    """判断一组 21 个 MediaPipe 手部关键点是不是"手指枪"姿势，返回一个
+    dict：每个子条件的数值和布尔判定，外加最终结果 'is_gun'。host/
+    gesture_test.py（独立诊断脚本）和 PuppyEngine.check_gesture()
+    共用这一份实现，不要各自维护一份——之前踩过这个坑的前身版本（直接比较
+    landmark 的 x/y 坐标差）被实测证明对手离摄像头的距离、手在画面里的
+    旋转角度都很敏感：同一个手指枪手势，换个距离/角度，坐标差的绝对值会
+    飘出阈值范围，两次独立诊断测试（用同一个脚本、同一段代码）一次连续
+    命中 5 帧、另一次全程一次都不命中，且失败模式集中在"中指已经弯了，
+    但无名指/小指判定成没弯"——说明问题不是使用者没摆稳，是判定方法本身
+    不够稳健。
+
+    改用**比例**而不是绝对坐标差：
+      - 手掌尺度参考 `hand_scale` = 手腕(landmark 0)到中指根部(landmark 9)
+        的欧氏距离，后面所有距离都换算成相对这个尺度的比例，不管手离
+        摄像头多远、画面里手多大，比例关系基本不变。
+      - 每根手指的"伸展比例" = 指尖到手腕的距离 / 对应 PIP 关节到手腕的
+        距离——明显大于 1 说明指尖比关节离手腕更远（伸直），明显小于 1
+        说明指尖折回来比关节还靠近手腕（弯曲）。这个比例只依赖点与点的
+        相对距离，手在画面里怎么平移/旋转都不影响，比直接比较 y 坐标
+        （隐含假设"手是竖直朝上举着的"）稳健得多。
+      - 食指：伸展比例 > FINGER_EXTEND_RATIO 判定为伸直。
+      - 中指/无名指/小指：伸展比例 < FINGER_CURL_RATIO 判定为弯曲，
+        三根里**至少两根**弯曲就算数，不要求三根全部弯曲——无名指、小指
+        天生比中指更难独立弯曲（肌腱互相牵连），实测数据也证实很多人
+        自然摆出的手指枪这两根手指弯曲程度不如中指，要求三根全弯太苛刻，
+        容易把真实的手指枪判定成"不是"。
+      - 拇指：拇指指尖(4)到食指根部(5)的距离，换算成相对 `hand_scale`
+        的比例，大于 FINGER_GUN_THUMB_SPREAD_RATIO 判定为张开（不是贴着
+        手掌）。
+    """
+    wrist = lm[0]
+    hand_scale = max(_landmark_dist(wrist, lm[9]), 1e-6)
+
+    def extend_ratio(tip_idx, pip_idx):
+        return _landmark_dist(wrist, lm[tip_idx]) / max(_landmark_dist(wrist, lm[pip_idx]), 1e-6)
+
+    index_ratio = extend_ratio(8, 6)
+    middle_ratio = extend_ratio(12, 10)
+    ring_ratio = extend_ratio(16, 14)
+    pinky_ratio = extend_ratio(20, 18)
+    thumb_spread_ratio = _landmark_dist(lm[4], lm[5]) / hand_scale
+
+    index_straight = index_ratio > FINGER_EXTEND_RATIO
+    middle_curled = middle_ratio < FINGER_CURL_RATIO
+    ring_curled = ring_ratio < FINGER_CURL_RATIO
+    pinky_curled = pinky_ratio < FINGER_CURL_RATIO
+    curled_count = sum([middle_curled, ring_curled, pinky_curled])
+    thumb_spread = thumb_spread_ratio > FINGER_GUN_THUMB_SPREAD_RATIO
+
+    return {
+        "index_straight": index_straight, "index_ratio": index_ratio,
+        "thumb_spread": thumb_spread, "thumb_spread_ratio": thumb_spread_ratio,
+        "middle_curled": middle_curled, "middle_ratio": middle_ratio,
+        "ring_curled": ring_curled, "ring_ratio": ring_ratio,
+        "pinky_curled": pinky_curled, "pinky_ratio": pinky_ratio,
+        "curled_count": curled_count,
+        "is_gun": index_straight and thumb_spread and curled_count >= 2,
+    }
+
+
 # ╔══════════════════════════════════════════════╗
 # ║               行为引擎                        ║
 # ╚══════════════════════════════════════════════╝
@@ -1972,16 +2048,10 @@ class PuppyEngine:
         """手势扫描窗口期内调用（见 tick()），拍一帧检测"手指枪"（finger
         gun）手势。用 Hand Landmarker（不是 Gesture Recognizer——"手指枪"
         不在预训练的 7 种手势里：Closed_Fist/Open_Palm/Pointing_Up/
-        Thumb_Down/Thumb_Up/Victory/ILoveYou），自己写一套基于 21 个手部
-        关键点归一化坐标（0~1）的几何规则：
-          - 食指伸直：指尖(8) y 小于 PIP 关节(6) y——MediaPipe 的 y 轴向下
-            为正，指尖比关节更靠上（y 更小）才算伸直。
-          - 拇指伸展：拇指指尖(4)与食指根部(5)的水平距离大于
-            FINGER_GUN_THUMB_SPREAD_THRESHOLD——拇指张开而不是贴着手掌。
-          - 中指/无名指/小指弯曲：指尖(12/16/20) y 大于各自 PIP 关节
-            (10/14/18) y——指尖低于关节即弯曲。
-        五个条件同时满足才判定为这一帧命中。自己按 GESTURE_POLL_SEC 节流
-        （跟 check_touch() 的 TOUCH_POLL_SEC 是同一个写法），调用方（tick()）
+        Thumb_Down/Thumb_Up/Victory/ILoveYou），几何判定规则见模块级函数
+        classify_finger_gun_pose()（跟 host/gesture_test.py 诊断脚本共用
+        同一份实现，不要各自维护）。自己按 GESTURE_POLL_SEC 节流（跟
+        check_touch() 的 TOUCH_POLL_SEC 是同一个写法），调用方（tick()）
         不需要关心频率，只要窗口开着就可以每个 tick 都调，不会因为节流而
         漏调。连续 FINGER_GUN_CONFIRM_FRAMES 帧都命中才真正触发（防止单帧
         误判），用 self.finger_gun_count 计数，没命中就归零；命中后立刻
@@ -2004,13 +2074,8 @@ class PuppyEngine:
 
         detected = False
         if results.hand_landmarks:
-            lm = results.hand_landmarks[0]
-            index_straight = lm[8].y < lm[6].y
-            thumb_spread = abs(lm[4].x - lm[5].x) > FINGER_GUN_THUMB_SPREAD_THRESHOLD
-            middle_curled = lm[12].y > lm[10].y
-            ring_curled = lm[16].y > lm[14].y
-            pinky_curled = lm[20].y > lm[18].y
-            detected = index_straight and thumb_spread and middle_curled and ring_curled and pinky_curled
+            result = classify_finger_gun_pose(results.hand_landmarks[0])
+            detected = result["is_gun"]
 
         if detected:
             self.finger_gun_count += 1

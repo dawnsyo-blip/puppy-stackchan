@@ -782,16 +782,41 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   （不是 Gesture Recognizer——"手指枪"不在预训练的 7 种手势里：
   Closed_Fist/Open_Palm/Pointing_Up/Thumb_Down/Thumb_Up/Victory/
   ILoveYou），跟 `self.face_detector` 一样在 `__init__()` 里创建好、
-  之后复用，不每次检测都重新建。判定规则基于 21 个手部关键点的归一化
-  坐标（0~1，MediaPipe 的 y 轴向下为正）：食指伸直（指尖 landmark 8 的
-  y 小于 PIP 关节 landmark 6 的 y）、拇指伸展（指尖 landmark 4 与食指
-  根部 landmark 5 的水平距离大于 `FINGER_GUN_THUMB_SPREAD_THRESHOLD`
-  =0.08）、中指/无名指/小指弯曲（指尖 12/16/20 的 y 大于各自 PIP 关节
-  10/14/18 的 y），五个条件同时满足才算这一帧命中。要求连续
+  之后复用，不每次检测都重新建。判定逻辑在模块级函数
+  `classify_finger_gun_pose(lm)` 里（`host/gesture_test.py` 诊断脚本
+  和生产代码共用这一份实现，不要各自维护）。要求连续
   `FINGER_GUN_CONFIRM_FRAMES`(2) 帧都命中才真正触发，用
   `self.finger_gun_count` 计数，没命中就归零；窗口自然过期时如果这个
   计数器还没归零（凑够确认帧数之前窗口就到期了），`tick()` 里也会显式
   清零，避免残留到下一次开窗口时被当成"本来就有"的确认帧数。
+  - **第一版用绝对坐标差判定，实测被证明不够稳健，已经改成距离比例**：
+    最初的写法直接比较 landmark 的 x/y 坐标差（比如"指尖 y 小于 PIP
+    关节 y"判断手指伸直），第一次实机测试连续 5 帧稳定命中，但紧接着
+    第二次用同一个诊断脚本、同一段代码重测，全程一次都没命中——失败
+    模式集中在"中指已经弯了，但无名指/小指判定成没弯"。根因是绝对坐标
+    差对手离摄像头的距离、手在画面里的旋转角度都很敏感，同一个物理
+    手势换个距离/角度，坐标差的数值会飘出阈值范围，不是使用者没摆稳
+    姿势，是判定方法本身设计有缺陷。
+  - **现在用手腕(landmark 0)作参考点算距离比例**：手掌尺度参考
+    `hand_scale` = 手腕到中指根部(landmark 9)的距离；每根手指的"伸展
+    比例" = 指尖到手腕的距离 / 对应 PIP 关节到手腕的距离，只依赖点与点
+    的相对距离，手在画面里怎么平移/旋转都不影响。食指：伸展比例 >
+    `FINGER_EXTEND_RATIO`(1.2) 判定伸直。中指/无名指/小指：伸展比例 <
+    `FINGER_CURL_RATIO`(0.9) 判定弯曲，**三根里至少两根弯曲就算数，不
+    要求三根全弯**——无名指、小指天生比中指更难独立弯曲（肌腱互相
+    牵连），实测数据也证实很多人自然摆出的手指枪这两根手指弯曲程度
+    不如中指，要求三根全弯会把真实的手指枪判定成"不是"。拇指：拇指
+    指尖(4)到食指根部(5)的距离换算成相对 `hand_scale` 的比例，大于
+    `FINGER_GUN_THUMB_SPREAD_RATIO`(0.6) 判定张开。改完之后重测，
+    出现了多段连续 2~4 帧命中，`FINGER_GUN_CONFIRM_FRAMES`(2) 稳定
+    够用。这几个比例阈值是根据数据估的，不是精确校准过的，以后如果
+    又出现"识别不稳定"的反馈，先怀疑是不是又是这类距离/角度敏感的
+    绝对量判断，不要想当然地只调数值。
+  - **`landmark_projection_calculator.cc` 会打一条警告**："Using
+    NORM_RECT without IMAGE_DIMENSIONS is only supported for the
+    square ROI"——StackChan 摄像头画面不是正方形，理论上可能轻微影响
+    手部关键点定位精度；改成距离比例之后识别已经足够稳定，这条警告
+    目前没有必要再深究，除非以后识别效果又变差了再回来查。
 - **`hand_landmarker.task` 模型文件不提交进 git**：从 Google 官方 CDN
   下载（`curl -o host/hand_landmarker.task "https://storage.googleapis.
   com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/
@@ -800,25 +825,13 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   short_range.tflite`，同样在仓库之外）是同一个惯例：MediaPipe 模型
   文件是本地依赖，不是仓库内容，重新拉取仓库/换机器需要重新下载这个
   文件才能跑手势检测（人脸检测同理）。
-- **验证状态**：`enter_dead()`（表情/舵机/LED）、装死状态下触摸手势的
-  隔离（碰屏幕/长按被忽略）、双击→兴奋的完整恢复链路，都已经用一个
-  独立的临时验证脚本在真机上跑通过（不是在生产代码里插一个"长按 5 秒
-  强制装死"这类调试后门——那样需要事后记得删掉，容易忘；独立脚本测完
-  就丢，不留痕迹）。**手指枪手势识别本身还没有用真实手势实机验证过**
-  ——`check_gesture()` 的代码路径已经跑通（不崩溃、逻辑正确），但
-  `FINGER_GUN_THUMB_SPREAD_THRESHOLD` 等几何阈值是不是真的能可靠识别
-  手指枪、`DEAD_PITCH_DOWN`/`DEAD_EAR_WOBBLE_DEG` 等没有实机验证过的
-  参数具体合不合适，都需要真人举着手指枪对着摄像头测过才知道，跟表情
-  映射表里其它新功能一样，先给了一版能跑的默认值。**引擎初始化时
-  `landmark_projection_calculator.cc` 打过一条警告**："Using NORM_RECT
-  without IMAGE_DIMENSIONS is only supported for the square ROI"——
-  StackChan 摄像头画面不是正方形，理论上可能影响手部关键点定位精度，
-  是不是真的有实际影响、要不要显式传 `IMAGE_DIMENSIONS`/裁剪成正方形
-  再检测，也需要等真实手势测试的结果来判断，不要在没有实机数据的情况
-  下先动手改。
-- **`表情映射v8.xlsx` 还没有同步更新**——装死这个功能目前还处于
-  "手势识别未经实机验证"的阶段，等真人测试确认手势识别可靠、参数调过
-  一轮之后再一起补表格，避免表格记录一个还在变动中的半成品。
+- **端到端验证过了**：碰屏幕 → 小开心 → 手势扫描窗口（暖白呼吸灯）→
+  举手指枪 → 装死（表情/舵机低头/红灯闪烁再渐灭）→ 头顶双击 → 兴奋，
+  完整链路在真机上跑通过，包括装死状态下触摸手势的隔离（碰屏幕/长按
+  被忽略）。`DEAD_PITCH_DOWN`/`DEAD_EAR_WOBBLE_DEG` 等表情相关参数
+  实际观感是否需要微调、`FINGER_EXTEND_RATIO` 等手势阈值在更多不同的
+  手型/光线条件下是否依然稳定，还可以继续观察调整，但核心链路已经
+  确认可用，不再是原型验证阶段。
 
 ## 开机自动找人
 `PuppyEngine.run()` 开头以前是 `play_idle_animation()`（回正、常态表情、
