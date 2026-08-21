@@ -646,10 +646,11 @@ static void drawSpiral(M5Canvas *spi, int cx, int cy, float maxR, float turns,
 // "呼吸"动画（PLAY_SUN_RAY_PULSE_*），每条射线各自的长度是"档位长度 ×
 // 呼吸系数"，呼吸系数在 [PLAY_SUN_RAY_PULSE_MIN_RATIO, 1.0] 之间来回，
 // 所有射线共用同一个呼吸相位（一起缩短、一起恢复，不是各自独立）。
+// 下一轮反馈"整个太阳的呼吸同步"——核心实心圆的半径也乘上同一个
+// pulseRatio，不再是固定不变的，跟射线用同一个 pulsePhase，视觉上核心
+// 和射线会同时缩小、同时恢复，不会出现"核心不动、只有射线在动"的割裂感。
 // 没有实机验证过。
 static void drawSun(M5Canvas *spi, int cx, int cy, float scale, uint16_t col) {
-  int coreR = max(1, (int)roundf(PLAY_SUN_CORE_R * scale));
-  spi->fillCircle(cx, cy, coreR, col);
   float innerR = PLAY_SUN_RAY_INNER_R * scale;
   float lenTiers[3] = {PLAY_SUN_RAY_LEN_SHORT, PLAY_SUN_RAY_LEN_MID, PLAY_SUN_RAY_LEN_LONG};
   float pulsePhase = 2.0f * PI * (float)millis() / (float)PLAY_SUN_RAY_PULSE_PERIOD_MS;
@@ -658,6 +659,8 @@ static void drawSun(M5Canvas *spi, int cx, int cy, float scale, uint16_t col) {
   // [MIN_RATIO, 1.0]。
   float pulseRatio = PLAY_SUN_RAY_PULSE_MIN_RATIO +
                       (1.0f - PLAY_SUN_RAY_PULSE_MIN_RATIO) * (0.5f + 0.5f * cosf(pulsePhase));
+  int coreR = max(1, (int)roundf(PLAY_SUN_CORE_R * scale * pulseRatio));
+  spi->fillCircle(cx, cy, coreR, col);
   for (int i = 0; i < PLAY_SUN_RAYS; i++) {
     float ang = (float)i * (2.0f * PI / PLAY_SUN_RAYS) +
                 PLAY_SUN_RAY_ANGLE_JITTER_DEG[i] * PI / 180.0f;
