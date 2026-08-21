@@ -342,6 +342,14 @@ static const float EAT_BONE_HALF_LEN = 6.48f;   // 8.1 * 0.8
 static const float EAT_BONE_HALF_H = 1.73f;     // 2.16 * 0.8
 static const float EAT_BONE_R = 2.88f;          // 3.6 * 0.8
 
+// 摇晃动画：口水巾顶部（系带+主体顶部两角）固定不动，围兜"肩部"以下
+// （底部两角、底部圆弧、骨头图案）跟着一条正弦曲线左右摆动，像挂件一样
+// 以顶部为支点摇晃——第五轮反馈加的，没有实机验证过幅度/速度是否合适。
+static const float EAT_BIB_SWAY_AMP_PX = 5.0f;      // 摇晃幅度（像素）
+static const float EAT_BIB_SWAY_PERIOD_MS = 1800.0f; // 摇晃一个来回的周期，比耳朵摆动
+                                                       // （1200ms 量级）更慢，更像悬挂物的
+                                                       // 自然晃动，不是快速抖动
+
 // 玩(play，设计中)：右眼静态"<"（不受眨眼影响，跟"思考"的眨眼款式共用同一套
 // 折线画法，但玩耍时永远是这个样子，不会睁开）；嘴巴下方一个小骨头吊牌
 // （没有口水巾，只用一条"挂绳"线连到嘴巴下沿）；左下角两株、右下角一株
@@ -372,8 +380,11 @@ static const int PLAY_BONE_TAG_ROPE_LEN = 8; // 挂绳长度，短短的，只�
 // 苜蓿草（三/四叶草）：leafCount 片心形叶子绕中心点放射状均匀排列（每片
 // 叶尖朝中心），加一条从中心延伸的弯曲叶柄。心形叶片本身用 drawHeartLeaf()
 // 画——4 段二次贝塞尔拼出真正的心形轮廓（不是圆形，第二轮反馈明确指出过
-// "是心形而不是圆形"），镂空线框，不是实心（第一轮反馈明确要求"镂空"）。
-// 三株摆在屏幕左下角两株、右下角一株，固定屏幕坐标，不跟着表情/舵机镜像
+// "是心形而不是圆形"）。叶片先后是镂空线框（第一轮反馈要求"镂空"）后来
+// 又改回实心（第六轮反馈参考新示意图明确要求"实心心形♥……不需要里面的
+// 线条了"）——镂空只是中间某一轮的取向，不是一直不变的规则，改动历史见
+// drawHeartLeaf() 定义处的注释。三株摆在屏幕左下角两株、右下角一株，固定
+// 屏幕坐标，不跟着表情/舵机镜像
 // 移动——参考示意图（用户提供，忽略图中"小红书"水印）判断的大致比例，
 // 没有实机验证过位置/大小是否合适。左下角第二株（从左到右数第二株）
 // 改成三叶草（其余两株仍是四叶草），同时整体镜像翻转——叶子排列本身左右
@@ -383,13 +394,15 @@ static const int PLAY_BONE_TAG_ROPE_LEN = 8; // 挂绳长度，短短的，只�
 // 只作用在三叶草上时就已经拆开过一次；第五轮反馈"所有草的叶片都放大到
 // 现在的两倍"，四叶草也要跟着拆，草茎缩放维持原来共用的 0.7 不变，只翻倍
 // 叶片。
-static const float PLAY_CLOVER_LEAF_SCALE = 1.4f;  // 四叶草叶片缩放：0.7 * 2
-static const float PLAY_CLOVER_STEM_SCALE = 0.7f;  // 四叶草草茎缩放，维持原来的值不变
-// 三叶草（第二株）叶片/草茎分开缩放——上一轮"叶片更大、草茎更短"定的
-// 0.95，这一轮同样要求"所有草叶片放大到两倍"，在 0.95 基础上再乘 2；
-// 草茎缩放这轮没有再单独提，维持 0.4 不变。
-static const float PLAY_CLOVER3LEAF_LEAF_SCALE = 1.9f;   // 三叶草叶片缩放：0.95 * 2
-static const float PLAY_CLOVER3LEAF_STEM_SCALE = 0.4f;   // 三叶草草茎缩放，维持不变
+// 第六轮反馈"所有草的整体叶片面积都放大到同样的大小"——上一轮四叶草
+// (1.4)和三叶草(1.9)叶片缩放不一样，这一轮统一成同一个值，三株共用
+// PLAY_CLOVER_LEAF_SCALE（沿用四叶草原来的 1.4，没有理由偏向哪一株，
+// 就近取了已经在用的那个值）；草茎缩放不受这条反馈影响，两株四叶草继续
+// 用 PLAY_CLOVER_STEM_SCALE、三叶草继续用它自己的
+// PLAY_CLOVER3LEAF_STEM_SCALE，没有统一。
+static const float PLAY_CLOVER_LEAF_SCALE = 1.4f;  // 三株统一共用的叶片缩放
+static const float PLAY_CLOVER_STEM_SCALE = 0.7f;  // 四叶草（第一、三株）草茎缩放
+static const float PLAY_CLOVER3LEAF_STEM_SCALE = 0.4f;   // 三叶草草茎缩放，比四叶草更短
 static const int PLAY_CLOVER1_X = 40, PLAY_CLOVER1_Y = 205;   // 左下第一株
 static const int PLAY_CLOVER2_X = 66, PLAY_CLOVER2_Y = 178;   // 左下第二株，跟第一株错开，不完全对齐；
                                                                 // 镜像翻转的那一株
@@ -481,27 +494,70 @@ static void drawBoneIcon(M5Canvas *spi, int cx, int cy, int halfLen, int halfH, 
   spi->fillCircle(cx + halfLen, cy + halfH, r, col);
 }
 
-// 画一片心形叶子（三/四叶草的一片）：镂空线框（不填充），用 4 段二次
-// 贝塞尔拼出真正的心形轮廓——顶部凹口(notch)两侧各有一段"外拱"曲线鼓成
-// 圆润的瓣，再各一段曲线收窄到底部尖点，而不是简单的两个圆（第二轮反馈
-// 明确指出"是心形而不是圆形"，纯圆容易看着像两个泡泡而不是心）。局部
-// 坐标系里叶尖朝 -y 方向、凹口朝 +y 方向（画的时候整体绕 rotRad 转，把
-// 叶尖转到朝向"中心"的方向）。
+// 二次贝塞尔在参数 t∈[0,1] 处的点（标准 B(t)=(1-t)²P0+2(1-t)tP1+t²P2 公式），
+// 给 drawHeartLeaf() 沿曲线采样用，不直接画出来。
+static void quadBezierPoint(float p0x, float p0y, float c1x, float c1y,
+                             float p2x, float p2y, float t, float &ox, float &oy) {
+  float mt = 1.0f - t;
+  ox = mt * mt * p0x + 2.0f * mt * t * c1x + t * t * p2x;
+  oy = mt * mt * p0y + 2.0f * mt * t * c1y + t * t * p2y;
+}
+
+// 画一片实心心形叶子（三/四叶草的一片）：用 4 段二次贝塞尔描出心形轮廓
+// （顶部凹口(notch)两侧各一段"外拱"曲线鼓成圆润的瓣，再各一段曲线收窄到
+// 底部尖点——不是简单的两个圆，第二轮反馈明确指出过"是心形而不是圆形"），
+// 沿这条轮廓采样一圈点，从内部枢轴点扇形三角填充整个心形（第五轮反馈
+// 明确要求"实心心形，不需要里面的线条了"，改成实心之后原来 4 条独立描边
+// 曲线不再单独画，只用来生成填充用的轮廓采样点）。局部坐标系里叶尖朝 -y
+// 方向、凹口朝 +y 方向（画的时候整体绕 rotRad 转，把叶尖转到朝向"中心"
+// 的方向）。
 static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float scale, uint16_t col) {
   float r = 6.0f * scale;
-  int tx, ty, ncx, ncy, lx, ly, rx, ry, lcx, lcy, rcx, rcy, lbx, lby, rbx, rby;
-  rotateLocalOffset(rotRad, 0.0f, -r * 1.2f, tx, ty);         // 尖点
-  rotateLocalOffset(rotRad, 0.0f, r * 0.4f, ncx, ncy);        // 顶部凹口
-  rotateLocalOffset(rotRad, -r * 1.0f, r * 0.6f, lx, ly);     // 左瓣最外侧
-  rotateLocalOffset(rotRad, r * 1.0f, r * 0.6f, rx, ry);      // 右瓣最外侧
-  rotateLocalOffset(rotRad, -r * 0.9f, r * 1.1f, lcx, lcy);   // 左瓣外拱控制点
-  rotateLocalOffset(rotRad, r * 0.9f, r * 1.1f, rcx, rcy);    // 右瓣外拱控制点
-  rotateLocalOffset(rotRad, -r * 1.3f, -r * 0.4f, lbx, lby);  // 左侧收到尖点的控制点
-  rotateLocalOffset(rotRad, r * 1.3f, -r * 0.4f, rbx, rby);   // 右侧收到尖点的控制点
-  spi->drawBezier(cx + ncx, cy + ncy, cx + rcx, cy + rcy, cx + rx, cy + ry, col);
-  spi->drawBezier(cx + rx, cy + ry, cx + rbx, cy + rby, cx + tx, cy + ty, col);
-  spi->drawBezier(cx + ncx, cy + ncy, cx + lcx, cy + lcy, cx + lx, cy + ly, col);
-  spi->drawBezier(cx + lx, cy + ly, cx + lbx, cy + lby, cx + tx, cy + ty, col);
+  // 心形关键点（局部坐标，未旋转）
+  const float tipX = 0.0f, tipY = -r * 1.2f;        // 尖点
+  const float ncx = 0.0f, ncy = r * 0.4f;           // 顶部凹口
+  const float lx = -r * 1.0f, ly = r * 0.6f;        // 左瓣最外侧
+  const float rx = r * 1.0f, ry = r * 0.6f;         // 右瓣最外侧
+  const float lcx = -r * 0.9f, lcy = r * 1.1f;      // 左瓣外拱控制点
+  const float rcx = r * 0.9f, rcy = r * 1.1f;       // 右瓣外拱控制点
+  const float lbx = -r * 1.3f, lby = -r * 0.4f;     // 左侧收到尖点的控制点
+  const float rbx = r * 1.3f, rby = -r * 0.4f;      // 右侧收到尖点的控制点
+
+  const int STEPS = 4;              // 每段贝塞尔采样点数，越多边缘越光滑
+  const int N = STEPS * 4;          // 4 段轮廓，闭合多边形共 N 个采样点
+  float lpx[N], lpy[N];             // 局部坐标（未旋转）的轮廓采样点
+  int idx = 0;
+  for (int i = 0; i < STEPS; i++) {  // 顶部凹口 -> 右瓣外侧
+    quadBezierPoint(ncx, ncy, rcx, rcy, rx, ry, (float)i / STEPS, lpx[idx], lpy[idx]); idx++;
+  }
+  for (int i = 0; i < STEPS; i++) {  // 右瓣外侧 -> 尖点
+    quadBezierPoint(rx, ry, rbx, rby, tipX, tipY, (float)i / STEPS, lpx[idx], lpy[idx]); idx++;
+  }
+  for (int i = 0; i < STEPS; i++) {  // 尖点 -> 左瓣外侧
+    quadBezierPoint(tipX, tipY, lbx, lby, lx, ly, (float)i / STEPS, lpx[idx], lpy[idx]); idx++;
+  }
+  for (int i = 0; i < STEPS; i++) {  // 左瓣外侧 -> 回到顶部凹口
+    quadBezierPoint(lx, ly, lcx, lcy, ncx, ncy, (float)i / STEPS, lpx[idx], lpy[idx]); idx++;
+  }
+
+  // 扇形填充的枢轴点必须落在心形内部——局部原点 (0,0) 偏向凹口一侧、离
+  // 心形的几何中心有一点距离但仍在轮廓内，够用；不能直接拿凹口本身
+  // (0, r*0.4) 当枢轴，那个点太靠近轮廓边缘，两侧扇形三角会有一点点穿出
+  // 轮廓的风险。
+  int pcx, pcy;
+  rotateLocalOffset(rotRad, 0.0f, 0.0f, pcx, pcy);
+  int prevX, prevY;
+  rotateLocalOffset(rotRad, lpx[0], lpy[0], prevX, prevY);
+  for (int i = 1; i < N; i++) {
+    int px, py;
+    rotateLocalOffset(rotRad, lpx[i], lpy[i], px, py);
+    spi->fillTriangle(cx + pcx, cy + pcy, cx + prevX, cy + prevY, cx + px, cy + py, col);
+    prevX = px; prevY = py;
+  }
+  // 闭合最后一段（最后一个采样点 -> 第一个采样点）
+  int firstX, firstY;
+  rotateLocalOffset(rotRad, lpx[0], lpy[0], firstX, firstY);
+  spi->fillTriangle(cx + pcx, cy + pcy, cx + prevX, cy + prevY, cx + firstX, cy + firstY, col);
 }
 
 // 画一株三/四叶草："玩"表情左下/右下角的装饰（见 PLAY_CLOVER1/2/3_X/Y）。
@@ -1129,7 +1185,13 @@ class PuppyNose : public Drawable {
     //      顶部两角各画一个小圆磨平直角转折（圆角）；两条边线往下连到围兜
     //      "肩部"，底部一条圆弧收口，巾上正中间画一个骨头图案。整体用
     //      eatBibAnim_ 做 0→1 的淡入淡出，跟其它表情切换的过渡节奏保持
-    //      一致（不是切进/切出这个表情就瞬间出现/消失）。----
+    //      一致（不是切进/切出这个表情就瞬间出现/消失）。
+    //      第五轮反馈加了个摇晃动画："顶部（系带）不动，下方左右轻微摇晃"
+    //      ——系带和口水巾顶部两角（topY/lTopX/rTopX，含圆角）完全不受
+    //      swayOffset 影响，围兜"肩部"以下（底部两角、底部圆弧、骨头图案）
+    //      都加上同一个随时间正弦变化的水平偏移，效果是整块口水巾主体像
+    //      挂件一样以顶部为支点左右摆动——两条边线一端固定一端摆动，天然
+    //      就会显得"斜"，不需要额外处理线条本身的角度。----
     float eatScale = eatBibAnim_.update(isEat ? 1.0f : 0.0f);
     if (eatScale > 0.02f) {
       int strapY = cy + (int)roundf(EAT_BIB_STRAP_ARC_Y * eatScale);
@@ -1142,19 +1204,24 @@ class PuppyNose : public Drawable {
 
       // 口水巾主体：顶部两角跟系带同一条 Y 线（贴在一起，不留空隙），但
       // 半宽是自己独立的 EAT_BIB_HALF_TOP_W，比系带窄，让系带两端露出来。
+      // 顶部两角不参与摇晃（下面 swayOffset 只加在底部/骨头上）。
       int topY = strapY;
       int topHalfW = (int)roundf(EAT_BIB_HALF_TOP_W * eatScale);
+      int lTopX = cx - topHalfW, rTopX = cx + topHalfW;
+
+      int swayOffset = (int)roundf(EAT_BIB_SWAY_AMP_PX * eatScale *
+                                    sinf(2.0f * PI * (float)millis() / EAT_BIB_SWAY_PERIOD_MS));
       int botY = cy + (int)roundf(EAT_BIB_BOTTOM_Y * eatScale);
       int botHalfW = (int)roundf(EAT_BIB_HALF_BOTTOM_W * eatScale);
       int bulge = (int)roundf(EAT_BIB_BOTTOM_BULGE * eatScale);
-      int lTopX = cx - topHalfW, rTopX = cx + topHalfW;
-      int lBotX = cx - botHalfW, rBotX = cx + botHalfW;
+      int swayCx = cx + swayOffset;
+      int lBotX = swayCx - botHalfW, rBotX = swayCx + botHalfW;
       for (int t = -1; t <= 1; t++) {
-        // 两条边线：从顶部两角斜下到围兜"肩部"
+        // 两条边线：从顶部两角（固定）斜下到围兜"肩部"（跟着摇晃）
         spi->drawLine(lTopX + t, topY, lBotX + t, botY, col);
         spi->drawLine(rTopX + t, topY, rBotX + t, botY, col);
-        // 底部圆弧收口
-        spi->drawBezier(lBotX, botY + t, cx, botY + bulge + t, rBotX, botY + t, col);
+        // 底部圆弧收口（整体跟着摇晃）
+        spi->drawBezier(lBotX, botY + t, swayCx, botY + bulge + t, rBotX, botY + t, col);
       }
       // 顶部两角圆角：在两条边线的起点各画一个小圆，磨平边线跟系带端点
       // 交界处的直角转折。
@@ -1166,7 +1233,7 @@ class PuppyNose : public Drawable {
       int boneHalfLen = (int)roundf(EAT_BONE_HALF_LEN * eatScale);
       int boneHalfH = max(1, (int)roundf(EAT_BONE_HALF_H * eatScale));
       int boneR = max(1, (int)roundf(EAT_BONE_R * eatScale));
-      drawBoneIcon(spi, cx, boneY, boneHalfLen, boneHalfH, boneR, col);
+      drawBoneIcon(spi, swayCx, boneY, boneHalfLen, boneHalfH, boneR, col);
     }
 
     // ---- 玩：嘴巴下方挂一个小骨头吊牌，上面一条短短的挂绳——挂绳长度是
@@ -1629,7 +1696,7 @@ class PuppyEar : public Drawable {
     //      位置/大小没有实机验证过。=====
     if (!isLeft && isPlay) {
       drawClover(spi, PLAY_CLOVER1_X, PLAY_CLOVER1_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER_STEM_SCALE, 4, false, col);
-      drawClover(spi, PLAY_CLOVER2_X, PLAY_CLOVER2_Y, PLAY_CLOVER3LEAF_LEAF_SCALE, PLAY_CLOVER3LEAF_STEM_SCALE, 3, true, col);
+      drawClover(spi, PLAY_CLOVER2_X, PLAY_CLOVER2_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER3LEAF_STEM_SCALE, 3, true, col);
       drawClover(spi, PLAY_CLOVER3_X, PLAY_CLOVER3_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER_STEM_SCALE, 4, false, col);
     }
 
