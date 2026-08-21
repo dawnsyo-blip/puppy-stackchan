@@ -414,11 +414,17 @@ static const int PLAY_BONE_TAG_ROPE_LEN = 8; // 挂绳长度，短短的，只�
 // 的距离）比之前的 1.4 版本更大，同时叶片彼此之间有了真正的空隙、不再
 // 重叠。草叶本身这一轮也改回了描边（不是实心，见 drawHeartLeaf() 定义处
 // 的说明）。
-static const float PLAY_CLOVER_LEAF_SCALE = 0.9f;  // 三株统一共用的叶片缩放（单片更小，从1.4降到0.9）
-static const float PLAY_CLOVER_LEAF_GAP_PX = 7.0f; // 每片叶子绘制原点外移的距离，产生叶片间空隙，
-                                                     // 同时把整株的外接范围撑大
-static const float PLAY_CLOVER_STEM_SCALE = 0.7f;  // 四叶草（第一、三株）草茎缩放
-static const float PLAY_CLOVER3LEAF_STEM_SCALE = 0.4f;   // 三叶草草茎缩放，比四叶草更短
+// 第八轮反馈：①瓣要更圆润（下面 drawHeartLeaf() 的控制点改了）；②每个
+// ♥之间的间距拉大、单片叶片面积也增加——GAP 从 7 加大到 11，LEAF_SCALE
+// 从 0.9 加大到 1.15；③四叶草茎的长度统一到当时三叶草的长度——原来两个
+// 独立的 PLAY_CLOVER_STEM_SCALE(0.7)/PLAY_CLOVER3LEAF_STEM_SCALE(0.4)
+// 合并成一个共用值 0.4，三株茎长度一致，第二个常量已删掉；④草茎变细——
+// 见 drawClover() 里画草茎那一段，从 3px 描边改成单像素线。
+static const float PLAY_CLOVER_LEAF_SCALE = 1.15f; // 三株统一共用的叶片缩放（从0.9加大到1.15）
+static const float PLAY_CLOVER_LEAF_GAP_PX = 11.0f; // 每片叶子绘制原点外移的距离，产生叶片间空隙，
+                                                     // 同时把整株的外接范围撑大（从7加大到11）
+static const float PLAY_CLOVER_STEM_SCALE = 0.4f;  // 三株统一共用的草茎缩放（原来四叶草0.7比三叶草0.4
+                                                     // 长，这一轮统一成三叶草的长度）
 static const int PLAY_CLOVER1_X = 40, PLAY_CLOVER1_Y = 205;   // 左下第一株
 static const int PLAY_CLOVER2_X = 66, PLAY_CLOVER2_Y = 178;   // 左下第二株，跟第一株错开，不完全对齐；
                                                                 // 镜像翻转的那一株
@@ -520,15 +526,18 @@ static void drawBoneIcon(M5Canvas *spi, int cx, int cy, int halfLen, int halfH, 
 // 注意这里的 (cx,cy) 不是整株的中心——drawClover() 会把它沿凹口/瓣的方向
 // （+y）外移一段距离，让叶尖留在离中心更近的一侧、瓣被推得更远，见那边
 // 的说明。
+// 第八轮反馈"瓣更加圆润"——瓣最外侧点和外拱控制点都往外、往上调整过
+// （outer 从 (1.0r,0.6r) 松到 (1.15r,0.45r)，控制点从 (0.9r,1.1r) 松到
+// (1.25r,0.85r)），让瓣的弧线更接近饱满的圆弧、不是狭长的下垂形状。
 static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float scale, uint16_t col) {
   float r = 6.0f * scale;
   int tx, ty, ncx, ncy, lx, ly, rx, ry, lcx, lcy, rcx, rcy, lbx, lby, rbx, rby;
   rotateLocalOffset(rotRad, 0.0f, -r * 1.2f, tx, ty);         // 尖点
   rotateLocalOffset(rotRad, 0.0f, r * 0.4f, ncx, ncy);        // 顶部凹口
-  rotateLocalOffset(rotRad, -r * 1.0f, r * 0.6f, lx, ly);     // 左瓣最外侧
-  rotateLocalOffset(rotRad, r * 1.0f, r * 0.6f, rx, ry);      // 右瓣最外侧
-  rotateLocalOffset(rotRad, -r * 0.9f, r * 1.1f, lcx, lcy);   // 左瓣外拱控制点
-  rotateLocalOffset(rotRad, r * 0.9f, r * 1.1f, rcx, rcy);    // 右瓣外拱控制点
+  rotateLocalOffset(rotRad, -r * 1.15f, r * 0.45f, lx, ly);   // 左瓣最外侧
+  rotateLocalOffset(rotRad, r * 1.15f, r * 0.45f, rx, ry);    // 右瓣最外侧
+  rotateLocalOffset(rotRad, -r * 1.25f, r * 0.85f, lcx, lcy); // 左瓣外拱控制点
+  rotateLocalOffset(rotRad, r * 1.25f, r * 0.85f, rcx, rcy);  // 右瓣外拱控制点
   rotateLocalOffset(rotRad, -r * 1.3f, -r * 0.4f, lbx, lby);  // 左侧收到尖点的控制点
   rotateLocalOffset(rotRad, r * 1.3f, -r * 0.4f, rbx, rby);   // 右侧收到尖点的控制点
   spi->drawBezier(cx + ncx, cy + ncy, cx + rcx, cy + rcy, cx + rx, cy + ry, col);
@@ -573,15 +582,16 @@ static void drawClover(M5Canvas *spi, int cx, int cy, float leafScale, float ste
   // 新起点往外延伸，不是从中心量起。方向修正之后（尖端朝中心、圆润的瓣
   // 朝外），叶片离中心最远的部分变成了瓣/控制点那一侧（局部 y 最大约
   // 1.1r，控制点约 1.42r，比尖端的 1.2r 更远），所以外移量 GAP 之外再留
-  // 的余量系数从 1.3 调到 1.4，确保覆盖到控制点那个更远的参考值。
-  float stemStartR = PLAY_CLOVER_LEAF_GAP_PX + 6.0f * leafScale * 1.4f;
+  // 的余量系数从 1.3 调到 1.4；瓣变圆润之后（drawHeartLeaf() 里瓣控制点
+  // 从 1.42r 松到约 1.51r）再顺带调到 1.5，继续留够余量。
+  float stemStartR = PLAY_CLOVER_LEAF_GAP_PX + 6.0f * leafScale * 1.5f;
   int stemStartY = (int)roundf(stemStartR);
   int s1x, s1y, s2x, s2y;
   rotateLocalOffset(0.0f, m * 10.0f * stemScale, stemStartY + 12.0f * stemScale, s1x, s1y);
   rotateLocalOffset(0.0f, m * 5.0f * stemScale, stemStartY + 24.0f * stemScale, s2x, s2y);
-  for (int t = -1; t <= 1; t++) {
-    spi->drawBezier(cx + t, cy + stemStartY, cx + s1x + t, cy + s1y, cx + s2x + t, cy + s2y, col);
-  }
+  // 草茎变细：从 3px 描边（t=-1..1）改成单像素线（第八轮反馈明确要求
+  // "草茎变细"）。
+  spi->drawBezier(cx, cy + stemStartY, cx + s1x, cy + s1y, cx + s2x, cy + s2y, col);
 }
 
 // 开心 / 好奇 / 思考时耳朵左右轻轻摆动的偏移量（sin 驱动，周期 1.2s，振幅 4px）。
@@ -1694,7 +1704,7 @@ class PuppyEar : public Drawable {
     //      位置/大小没有实机验证过。=====
     if (!isLeft && isPlay) {
       drawClover(spi, PLAY_CLOVER1_X, PLAY_CLOVER1_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER_STEM_SCALE, 4, false, col);
-      drawClover(spi, PLAY_CLOVER2_X, PLAY_CLOVER2_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER3LEAF_STEM_SCALE, 3, true, col);
+      drawClover(spi, PLAY_CLOVER2_X, PLAY_CLOVER2_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER_STEM_SCALE, 3, true, col);
       drawClover(spi, PLAY_CLOVER3_X, PLAY_CLOVER3_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER_STEM_SCALE, 4, false, col);
     }
 
