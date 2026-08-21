@@ -505,7 +505,9 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   是"碰屏幕没反应"的根因，不是触摸事件本身没测到。碰屏幕时用户显然就在
   设备正前方，不需要再靠摄像头确认一次。**"小开心"**是这个反应动作的
   正式名字：开心表情 + 轻微小幅度抬头 3 次（`play_xiaokaixin_animation()`,
-  `XIAOKAIXIN_PITCH_UP/DOWN`），跟"进入开心"状态本身的完整摇头动画
+  `XIAOKAIXIN_PITCH_UP/DOWN`，抬头偏移量第一版 50、反馈"幅度可以调大一点"
+  后加大到 120，仍然小于 `enter_happy()` 完整动画里 `HAPPY_PITCH` 的偏移量
+  150，保持"比完整开心动作小"这个既定关系），跟"进入开心"状态本身的完整摇头动画
   （`play_happy_animation()`）是两个不同的动作，动作播完保持在开心表情/
   状态上；即使当前已经是 HAPPY 状态、摸一下屏幕也会再触发一次这个反应
   动画。**只有碰屏幕这一条路径触发"小开心"**——听到呼唤"小狗小狗"（见下面
@@ -785,10 +787,16 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   host 端现有 HTTP API 驱动）。
 - **`State.DEAD` 状态机**（`puppy_engine_v4.py`）：
   - `enter_dead()` 同步阻塞播完整套收尾动作（跟 `enter_excited_from_
-    touch()` 是同一个模式）：切表情 → 舵机低头（`DEAD_PITCH_DOWN=80`，
-    `mute=True`，大幅度移动会有噪音）→ LED 闪两下红灯再渐灭 → 最后才
+    touch()` 是同一个模式）：切表情 + LED 开始闪红灯 → 舵机先抬头一下
+    （`DEAD_PITCH_UP=500`，复用 `EXCITED_PITCH_HIGH` 同一个已验证幅度，
+    视觉上像"中枪一震"，停留 `DEAD_PITCH_UP_HOLD_SEC`(0.3s) 让这个动作
+    能被看清）→ 舵机落到低头定格（`DEAD_PITCH_DOWN=80`，这个值已经过
+    实机端到端验证）→ 闪完 `DEAD_LED_BLINK_HOLD_SEC` 后 LED 渐灭 → 最后才
     `transition(State.DEAD)`——`transition()` 的 if/elif 链里没有给
-    `DEAD` 加分支，落到这个状态时什么都不做，避免动画重复播放。
+    `DEAD` 加分支，落到这个状态时什么都不做，避免动画重复播放。舵机全程
+    `mute=True`（大幅度移动会有噪音）。"先抬后落"这个两段式动作是反馈
+    加的，`DEAD_PITCH_UP`/`DEAD_PITCH_UP_HOLD_SEC` 没有单独做过实机验证，
+    只是复用了已知安全的幅度数值。
   - **装死状态下人脸/语音/摇晃检测全部跳过**，触摸只认头顶双击：
     `handle_touch_trigger()` 在判断 `is_screen_trigger`/长按分支的条件里
     都排除了 `State.DEAD`（碰屏幕、长按头顶被直接忽略），双击本来就是

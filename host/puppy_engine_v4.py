@@ -142,7 +142,9 @@ HAPPY_PITCH = 300
 # --- "小开心"动画参数：用开心表情，但舵机动作是轻微小幅度抬头，不是完整
 #     摇头动画——碰屏幕、以及听到"小狗小狗"呼唤都会触发这个动作（见
 #     enter_xiaokaixin()/play_xiaokaixin_animation()）---
-XIAOKAIXIN_PITCH_UP = 400      # 默认回正是 450，400 只是轻微抬头，幅度比 HAPPY_PITCH(300) 小很多
+XIAOKAIXIN_PITCH_UP = 330      # 默认回正是 450，抬头幅度（第一版 400，反馈"可以调大一点"，
+                                # 从偏移 50 加大到 120，仍然小于 HAPPY_PITCH(300) 偏移 150，
+                                # 保持"比完整开心动作小"这个既定关系，只是更明显一点）
 XIAOKAIXIN_PITCH_DOWN = 450
 XIAOKAIXIN_SPEED = 300
 XIAOKAIXIN_CYCLES = 3
@@ -192,7 +194,14 @@ DIZZY_LINGER_SEC = 2.0                # 摇晃/拿起信号消失后，"晕"表�
 
 # --- 装死(dead)动画参数 ---
 DEAD_PITCH_DOWN = 80             # 低头角度，参考 CLAUDE.md 里 Y 轴舵机建议范围
-                                  # 5~85°，用接近下限的保守值，没有实机验证过
+                                  # 5~85°，用接近下限的保守值——这个值已经过
+                                  # 实机端到端验证，低头视觉效果符合预期。
+DEAD_PITCH_UP = 500              # 进入装死时先向上抬一点，再落到 DEAD_PITCH_DOWN
+                                  # 定格（反馈要求加的过渡动作）。复用
+                                  # EXCITED_PITCH_HIGH 同一个已验证安全的抬头
+                                  # 幅度，没有单独为这个新动作重新实机确认过。
+DEAD_PITCH_UP_HOLD_SEC = 0.3     # 抬头停留多久才落下——太短会跟落下动作糊在
+                                  # 一起看不出"先抬再落"，没有实机验证过具体值。
 DEAD_SPEED = 100                 # 跟 SORRY_SPEED 同量级
 DEAD_LED_RGB = (255, 0, 0)       # 红色，没有实机验证过
 DEAD_LED_BLINK_PERIOD_MS = 300
@@ -1927,15 +1936,21 @@ class PuppyEngine:
         self.transition(State.EXCITED)
 
     def enter_dead(self):
-        """手势扫描窗口检测到"手指枪"手势时触发（见 check_gesture()，还没
-        接入）。同步阻塞执行完整的装死收尾动作，跟 enter_excited_from_
-        touch() 是同一个模式——动画在这里手动播完，transition(State.DEAD)
-        只负责记录状态本身、更新 state_enter_time，不会重复播放任何动画
-        （transition() 的 if/elif 链里没有 DEAD 分支，落到这个状态时什么
-        都不做）。"""
+        """手势扫描窗口检测到"手指枪"手势时触发（见 check_gesture()）。同步
+        阻塞执行完整的装死收尾动作，跟 enter_excited_from_touch() 是同一个
+        模式——动画在这里手动播完，transition(State.DEAD) 只负责记录状态
+        本身、更新 state_enter_time，不会重复播放任何动画（transition() 的
+        if/elif 链里没有 DEAD 分支，落到这个状态时什么都不做）。
+
+        舵机动作分两步（反馈要求加的）：先抬头一下（DEAD_PITCH_UP，配合
+        表情切换和红灯开始闪烁，视觉上像"中枪一震"），停留 DEAD_PITCH_
+        UP_HOLD_SEC 让这个抬头动作能被看清，再落到 DEAD_PITCH_DOWN 定格
+        ——不是一步到位直接倒地。"""
         set_expression("dead")
-        move_servo(pitch=DEAD_PITCH_DOWN, speed=DEAD_SPEED, mute=True)
         set_led_mode("blink", *DEAD_LED_RGB, period_ms=DEAD_LED_BLINK_PERIOD_MS)
+        move_servo(pitch=DEAD_PITCH_UP, speed=DEAD_SPEED, mute=True)
+        time.sleep(DEAD_PITCH_UP_HOLD_SEC)
+        move_servo(pitch=DEAD_PITCH_DOWN, speed=DEAD_SPEED, mute=True)
         time.sleep(DEAD_LED_BLINK_HOLD_SEC)
         set_led_mode("fade", *DEAD_LED_RGB, fade_ms=DEAD_LED_FADE_MS)
         self.transition(State.DEAD)
