@@ -375,7 +375,9 @@ static const int PLAY_EYE_A = 7;             // 右眼"<"外侧顶点的偏移�
                                               // 常驻显示需要比瞬间眨眼更明显；会再乘 PLAY_SCALE）
 static const int PLAY_EYE_B = 4;             // 右眼"<"内侧顶点的偏移（会再乘 PLAY_SCALE）
 static const int PLAY_BONE_TAG_HALF_LEN = 6; // 吊牌骨头比口水巾上的骨头小一圈
-static const int PLAY_BONE_TAG_HALF_H = 1;
+static const int PLAY_BONE_TAG_HALF_H = 2;   // 骨头中间矩形的半高——第三轮反馈"矩形高度增加2倍，
+                                              // 要比项链更粗一点"，从1加大到2（项链弧线本身只是
+                                              // 单像素线，这个高度的实心矩形已经明显更粗）
 static const int PLAY_BONE_TAG_R = 3;
 static const int PLAY_BONE_TAG_Y = 42;       // 吊牌骨头中心相对鼻子中心的Y偏移（第一轮从30加大到42）
 // PLAY_BONE_TAG_ROPE_LEN 这个挂绳/项链高度参数改动了两次：先是从直挺挺
@@ -414,32 +416,43 @@ static const float PLAY_FLOWER_PETAL_DIST = 8.0f;    // 花瓣圆心到花心的
 static const unsigned long PLAY_FLOWER_ROTATE_PERIOD_MS = 3500; // 花瓣绕花心转一整圈的周期，
                                                        // 旋转是连续的，跟下面的下降/消失循环各自独立
 static const unsigned long PLAY_FLOWER_CYCLE_MS = 4000;  // 下降/消失循环的整个周期
-static const float PLAY_FLOWER_DROP_PX = 10.0f;      // 一个循环内下降的距离
+static const float PLAY_FLOWER_DROP_PX = 20.0f;      // 一个循环内下降的距离——第三轮反馈"下降路径
+                                                       // 增加2倍"，从10加大到20
 static const float PLAY_FLOWER_VISIBLE_RATIO = 0.8f; // 一个循环里"下降+可见"占的比例，剩下的时间
                                                        // 隐藏（"消失"），隐藏结束后循环重新开始、
                                                        // 花回到起点——不是下降到底直接瞬间跳回起点，
                                                        // 中间真的有一段看不见的间隔
-static const int PLAY_FLOWER1_X = 45, PLAY_FLOWER1_Y = 28;   // 左上第一朵
-static const int PLAY_FLOWER2_X = 20, PLAY_FLOWER2_Y = 65;   // 左上第二朵——第二轮反馈"挪到第一朵
-                                                       // 下面且左边一点，不要和花或耳朵重叠"，从
-                                                       // (75,55) 挪到这里；左耳区域大致从 x≈60 开始，
-                                                       // 这里留了足够余量
+// 第三轮反馈"两朵花整体下移一点，但不要和耳朵重叠"——下降路径这一轮同时
+// 加大到20px，意味着每朵花实际能到达的最低点是"起点Y + 20"，不只是起点
+// 本身，两个改动一起考虑耳朵的安全距离：第一朵离耳朵区域（大致从 y≈85
+// 开始）还有富余，下移多一点（28→40）；第二朵起点本来就已经比较靠近安全
+// 边界，下降距离又翻倍，所以只小幅下移（65→70），把大部分"下移"让给了
+// 第一朵——没有实机验证过耳朵的准确边界，这两个数字是保守估计，如果实机
+// 看着还有空间可以再往下调。
+static const int PLAY_FLOWER1_X = 45, PLAY_FLOWER1_Y = 40;   // 左上第一朵
+static const int PLAY_FLOWER2_X = 20, PLAY_FLOWER2_Y = 70;   // 左上第二朵
 static const unsigned long PLAY_FLOWER1_PHASE_MS = 0;        // 两朵花下降/消失循环的时间错位，
 static const unsigned long PLAY_FLOWER2_PHASE_MS = 1300;     // 不要同步下降/消失，看起来更自然
 
 // 太阳：漩涡核心（复用"晕"表情眼睛的螺旋画法，见 drawSpiral()）+ 环绕
 // 一圈长短交替的射线。第二轮反馈"右上角的花删掉，原位置换成太阳"，固定
-// 在原来 PLAY_FLOWER3 的位置。没有实机验证过。
+// 在原来 PLAY_FLOWER3 的位置。第三轮反馈：①整体变大50%（SCALE 从0.9到
+// 1.35）；②射线数量从12减到8；③射线和漩涡之间要留空隙（INNER_R 从8加大
+// 到11，漩涡本身半径只有6，之前的间隙不够明显）；④漩涡先不要旋转——见
+// drawSun() 里 rotationPhase 固定成0，PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS
+// 常量保留没删，只是暂时没用上，以后要重新打开自转可以直接用。没有实机
+// 验证过。
 static const int PLAY_SUN_X = 265, PLAY_SUN_Y = 35;
-static const float PLAY_SUN_SCALE = 0.9f;
+static const float PLAY_SUN_SCALE = 1.35f;           // 0.9 * 1.5（整体变大50%）
 static const float PLAY_SUN_SPIRAL_MAX_R = 6.0f;     // 漩涡核心半径（缩放前），比"晕"表情眼睛的
                                                        // 16 小很多，太阳只是个小图标
 static const float PLAY_SUN_SPIRAL_TURNS = 1.5f;     // 漩涡圈数
-static const unsigned long PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS = 3000; // 漩涡自转周期
-static const float PLAY_SUN_RAY_INNER_R = 8.0f;      // 射线起点到中心的距离（缩放前）
+static const unsigned long PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS = 3000; // 漩涡自转周期（暂时没用上）
+static const float PLAY_SUN_RAY_INNER_R = 11.0f;     // 射线起点到中心的距离（缩放前），从8加大到11，
+                                                       // 跟漩涡半径(6)之间留出更明显的空隙
 static const float PLAY_SUN_RAY_LEN_LONG = 6.0f;     // 长射线的长度（缩放前）
 static const float PLAY_SUN_RAY_LEN_SHORT = 3.0f;    // 短射线的长度（缩放前）
-static const int PLAY_SUN_RAYS = 12;                 // 射线数量，长短交替
+static const int PLAY_SUN_RAYS = 8;                  // 射线数量，长短交替（从12减到8）
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -599,14 +612,15 @@ static void drawSpiral(M5Canvas *spi, int cx, int cy, float maxR, float turns,
 }
 
 // 画一个太阳："玩"表情屏幕角落的装饰，取代原来右上角那朵花（见
-// PLAY_SUN_X/Y）。核心是一个持续自转的漩涡（复用 drawSpiral()，跟"晕"
-// 表情眼睛是同一个画法，自己单独算一份自转相位，不跟眼睛共用状态）；
-// 周围环绕 PLAY_SUN_RAYS 条从中心辐射出去的射线，长短交替（i 为偶数时长、
-// 奇数时短），射线起点离中心留了 PLAY_SUN_RAY_INNER_R 的空隙，不紧贴着
-// 漩涡核心。没有实机验证过。
+// PLAY_SUN_X/Y）。核心是一个漩涡（复用 drawSpiral()，跟"晕"表情眼睛是
+// 同一个画法）；周围环绕 PLAY_SUN_RAYS 条从中心辐射出去的射线，长短交替
+// （i 为偶数时长、奇数时短），射线起点离中心留了 PLAY_SUN_RAY_INNER_R
+// 的空隙，不紧贴着漩涡核心。反馈"漩涡先不要旋转"——rotationPhase 固定成
+// 0，不再用 millis() 算随时间变化的相位；PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS
+// 常量保留没删，以后要重新打开自转直接把这里改回时间相位就行。没有实机
+// 验证过。
 static void drawSun(M5Canvas *spi, int cx, int cy, float scale, uint16_t col) {
-  float rotationPhase = 2.0f * PI * (float)(millis() % PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS) /
-                         (float)PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS;
+  float rotationPhase = 0.0f;
   drawSpiral(spi, cx, cy, PLAY_SUN_SPIRAL_MAX_R * scale, PLAY_SUN_SPIRAL_TURNS, rotationPhase, col);
   float innerR = PLAY_SUN_RAY_INNER_R * scale;
   for (int i = 0; i < PLAY_SUN_RAYS; i++) {
