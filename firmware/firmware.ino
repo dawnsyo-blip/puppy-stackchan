@@ -711,13 +711,12 @@ void handleFace() {
   if (expr == "neutral") { avatar.setExpression(Expression::Neutral); baseExpr = Expression::Neutral; }
   else if (expr == "happy") { avatar.setExpression(Expression::Happy); baseExpr = Expression::Happy; }
   else if (expr == "sad") { avatar.setExpression(Expression::Sad); baseExpr = Expression::Sad; }
-  else if (expr == "angry") { avatar.setExpression(Expression::Angry); baseExpr = Expression::Angry; }
   else if (expr == "sleepy") { avatar.setExpression(Expression::Sleepy); baseExpr = Expression::Sleepy; }
   else if (expr == "doubt") { avatar.setExpression(Expression::Doubt); baseExpr = Expression::Doubt; }
   else if (expr == "love" || expr == "eyeroll" ||
            expr == "thinking" || expr == "excited" || expr == "privacy" ||
            expr == "grieved" || expr == "peekaboo" || expr == "dizzy" ||
-           expr == "dead") {
+           expr == "dead" || expr == "angry" || expr == "eat" || expr == "play") {
     avatar.setExpression(Expression::Neutral);
     baseExpr = Expression::Neutral;
     g_customExpr = expr;

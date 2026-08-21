@@ -3,21 +3,24 @@
  * ======================================================
  * 只用来快速看新表情的视觉效果，不含 WiFi/HTTP/摄像头/麦克风——只有屏幕
  * 渲染，编译和烧录都比完整版 firmware.ino 快很多，方便反复调整 PuppyFace.h
- * 里的参数、重新烧录查看，不用碰、也不会影响正在跑的主固件。目前列表里有
- * "委屈"（grieved）、"peekaboo"（已经在游戏里正式接入）和"晕"（dizzy，
- * 设计中，还没接入 handleFace()/host）。
+ * 里的参数、重新烧录查看，不用碰、也不会影响正在跑的主固件。目前列表里是
+ * 三个新设计中的表情："生气"（angry，不对称眉毛）、"吃饭"（eat，口水巾+
+ * 骨头图案）、"玩"（play，右眼"<"+骨头吊牌+右耳蝴蝶）——都已经在
+ * PuppyFace.h/handleFace() 里接好，但还没接入 host 端状态机的任何触发场景。
+ * 之前迭代过的"委屈"/peekaboo/晕/装死都已经正式接入主固件+host，不再需要
+ * 放在这个预览列表里反复看，已经从这里删掉（对应的 PuppyFace.h 代码本身
+ * 没有删，只是不在这个预览脚本的循环列表里）。
  *
  * PuppyFace.h 直接引用主固件那一份（#include "../PuppyFace.h"），不是复制
  * 一份改——确认视觉效果满意后，改动本来就已经在正确的地方，不需要"搬"过去，
  * 直接编译烧录主固件 firmware.ino 就行。
  *
  * 用法：烧录后打开串口（115200），每按一次回车切到下一个表情，常态 →
- * 委屈 → peekaboo → 晕 → 循环，不受打字内容影响，只看有没有收到换行符。
+ * 生气 → 吃饭 → 玩 → 循环，不受打字内容影响，只看有没有收到换行符。
  * 屏幕上方会印当前是哪个方便对照；同时也会打印到串口。
  *
- * 视觉效果确认满意后，这个预览 sketch 完成使命，可以删掉；下一步是去
- * firmware.ino 的 handleFace() 里加上 grieved/peekaboo 的 /face?expr= 分支，
- * 再在 host 端 puppy_engine_v4.py 里决定什么场景触发这两个表情。
+ * 视觉效果确认满意后，下一步是去 host 端 puppy_engine_v4.py 里决定什么
+ * 场景触发这三个表情（handleFace() 已经接好了 /face?expr=angry/eat/play）。
  */
 
 #include <M5StackChan.h>
@@ -49,13 +52,13 @@ void drawSubtitle(M5Canvas *spi, uint16_t fg) {}
 Avatar avatar;
 Expression baseExpr = Expression::Neutral;
 
-const char* EXPR_NAMES[] = {"neutral", "grieved", "peekaboo", "dizzy", "dead"};
-const int NUM_EXPR = 5;
+const char* EXPR_NAMES[] = {"neutral", "angry", "eat", "play"};
+const int NUM_EXPR = 4;
 int exprIdx = 0;
 
 void applyExpr(const char* name) {
   g_customExpr = "";
-  if (strcmp(name, "grieved") == 0 || strcmp(name, "peekaboo") == 0 || strcmp(name, "dizzy") == 0 || strcmp(name, "dead") == 0) {
+  if (strcmp(name, "angry") == 0 || strcmp(name, "eat") == 0 || strcmp(name, "play") == 0) {
     avatar.setExpression(Expression::Neutral);
     baseExpr = Expression::Neutral;
     g_customExpr = name;
