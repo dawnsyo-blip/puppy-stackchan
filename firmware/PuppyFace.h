@@ -323,9 +323,10 @@ static const float EAT_TONGUE_SCALE = 0.8f;     // 舌头缩放比例，跟 EAT_
 // 半宽更大，两端各探出去一小截。
 static const int EAT_BIB_STRAP_ARC_Y = 36;      // 系带圆弧相对鼻子中心的Y偏移（第三轮从30加大到36，
                                                  // 让口水巾整体离嘴巴更远）
-static const int EAT_BIB_STRAP_ARC_HALF_W = 22; // 系带圆弧半宽——比嘴巴半宽(16)、也比口水巾主体
-                                                 // 顶部半宽(EAT_BIB_HALF_TOP_W=18)更大，两端各探出
-                                                 // 口水巾肩部约4px
+static const int EAT_BIB_STRAP_ARC_HALF_W = 27; // 系带圆弧半宽——比嘴巴半宽(16)、也比口水巾主体
+                                                 // 顶部半宽(EAT_BIB_HALF_TOP_W=18)更大，第四轮反馈
+                                                 // "两边还可以更长一点"从22加大到27，两端各探出口水巾
+                                                 // 肩部约9px（上一轮约4px）
 static const int EAT_BIB_STRAP_ARC_BULGE = 4;   // 系带圆弧向下鼓出的深度（弧线本身的弯曲程度）
 static const int EAT_BIB_HALF_TOP_W = 18;       // 口水巾主体顶部（肩部）半宽，比系带窄
 static const int EAT_BIB_HALF_BOTTOM_W = 26;    // 围兜底部半宽（更宽，呈口袋状）
@@ -378,7 +379,12 @@ static const int PLAY_BONE_TAG_ROPE_LEN = 8; // 挂绳长度，短短的，只�
 // 改成三叶草（其余两株仍是四叶草），同时整体镜像翻转——叶子排列本身左右
 // 对称，镜像前后叶子位置其实看不出差别，真正会变的是叶柄的弯曲方向
 // （drawClover() 的 mirror 参数控制），从往右下弯改成往左下弯。
-static const float PLAY_CLOVER_SCALE = 0.7f;    // 整株缩放
+static const float PLAY_CLOVER_SCALE = 0.7f;    // 四叶草（第一、三株）叶片+草茎统一缩放
+// 三叶草（第二株）叶片/草茎分开缩放——第四轮反馈"叶片更大、草茎更短"，
+// 两个方向相反，必须拆成两个独立系数（叶片比 PLAY_CLOVER_SCALE 大，草茎
+// 比它小），不能再共用同一个 scale。
+static const float PLAY_CLOVER3LEAF_LEAF_SCALE = 0.95f;  // 三叶草叶片缩放，比四叶草的0.7大
+static const float PLAY_CLOVER3LEAF_STEM_SCALE = 0.4f;   // 三叶草草茎缩放，比四叶草的0.7小（更短）
 static const int PLAY_CLOVER1_X = 40, PLAY_CLOVER1_Y = 205;   // 左下第一株
 static const int PLAY_CLOVER2_X = 66, PLAY_CLOVER2_Y = 178;   // 左下第二株，跟第一株错开，不完全对齐；
                                                                 // 镜像翻转的那一株
@@ -500,18 +506,22 @@ static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float sca
 // 三叶草的排列方式）。叶子排列本身左右对称，mirror 参数不会改变观感，
 // 只翻转叶柄的弯曲方向（默认往右下弯，mirror=true 时往左下弯）——第二轮
 // 反馈要求"从左到右第二株镜像翻转"，第三轮反馈又要求"第二株改成三叶草"，
-// 两条反馈都作用在同一株（PLAY_CLOVER2）上。参考用户提供的示意图判断的
-// 大致比例，没有实机验证过。
-static void drawClover(M5Canvas *spi, int cx, int cy, float scale, int leafCount, bool mirror, uint16_t col) {
+// 第四轮反馈"三叶草叶片更大、草茎更短"，都作用在同一株（PLAY_CLOVER2）
+// 上。leafScale/stemScale 分开传是这一轮加的——之前叶子和草茎共用同一个
+// scale，没法只放大叶子或只缩短草茎，现在两者独立，三株里另外两株
+// （四叶草）继续传相同的值保持原样。参考用户提供的示意图判断的大致比例，
+// 没有实机验证过。
+static void drawClover(M5Canvas *spi, int cx, int cy, float leafScale, float stemScale,
+                        int leafCount, bool mirror, uint16_t col) {
   float startAngle = (leafCount == 4) ? (PI / 4.0f) : 0.0f;
   for (int i = 0; i < leafCount; i++) {
     float rot = (float)i * (2.0f * PI / leafCount) + startAngle;
-    drawHeartLeaf(spi, cx, cy, rot, scale, col);
+    drawHeartLeaf(spi, cx, cy, rot, leafScale, col);
   }
   int m = mirror ? -1 : 1;
   int s1x, s1y, s2x, s2y;
-  rotateLocalOffset(0.0f, m * 10.0f * scale, 12.0f * scale, s1x, s1y);
-  rotateLocalOffset(0.0f, m * 5.0f * scale, 24.0f * scale, s2x, s2y);
+  rotateLocalOffset(0.0f, m * 10.0f * stemScale, 12.0f * stemScale, s1x, s1y);
+  rotateLocalOffset(0.0f, m * 5.0f * stemScale, 24.0f * stemScale, s2x, s2y);
   for (int t = -1; t <= 1; t++) {
     spi->drawBezier(cx + t, cy, cx + s1x + t, cy + s1y, cx + s2x + t, cy + s2y, col);
   }
@@ -1606,9 +1616,9 @@ class PuppyEar : public Drawable {
     //      （其余两株是四叶）、且镜像翻转，两条反馈都作用在它身上。第一版
     //      位置/大小没有实机验证过。=====
     if (!isLeft && isPlay) {
-      drawClover(spi, PLAY_CLOVER1_X, PLAY_CLOVER1_Y, PLAY_CLOVER_SCALE, 4, false, col);
-      drawClover(spi, PLAY_CLOVER2_X, PLAY_CLOVER2_Y, PLAY_CLOVER_SCALE, 3, true, col);
-      drawClover(spi, PLAY_CLOVER3_X, PLAY_CLOVER3_Y, PLAY_CLOVER_SCALE, 4, false, col);
+      drawClover(spi, PLAY_CLOVER1_X, PLAY_CLOVER1_Y, PLAY_CLOVER_SCALE, PLAY_CLOVER_SCALE, 4, false, col);
+      drawClover(spi, PLAY_CLOVER2_X, PLAY_CLOVER2_Y, PLAY_CLOVER3LEAF_LEAF_SCALE, PLAY_CLOVER3LEAF_STEM_SCALE, 3, true, col);
+      drawClover(spi, PLAY_CLOVER3_X, PLAY_CLOVER3_Y, PLAY_CLOVER_SCALE, PLAY_CLOVER_SCALE, 4, false, col);
     }
 
     // ===== 思考表情：从右耳组件画眼镜鼻梁 =====
