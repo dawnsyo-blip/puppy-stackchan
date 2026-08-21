@@ -76,6 +76,21 @@ COMPUTER_IP = "192.168.137.1"   # 电脑在热点网络上的 IP（StackChan 用
 AUDIO_SERVER_PORT = 8090  # 8080 会被本机的沙盒代理/VPN 工具（Jamjams）保留，bind 会报
                            # WinError 10013（拒绝访问，不是端口占用），换一个不常见端口即可
 TIMEOUT = 5                     # 普通请求（/face、/servo、/touch）超时
+FACE_BG_TIMEOUT_SEC = 1.5       # check_face()/retrack_face() 改成后台线程之后
+                                 # 新增的超时——这两个后台 worker 的 /camera 请求
+                                 # 走的是跟主线程共用的 _device_lock（见那把锁
+                                 # 声明处的注释），如果这次请求卡住不响应，会一直
+                                 # 攥着锁到超时才放手，期间主线程哪怕只是想发一个
+                                 # /face?expr=... 也要陪着等——实测触摸反应"还是
+                                 # 好久"，等的时长（~5s）跟普通请求的 TIMEOUT(5s)
+                                 # 对得上，就是这个机制在作祟。后台检测本来就是
+                                 # "错过一次也无所谓"的低优先级任务（下次
+                                 # FACE_CHECK_INTERVAL_SEC/FACE_RETRACK_
+                                 # INTERVAL_SEC 后还会再试），没必要占着锁等满
+                                 # 5 秒，换成短得多的超时、且不重试（见
+                                 # _check_face_worker()/_retrack_face_worker()），
+                                 # 把"背景检测偶尔卡顿拖累前台触摸反应"这个最坏
+                                 # 情况从 ~5s（甚至加上重试的 ~12s）压到 ~1.5s。
 PLAY_TIMEOUT = 30               # /play 本身现在是非阻塞的（固件后台任务播放，
                                  # 见 firmware.ino 的 playTaskFn()），这个超时是
                                  # PuppyEngine.wait_for_playback() 轮询等自然
@@ -809,16 +824,20 @@ def get_status():
         except: return None
     return None
 
-def capture_frame():
-    img, _ = capture_frame_with_bytes()
+def capture_frame(timeout=None, _retry=True):
+    img, _ = capture_frame_with_bytes(timeout=timeout, _retry=_retry)
     return img
 
-def capture_frame_with_bytes():
+def capture_frame_with_bytes(timeout=None, _retry=True):
     """跟 capture_frame() 一样拍一帧，但同时把原始 JPEG 字节也返回——人脸
     检测只需要解码后的图像数组，捉迷藏游戏的 VLM 精确确认还需要把原始字节
     编码成 base64 传给视觉大模型，两者共用同一次 /camera 请求，不重复拍照。
-    失败时返回 (None, None)。"""
-    r = api_get("/camera")
+    失败时返回 (None, None)。
+
+    timeout/_retry 透传给 api_get()——后台人脸检测线程（见 check_face()/
+    retrack_face() 的 _check_face_worker()/_retrack_face_worker()）会传一个
+    短得多的超时、且不重试，理由见那两个函数旁边的说明。"""
+    r = api_get("/camera", timeout=timeout, _retry=_retry)
     if r and r.status_code == 200:
         arr = np.frombuffer(r.content, np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR), r.content
@@ -2105,12 +2124,20 @@ class PuppyEngine:
 
     # ---------- 人脸检测 ----------
 
-    def detect_face_once(self):
+    def detect_face_once(self, timeout=None, _retry=True):
         """拍一帧检测人脸，返回 (是否检测到, 人脸中心的水平归一化坐标)。
         坐标范围 0.0(最左)~1.0(最右)；没检测到人脸时坐标为 None。用锁串行化
-        （见 face_detect_lock 声明处注释），调用方不用关心并发安全。"""
+        （见 face_detect_lock 声明处注释），调用方不用关心并发安全。
+
+        timeout/_retry 透传给 capture_frame()→api_get()。后台人脸检测线程
+        （_check_face_worker()/_retrack_face_worker()）会传一个短得多的
+        超时、且不重试——原因见那两个函数旁边的说明：_device_lock 是全局
+        互斥的，这次请求卡多久，主线程（触摸/表情/舵机这些真正需要"手感"
+        的操作）就要陪着等多久，普通阻塞调用路径（scan_for_face()/
+        track_face_once()/_face_person_before_excited() 等）继续用默认的
+        TIMEOUT(5s)+重试，这些路径本来就是设计成阻塞等待的，不需要改。"""
         with self.face_detect_lock:
-            img = capture_frame()
+            img = capture_frame(timeout=timeout, _retry=_retry)
             if img is None:
                 return False, None
             h, w = img.shape[:2]
@@ -2226,7 +2253,7 @@ class PuppyEngine:
 
     def _check_face_worker(self):
         try:
-            found, _ = self.detect_face_once()
+            found, _ = self.detect_face_once(timeout=FACE_BG_TIMEOUT_SEC, _retry=False)
             now = time.time()
             if found:
                 self.face_confirm_count += 1
@@ -2268,7 +2295,7 @@ class PuppyEngine:
 
     def _retrack_face_worker(self):
         try:
-            found, face_x = self.detect_face_once()
+            found, face_x = self.detect_face_once(timeout=FACE_BG_TIMEOUT_SEC, _retry=False)
             now = time.time()
             if found:
                 self.last_face_seen_time = now
