@@ -196,10 +196,15 @@ DIZZY_LINGER_SEC = 2.0                # 摇晃/拿起信号消失后，"晕"表�
 DEAD_PITCH_DOWN = 80             # 低头角度，参考 CLAUDE.md 里 Y 轴舵机建议范围
                                   # 5~85°，用接近下限的保守值——这个值已经过
                                   # 实机端到端验证，低头视觉效果符合预期。
-DEAD_PITCH_UP = 500              # 进入装死时先向上抬一点，再落到 DEAD_PITCH_DOWN
-                                  # 定格（反馈要求加的过渡动作）。复用
-                                  # EXCITED_PITCH_HIGH 同一个已验证安全的抬头
-                                  # 幅度，没有单独为这个新动作重新实机确认过。
+DEAD_PITCH_UP = 600              # 进入装死时先向上抬一点，再落到 DEAD_PITCH_DOWN
+                                  # 定格（反馈要求加的过渡动作）。第一版复用
+                                  # EXCITED_PITCH_HIGH(500)，反馈"幅度可以再大
+                                  # 一点"后加到 600——这是本项目 pitch 轴目前
+                                  # 用过的最大值（此前最大是 EXCITED_PITCH_HIGH
+                                  # =500，已验证），600 没有单独实机验证过，
+                                  # 硬件上限是 [0,900]（firmware handleServo()
+                                  # 的 constrain()），留了不小的余量，但第一次
+                                  # 测试还是要留意有没有卡顿/异响。
 DEAD_PITCH_UP_SETTLE_TOLERANCE = 30   # 判定"已经抬到位"的容差
 DEAD_PITCH_UP_SETTLE_TIMEOUT_SEC = 1.0  # 等舵机转到位的最长时间，超时就按
                                   # 当前角度继续，不卡死（跟 _settle_privacy_
@@ -207,7 +212,11 @@ DEAD_PITCH_UP_SETTLE_TIMEOUT_SEC = 1.0  # 等舵机转到位的最长时间，�
 DEAD_PITCH_UP_HOLD_SEC = 0.3     # 转到位之后再停留多久才落下——太短会跟落下
                                   # 动作糊在一起看不出"先抬再落"，没有实机验证
                                   # 过具体值。
-DEAD_SPEED = 100                 # 跟 SORRY_SPEED 同量级
+DEAD_SPEED = 300                 # 抬头/落下的舵机速度，第一版 100（跟 SORRY_
+                                  # SPEED 同量级），反馈"可以再快一点"后加大。
+                                  # 300 仍然低于 EXCITED_YAW_SPEED(500，本项目
+                                  # pitch/yaw 轴用过的最快速度，已验证)，没有
+                                  # 直接顶格用最快值，留了安全边际。
 DEAD_LED_RGB = (255, 0, 0)       # 红色，没有实机验证过
 DEAD_LED_BLINK_PERIOD_MS = 300
 DEAD_LED_BLINK_HOLD_SEC = 0.6    # 闪两下红灯保持的时长，之后切渐灭
