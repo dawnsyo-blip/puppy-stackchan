@@ -379,12 +379,17 @@ static const int PLAY_BONE_TAG_ROPE_LEN = 8; // 挂绳长度，短短的，只�
 // 改成三叶草（其余两株仍是四叶草），同时整体镜像翻转——叶子排列本身左右
 // 对称，镜像前后叶子位置其实看不出差别，真正会变的是叶柄的弯曲方向
 // （drawClover() 的 mirror 参数控制），从往右下弯改成往左下弯。
-static const float PLAY_CLOVER_SCALE = 0.7f;    // 四叶草（第一、三株）叶片+草茎统一缩放
-// 三叶草（第二株）叶片/草茎分开缩放——第四轮反馈"叶片更大、草茎更短"，
-// 两个方向相反，必须拆成两个独立系数（叶片比 PLAY_CLOVER_SCALE 大，草茎
-// 比它小），不能再共用同一个 scale。
-static const float PLAY_CLOVER3LEAF_LEAF_SCALE = 0.95f;  // 三叶草叶片缩放，比四叶草的0.7大
-static const float PLAY_CLOVER3LEAF_STEM_SCALE = 0.4f;   // 三叶草草茎缩放，比四叶草的0.7小（更短）
+// 四叶草（第一、三株）叶片/草茎分开缩放——第四轮反馈"叶片更大、草茎更短"
+// 只作用在三叶草上时就已经拆开过一次；第五轮反馈"所有草的叶片都放大到
+// 现在的两倍"，四叶草也要跟着拆，草茎缩放维持原来共用的 0.7 不变，只翻倍
+// 叶片。
+static const float PLAY_CLOVER_LEAF_SCALE = 1.4f;  // 四叶草叶片缩放：0.7 * 2
+static const float PLAY_CLOVER_STEM_SCALE = 0.7f;  // 四叶草草茎缩放，维持原来的值不变
+// 三叶草（第二株）叶片/草茎分开缩放——上一轮"叶片更大、草茎更短"定的
+// 0.95，这一轮同样要求"所有草叶片放大到两倍"，在 0.95 基础上再乘 2；
+// 草茎缩放这轮没有再单独提，维持 0.4 不变。
+static const float PLAY_CLOVER3LEAF_LEAF_SCALE = 1.9f;   // 三叶草叶片缩放：0.95 * 2
+static const float PLAY_CLOVER3LEAF_STEM_SCALE = 0.4f;   // 三叶草草茎缩放，维持不变
 static const int PLAY_CLOVER1_X = 40, PLAY_CLOVER1_Y = 205;   // 左下第一株
 static const int PLAY_CLOVER2_X = 66, PLAY_CLOVER2_Y = 178;   // 左下第二株，跟第一株错开，不完全对齐；
                                                                 // 镜像翻转的那一株
@@ -506,11 +511,10 @@ static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float sca
 // 三叶草的排列方式）。叶子排列本身左右对称，mirror 参数不会改变观感，
 // 只翻转叶柄的弯曲方向（默认往右下弯，mirror=true 时往左下弯）——第二轮
 // 反馈要求"从左到右第二株镜像翻转"，第三轮反馈又要求"第二株改成三叶草"，
-// 第四轮反馈"三叶草叶片更大、草茎更短"，都作用在同一株（PLAY_CLOVER2）
-// 上。leafScale/stemScale 分开传是这一轮加的——之前叶子和草茎共用同一个
-// scale，没法只放大叶子或只缩短草茎，现在两者独立，三株里另外两株
-// （四叶草）继续传相同的值保持原样。参考用户提供的示意图判断的大致比例，
-// 没有实机验证过。
+// 第四轮反馈"三叶草叶片更大、草茎更短"，第五轮反馈"所有草叶片放大到两倍、
+// 草茎不要遮住叶片"，都作用在这三株身上。leafScale/stemScale 分开传是第
+// 四轮加的——之前叶子和草茎共用同一个 scale，没法只放大叶子或只缩短草茎。
+// 参考用户提供的示意图判断的大致比例，没有实机验证过。
 static void drawClover(M5Canvas *spi, int cx, int cy, float leafScale, float stemScale,
                         int leafCount, bool mirror, uint16_t col) {
   float startAngle = (leafCount == 4) ? (PI / 4.0f) : 0.0f;
@@ -519,11 +523,19 @@ static void drawClover(M5Canvas *spi, int cx, int cy, float leafScale, float ste
     drawHeartLeaf(spi, cx, cy, rot, leafScale, col);
   }
   int m = mirror ? -1 : 1;
+  // 草茎起点不能直接是叶片汇聚的中心点 (cx,cy)——叶片放大以后（第五轮
+  // 反馈"叶片放大到两倍"），四片/三片叶尖会伸到中心周围一圈半径内
+  // （drawHeartLeaf() 里叶尖到中心的距离是 6*leafScale*1.2），草茎如果
+  // 从正中心画起，会穿过这圈叶尖、看起来像压在叶片上（第五轮反馈明确要求
+  // "草茎不要遮住叶片"）。改成从叶尖半径之外（留一点余量）的点开始画，
+  // 草茎的控制点/终点也跟着从这个新起点往外延伸，不是从中心量起。
+  float stemStartR = 6.0f * leafScale * 1.3f;  // 略大于叶尖到中心的实际距离(6*leafScale*1.2)
+  int stemStartY = (int)roundf(stemStartR);
   int s1x, s1y, s2x, s2y;
-  rotateLocalOffset(0.0f, m * 10.0f * stemScale, 12.0f * stemScale, s1x, s1y);
-  rotateLocalOffset(0.0f, m * 5.0f * stemScale, 24.0f * stemScale, s2x, s2y);
+  rotateLocalOffset(0.0f, m * 10.0f * stemScale, stemStartY + 12.0f * stemScale, s1x, s1y);
+  rotateLocalOffset(0.0f, m * 5.0f * stemScale, stemStartY + 24.0f * stemScale, s2x, s2y);
   for (int t = -1; t <= 1; t++) {
-    spi->drawBezier(cx + t, cy, cx + s1x + t, cy + s1y, cx + s2x + t, cy + s2y, col);
+    spi->drawBezier(cx + t, cy + stemStartY, cx + s1x + t, cy + s1y, cx + s2x + t, cy + s2y, col);
   }
 }
 
@@ -1616,9 +1628,9 @@ class PuppyEar : public Drawable {
     //      （其余两株是四叶）、且镜像翻转，两条反馈都作用在它身上。第一版
     //      位置/大小没有实机验证过。=====
     if (!isLeft && isPlay) {
-      drawClover(spi, PLAY_CLOVER1_X, PLAY_CLOVER1_Y, PLAY_CLOVER_SCALE, PLAY_CLOVER_SCALE, 4, false, col);
+      drawClover(spi, PLAY_CLOVER1_X, PLAY_CLOVER1_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER_STEM_SCALE, 4, false, col);
       drawClover(spi, PLAY_CLOVER2_X, PLAY_CLOVER2_Y, PLAY_CLOVER3LEAF_LEAF_SCALE, PLAY_CLOVER3LEAF_STEM_SCALE, 3, true, col);
-      drawClover(spi, PLAY_CLOVER3_X, PLAY_CLOVER3_Y, PLAY_CLOVER_SCALE, PLAY_CLOVER_SCALE, 4, false, col);
+      drawClover(spi, PLAY_CLOVER3_X, PLAY_CLOVER3_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER_STEM_SCALE, 4, false, col);
     }
 
     // ===== 思考表情：从右耳组件画眼镜鼻梁 =====
