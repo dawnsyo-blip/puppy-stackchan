@@ -682,11 +682,26 @@ _session = requests.Session()
 # 没转"。这行修好之后同样的请求会绕开代理直连设备。
 _session.trust_env = False
 
+# ESP32 的 WebServer 是单线程的，同一时刻真正只能服务一个连接；这条锁保证
+# host 端不管有多少个线程（主 tick() 循环、check_face()/retrack_face() 改
+# 成后台线程之后新增的 worker），发给设备的请求永远是排队串行的，一次只有
+# 一个在飞。**这是实测踩过的真坑，不是预防性加的**：check_face()/
+# retrack_face() 改成后台线程后，某次后台线程正在等 /camera 响应（这个
+# 请求本身可能要 1~2s）的同时，主线程恰好要给 play_xiaokaixin_animation()
+# 发好几个 /servo 请求，其中两个直接 ConnectTimeoutError——不是"变慢"，是
+# 连 TCP 连接都建立不起来，说明设备的连接接受能力（WiFiServer 的 backlog）
+# 撑不住两个线程同时各开一条连接（哪怕其中一条是 keep-alive 空闲着）。加锁
+# 让所有请求排队发送，才是跟设备真实的单线程处理能力匹配的模型——不会比
+# 原来（一切都在同一个主线程里天然串行）更慢，只是把"新增的后台线程"也
+# 纳入这个串行队列，不让它绕过去。
+_device_lock = threading.Lock()
+
 def api_get(endpoint, timeout=None, _retry=True):
     """GET 请求失败（连不上/超时）时不要立刻重试——先等 API_RETRY_DELAY_SEC，
     重试一次；再失败就放弃，返回 None。避免在设备已经吃紧时连续拍请求。"""
     try:
-        return _session.get(f"{BASE_URL}{endpoint}", timeout=timeout or TIMEOUT)
+        with _device_lock:
+            return _session.get(f"{BASE_URL}{endpoint}", timeout=timeout or TIMEOUT)
     except requests.exceptions.RequestException as e:
         print(f"  [请求失败] {endpoint}: {e}")
         if _retry:
