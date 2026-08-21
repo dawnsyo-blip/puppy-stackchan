@@ -789,14 +789,30 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   - `enter_dead()` 同步阻塞播完整套收尾动作（跟 `enter_excited_from_
     touch()` 是同一个模式）：切表情 + LED 开始闪红灯 → 舵机先抬头一下
     （`DEAD_PITCH_UP=500`，复用 `EXCITED_PITCH_HIGH` 同一个已验证幅度，
-    视觉上像"中枪一震"，停留 `DEAD_PITCH_UP_HOLD_SEC`(0.3s) 让这个动作
-    能被看清）→ 舵机落到低头定格（`DEAD_PITCH_DOWN=80`，这个值已经过
-    实机端到端验证）→ 闪完 `DEAD_LED_BLINK_HOLD_SEC` 后 LED 渐灭 → 最后才
-    `transition(State.DEAD)`——`transition()` 的 if/elif 链里没有给
-    `DEAD` 加分支，落到这个状态时什么都不做，避免动画重复播放。舵机全程
-    `mute=True`（大幅度移动会有噪音）。"先抬后落"这个两段式动作是反馈
-    加的，`DEAD_PITCH_UP`/`DEAD_PITCH_UP_HOLD_SEC` 没有单独做过实机验证，
-    只是复用了已知安全的幅度数值。
+    视觉上像"中枪一震"）→ 舵机落到低头定格（`DEAD_PITCH_DOWN=80`，这个
+    值已经过实机端到端验证）→ 闪完 `DEAD_LED_BLINK_HOLD_SEC` 后 LED 渐灭
+    → 最后才 `transition(State.DEAD)`——`transition()` 的 if/elif 链里
+    没有给 `DEAD` 加分支，落到这个状态时什么都不做，避免动画重复播放。
+    舵机全程 `mute=True`（大幅度移动会有噪音）。"先抬后落"这个两段式动作
+    是反馈加的，`DEAD_PITCH_UP` 没有单独做过实机验证，只是复用了已知安全
+    的幅度数值。
+
+    **第一版"抬头"动作实测完全看不出来**（反馈"没有抬头的舵机运动"）：
+    第一版是发完 `move_servo(pitch=DEAD_PITCH_UP,...)` 后盲等一个固定的
+    `DEAD_PITCH_UP_HOLD_SEC`(0.3s) 就紧接着发下一条 `move_servo(pitch=
+    DEAD_PITCH_DOWN,...)`——`Motion.move()` 是非阻塞的，只是设定新的目标
+    角度和速度，真正的物理转动由固件后台任务异步完成；如果 0.3s 内舵机
+    还没转到 `DEAD_PITCH_UP` 附近，第二条指令会立刻把目标角度覆盖成
+    `DEAD_PITCH_DOWN`，物理上只会看到舵机拐了个弯直接往下走，"抬头"这一
+    截会被截断到几乎不可见。改成跟 `_settle_privacy_mic()`/`_face_
+    person_before_excited()` 同一个套路：先轮询 `/status` 确认 pitch 真的
+    到了 `DEAD_PITCH_UP` 附近（容差 `DEAD_PITCH_UP_SETTLE_TOLERANCE`=30，
+    超时 `DEAD_PITCH_UP_SETTLE_TIMEOUT_SEC`=1.0s 就放弃等待、按当前角度
+    继续，不会卡死），到位以后才开始数 `DEAD_PITCH_UP_HOLD_SEC` 的停留
+    时间，最后再发落下指令。**以后任何"先移动到 A、停留一下、再移动到
+    B"的两段式舵机动作，都要照这个模式轮询确认到位，不能对着一个非阻塞
+    的 `move_servo()` 盲等一个猜的固定时长——猜的时长比实际转动时间短，
+    效果就会跟这次一样被截断到看不出来。**
   - **装死状态下人脸/语音/摇晃检测全部跳过**，触摸只认头顶双击：
     `handle_touch_trigger()` 在判断 `is_screen_trigger`/长按分支的条件里
     都排除了 `State.DEAD`（碰屏幕、长按头顶被直接忽略），双击本来就是

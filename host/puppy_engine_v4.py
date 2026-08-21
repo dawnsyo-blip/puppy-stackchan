@@ -200,8 +200,13 @@ DEAD_PITCH_UP = 500              # 进入装死时先向上抬一点，再落到
                                   # 定格（反馈要求加的过渡动作）。复用
                                   # EXCITED_PITCH_HIGH 同一个已验证安全的抬头
                                   # 幅度，没有单独为这个新动作重新实机确认过。
-DEAD_PITCH_UP_HOLD_SEC = 0.3     # 抬头停留多久才落下——太短会跟落下动作糊在
-                                  # 一起看不出"先抬再落"，没有实机验证过具体值。
+DEAD_PITCH_UP_SETTLE_TOLERANCE = 30   # 判定"已经抬到位"的容差
+DEAD_PITCH_UP_SETTLE_TIMEOUT_SEC = 1.0  # 等舵机转到位的最长时间，超时就按
+                                  # 当前角度继续，不卡死（跟 _settle_privacy_
+                                  # mic() 是同一个轮询套路）
+DEAD_PITCH_UP_HOLD_SEC = 0.3     # 转到位之后再停留多久才落下——太短会跟落下
+                                  # 动作糊在一起看不出"先抬再落"，没有实机验证
+                                  # 过具体值。
 DEAD_SPEED = 100                 # 跟 SORRY_SPEED 同量级
 DEAD_LED_RGB = (255, 0, 0)       # 红色，没有实机验证过
 DEAD_LED_BLINK_PERIOD_MS = 300
@@ -1943,12 +1948,32 @@ class PuppyEngine:
         if/elif 链里没有 DEAD 分支，落到这个状态时什么都不做）。
 
         舵机动作分两步（反馈要求加的）：先抬头一下（DEAD_PITCH_UP，配合
-        表情切换和红灯开始闪烁，视觉上像"中枪一震"），停留 DEAD_PITCH_
-        UP_HOLD_SEC 让这个抬头动作能被看清，再落到 DEAD_PITCH_DOWN 定格
-        ——不是一步到位直接倒地。"""
+        表情切换和红灯开始闪烁，视觉上像"中枪一震"），转到位以后再停留
+        DEAD_PITCH_UP_HOLD_SEC 让这个抬头动作能被看清，最后落到
+        DEAD_PITCH_DOWN 定格——不是一步到位直接倒地。
+
+        **不能盲等一个固定时长就发下一条 move_servo() 指令**：如果抬头还
+        没转到位，"落下"的第二条指令会立刻覆盖掉第一条的目标角度，物理上
+        只会看到舵机拐了个弯直接往下走，抬头这一下会被截断到几乎看不出来
+        （第一版就是这么写的，反馈"没有抬头的舵机运动"）。改成跟
+        _settle_privacy_mic()/_face_person_before_excited() 同一个套路：
+        轮询 /status 确认 pitch 真的到了 DEAD_PITCH_UP 附近（容差
+        DEAD_PITCH_UP_SETTLE_TOLERANCE），到位以后才开始数 DEAD_PITCH_
+        UP_HOLD_SEC 的停留时间；轮询超时（DEAD_PITCH_UP_SETTLE_TIMEOUT_
+        SEC）就按当前角度继续，不会卡死。"""
         set_expression("dead")
         set_led_mode("blink", *DEAD_LED_RGB, period_ms=DEAD_LED_BLINK_PERIOD_MS)
         move_servo(pitch=DEAD_PITCH_UP, speed=DEAD_SPEED, mute=True)
+        deadline = time.time() + DEAD_PITCH_UP_SETTLE_TIMEOUT_SEC
+        settled = False
+        while time.time() < deadline:
+            status = get_status()
+            if status and abs(status.get("pitch", 0) - DEAD_PITCH_UP) <= DEAD_PITCH_UP_SETTLE_TOLERANCE:
+                settled = True
+                break
+            time.sleep(0.1)
+        if not settled:
+            print("[装死] 等抬头转到位超时，按当前角度继续")
         time.sleep(DEAD_PITCH_UP_HOLD_SEC)
         move_servo(pitch=DEAD_PITCH_DOWN, speed=DEAD_SPEED, mute=True)
         time.sleep(DEAD_LED_BLINK_HOLD_SEC)
