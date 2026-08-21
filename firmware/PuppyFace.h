@@ -457,15 +457,12 @@ static const float PLAY_SUN_RAY_INNER_R = 11.0f;     // 射线起点到中心的
                                                        // 跟核心半径(6)之间留出更明显的空隙
 static const int PLAY_SUN_RAYS = 8;                  // 射线数量，长短交替（从12减到8）
 // 第四轮反馈"射线不要轴对称、长度设置3种、看起来更随意一点"——三档长度
-// （短/中/长）+ 每条射线一个手工挑的角度偏移，见 drawSun() 里怎么用这两个
-// 数组。都是手工排布出来的"看起来不规则"，不是真随机，数组大小要跟
-// PLAY_SUN_RAYS 保持一致。
-static const float PLAY_SUN_RAY_LEN_SHORT = 3.0f;
-static const float PLAY_SUN_RAY_LEN_MID = 5.0f;
-static const float PLAY_SUN_RAY_LEN_LONG = 7.0f;
-static const int PLAY_SUN_RAY_LEN_TIER[8] = {2, 0, 1, 2, 0, 2, 1, 0};  // 0短 1中 2长
-static const float PLAY_SUN_RAY_ANGLE_JITTER_DEG[8] =
-    {-8.0f, 6.0f, -4.0f, 11.0f, -10.0f, 3.0f, 8.0f, -6.0f};
+// （短/中/长）+ 每条射线一个手工挑的角度偏移。第六轮反馈又改主意了，要求
+// "竖线对齐并且等宽"——三档长度和角度偏移这两个制造"随意感"的东西都撤销，
+// 改回 PLAY_SUN_RAYS 条射线均匀分布在整圆上（角度偏移=0）、统一同一个长度
+// PLAY_SUN_RAY_LEN，跟粗细一样"等宽"（原来粗细本来就已经是所有射线统一的，
+// 这里只是把长度也统一，不再有独立差异）。
+static const float PLAY_SUN_RAY_LEN = 5.0f;           // 所有射线统一长度（原来中档长度）
 // 第五轮反馈：①射线变粗一点，参考小花线条的粗细估的（没有精确对应，
 // M5GFX 的 drawCircle() 本身也没有粗细参数可以精确比较）；②射线长度加一个
 // 缓慢缩短再恢复的"呼吸"动画，所有射线共用同一个呼吸相位（一起变化，不是
@@ -473,6 +470,10 @@ static const float PLAY_SUN_RAY_ANGLE_JITTER_DEG[8] =
 static const int PLAY_SUN_RAY_THICKNESS = 1;             // 射线半粗细（0=单像素，1=3像素）
 static const unsigned long PLAY_SUN_RAY_PULSE_PERIOD_MS = 2200; // 呼吸一个来回的周期
 static const float PLAY_SUN_RAY_PULSE_MIN_RATIO = 0.5f;  // 缩到最短时是原长的几倍
+// 第六轮反馈"实心圆的呼吸动画的幅度小一点"——核心用同一个 pulsePhase（保持
+// 跟射线同步），但换一个更接近 1.0 的 MIN_RATIO，缩小幅度比射线的呼吸温和
+// 很多，不再共用 PLAY_SUN_RAY_PULSE_MIN_RATIO 那个值。
+static const float PLAY_SUN_CORE_PULSE_MIN_RATIO = 0.85f;
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -638,33 +639,37 @@ static void drawSpiral(M5Canvas *spi, int cx, int cy, float maxR, float turns,
 // 不太合适"——改成一个简单的 fillCircle()，drawSpiral() 那次改动的
 // thickness 参数继续留给"晕"表情眼睛用，太阳这边不再调它。
 // 周围环绕 PLAY_SUN_RAYS 条从中心辐射出去的射线，射线起点离核心留了
-// PLAY_SUN_RAY_INNER_R 的空隙。射线角度/长度档位不对称、手工排布出"看起来
-// 随意"的效果，见 PLAY_SUN_RAY_ANGLE_JITTER_DEG/PLAY_SUN_RAY_LEN_TIER
-// 定义处的说明。
+// PLAY_SUN_RAY_INNER_R 的空隙。第四轮反馈曾经要求射线角度/长度都不对称、
+// 手工排布出"看起来随意"的效果；第六轮反馈又要求改回"对齐并且等宽"——
+// 角度改回 PLAY_SUN_RAYS 条均匀分布（不再加随机偏移），长度改回统一的
+// PLAY_SUN_RAY_LEN（不再分短中长三档）。
 // 这一轮反馈还加了两条：①射线整体变粗（PLAY_SUN_RAY_THICKNESS，参考
 // 小花线条的粗细估的，没有精确对应）；②射线长度加一个缓慢缩短再恢复的
-// "呼吸"动画（PLAY_SUN_RAY_PULSE_*），每条射线各自的长度是"档位长度 ×
-// 呼吸系数"，呼吸系数在 [PLAY_SUN_RAY_PULSE_MIN_RATIO, 1.0] 之间来回，
-// 所有射线共用同一个呼吸相位（一起缩短、一起恢复，不是各自独立）。
-// 下一轮反馈"整个太阳的呼吸同步"——核心实心圆的半径也乘上同一个
-// pulseRatio，不再是固定不变的，跟射线用同一个 pulsePhase，视觉上核心
-// 和射线会同时缩小、同时恢复，不会出现"核心不动、只有射线在动"的割裂感。
+// "呼吸"动画（PLAY_SUN_RAY_PULSE_*），呼吸系数在
+// [PLAY_SUN_RAY_PULSE_MIN_RATIO, 1.0] 之间来回，所有射线共用同一个呼吸
+// 相位（一起缩短、一起恢复，不是各自独立）。
+// 后一轮反馈"整个太阳的呼吸同步"——核心实心圆的半径也乘上同一个
+// pulsePhase 算出的系数，跟射线同步缩小/恢复；再下一轮反馈"核心呼吸幅度
+// 小一点"，核心改用单独的 PLAY_SUN_CORE_PULSE_MIN_RATIO（更接近1.0，
+// 呼吸更温和），射线的呼吸幅度不变。
 // 没有实机验证过。
 static void drawSun(M5Canvas *spi, int cx, int cy, float scale, uint16_t col) {
   float innerR = PLAY_SUN_RAY_INNER_R * scale;
-  float lenTiers[3] = {PLAY_SUN_RAY_LEN_SHORT, PLAY_SUN_RAY_LEN_MID, PLAY_SUN_RAY_LEN_LONG};
   float pulsePhase = 2.0f * PI * (float)millis() / (float)PLAY_SUN_RAY_PULSE_PERIOD_MS;
   // 呼吸系数：0.5-0.5*cos 让它从 1.0（原长）平滑过渡到 MIN_RATIO 再回到
   // 1.0，不是瞬间跳变；((1+cos)/2 在 [0,1] 之间，映射到
-  // [MIN_RATIO, 1.0]。
-  float pulseRatio = PLAY_SUN_RAY_PULSE_MIN_RATIO +
-                      (1.0f - PLAY_SUN_RAY_PULSE_MIN_RATIO) * (0.5f + 0.5f * cosf(pulsePhase));
-  int coreR = max(1, (int)roundf(PLAY_SUN_CORE_R * scale * pulseRatio));
+  // [MIN_RATIO, 1.0]。核心和射线用同一个 pulsePhase（保持同步），但各自
+  // 的 MIN_RATIO 不同（核心幅度更小）。
+  float breathe = 0.5f + 0.5f * cosf(pulsePhase);
+  float rayPulseRatio = PLAY_SUN_RAY_PULSE_MIN_RATIO +
+                         (1.0f - PLAY_SUN_RAY_PULSE_MIN_RATIO) * breathe;
+  float corePulseRatio = PLAY_SUN_CORE_PULSE_MIN_RATIO +
+                          (1.0f - PLAY_SUN_CORE_PULSE_MIN_RATIO) * breathe;
+  int coreR = max(1, (int)roundf(PLAY_SUN_CORE_R * scale * corePulseRatio));
   spi->fillCircle(cx, cy, coreR, col);
   for (int i = 0; i < PLAY_SUN_RAYS; i++) {
-    float ang = (float)i * (2.0f * PI / PLAY_SUN_RAYS) +
-                PLAY_SUN_RAY_ANGLE_JITTER_DEG[i] * PI / 180.0f;
-    float len = lenTiers[PLAY_SUN_RAY_LEN_TIER[i]] * scale * pulseRatio;
+    float ang = (float)i * (2.0f * PI / PLAY_SUN_RAYS);
+    float len = PLAY_SUN_RAY_LEN * scale * rayPulseRatio;
     int x0 = cx + (int)roundf(innerR * cosf(ang));
     int y0 = cy + (int)roundf(innerR * sinf(ang));
     int x1 = cx + (int)roundf((innerR + len) * cosf(ang));
