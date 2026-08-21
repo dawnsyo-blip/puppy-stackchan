@@ -378,7 +378,9 @@ static const int PLAY_BONE_TAG_HALF_LEN = 6; // 吊牌骨头比口水巾上的�
 static const int PLAY_BONE_TAG_HALF_H = 1;
 static const int PLAY_BONE_TAG_R = 3;
 static const int PLAY_BONE_TAG_Y = 42;       // 吊牌骨头中心相对鼻子中心的Y偏移（第一轮从30加大到42）
-static const int PLAY_BONE_TAG_ROPE_LEN = 8; // 挂绳长度，短短的，只连着吊牌本身，不连到嘴巴
+static const int PLAY_BONE_TAG_ROPE_LEN = 8; // 骨头到项链弧线汇合点的高度（第八轮反馈从直挺挺的
+                                              // 挂绳改成两条对称弧线之后，这个值改成控制弧线
+                                              // 弯多高，名字沿用旧的没改，含义已经不是"绳长"了）
                                               // （第二轮反馈明确要求改回短挂绳）
 
 // 苜蓿草（三/四叶草）：leafCount 片心形叶子绕中心点放射状均匀排列（每片
@@ -420,9 +422,18 @@ static const int PLAY_BONE_TAG_ROPE_LEN = 8; // 挂绳长度，短短的，只�
 // 独立的 PLAY_CLOVER_STEM_SCALE(0.7)/PLAY_CLOVER3LEAF_STEM_SCALE(0.4)
 // 合并成一个共用值 0.4，三株茎长度一致，第二个常量已删掉；④草茎变细——
 // 见 drawClover() 里画草茎那一段，从 3px 描边改成单像素线。
-static const float PLAY_CLOVER_LEAF_SCALE = 1.15f; // 三株统一共用的叶片缩放（从0.9加大到1.15）
-static const float PLAY_CLOVER_LEAF_GAP_PX = 11.0f; // 每片叶子绘制原点外移的距离，产生叶片间空隙，
-                                                     // 同时把整株的外接范围撑大（从7加大到11）
+// 第九轮反馈"单片的♥缩小，加大不同♥之间的距离，但尖端依然是靠近的"——
+// 这三条乍看互相矛盾（缩小+加大距离通常会一起把尖端也带离中心），实际
+// 靠两个独立的旋钮分别满足：①单片整体缩小（LEAF_SCALE 从 1.15 降到
+// 0.85）；②绘制原点外移量 GAP 也跟着按比例调小（11→9），让"尖端到中心
+// 的距离 ≈ GAP − 1.2×半径"这个差值基本维持不变，尖端不会因为缩小/外移
+// 的调整而跑远；③瓣之间的距离靠 drawHeartLeaf() 里瓣自身的横向展开比例
+// 加大来实现（局部 x 方向撑得更宽，相邻两片叶子的瓣自然分得更开），跟
+// GAP/LEAF_SCALE 是两件独立的事，不会影响尖端位置。
+static const float PLAY_CLOVER_LEAF_SCALE = 0.85f; // 三株统一共用的叶片缩放（从1.15降到0.85）
+static const float PLAY_CLOVER_LEAF_GAP_PX = 9.0f;  // 每片叶子绘制原点外移的距离——跟着 LEAF_SCALE
+                                                     // 一起按比例调小（11→9），保持尖端到中心的距离
+                                                     // 基本不变
 static const float PLAY_CLOVER_STEM_SCALE = 0.4f;  // 三株统一共用的草茎缩放（原来四叶草0.7比三叶草0.4
                                                      // 长，这一轮统一成三叶草的长度）
 static const int PLAY_CLOVER1_X = 40, PLAY_CLOVER1_Y = 205;   // 左下第一株
@@ -529,15 +540,21 @@ static void drawBoneIcon(M5Canvas *spi, int cx, int cy, int halfLen, int halfH, 
 // 第八轮反馈"瓣更加圆润"——瓣最外侧点和外拱控制点都往外、往上调整过
 // （outer 从 (1.0r,0.6r) 松到 (1.15r,0.45r)，控制点从 (0.9r,1.1r) 松到
 // (1.25r,0.85r)），让瓣的弧线更接近饱满的圆弧、不是狭长的下垂形状。
+// 第九轮反馈"加大不同♥之间的距离，但尖端依然是靠近的"——尖端(tx,ty)的
+// 局部坐标没有动，只把瓣的横向展开系数（1.15r/1.25r）进一步加大到
+// 1.5r/1.6r，让瓣在自己局部坐标系里往两侧撑得更开；相邻两片叶子转过不同
+// 角度后，瓣与瓣之间的实际距离就会拉开，跟尖端（不受这个系数影响）的位置
+// 无关——不需要靠 drawClover() 里的整体外移量 GAP 来分开叶片，那样做会
+// 把尖端也一起带走。
 static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float scale, uint16_t col) {
   float r = 6.0f * scale;
   int tx, ty, ncx, ncy, lx, ly, rx, ry, lcx, lcy, rcx, rcy, lbx, lby, rbx, rby;
   rotateLocalOffset(rotRad, 0.0f, -r * 1.2f, tx, ty);         // 尖点
   rotateLocalOffset(rotRad, 0.0f, r * 0.4f, ncx, ncy);        // 顶部凹口
-  rotateLocalOffset(rotRad, -r * 1.15f, r * 0.45f, lx, ly);   // 左瓣最外侧
-  rotateLocalOffset(rotRad, r * 1.15f, r * 0.45f, rx, ry);    // 右瓣最外侧
-  rotateLocalOffset(rotRad, -r * 1.25f, r * 0.85f, lcx, lcy); // 左瓣外拱控制点
-  rotateLocalOffset(rotRad, r * 1.25f, r * 0.85f, rcx, rcy);  // 右瓣外拱控制点
+  rotateLocalOffset(rotRad, -r * 1.5f, r * 0.45f, lx, ly);    // 左瓣最外侧
+  rotateLocalOffset(rotRad, r * 1.5f, r * 0.45f, rx, ry);     // 右瓣最外侧
+  rotateLocalOffset(rotRad, -r * 1.6f, r * 0.85f, lcx, lcy);  // 左瓣外拱控制点
+  rotateLocalOffset(rotRad, r * 1.6f, r * 0.85f, rcx, rcy);   // 右瓣外拱控制点
   rotateLocalOffset(rotRad, -r * 1.3f, -r * 0.4f, lbx, lby);  // 左侧收到尖点的控制点
   rotateLocalOffset(rotRad, r * 1.3f, -r * 0.4f, rbx, rby);   // 右侧收到尖点的控制点
   spi->drawBezier(cx + ncx, cy + ncy, cx + rcx, cy + rcy, cx + rx, cy + ry, col);
@@ -583,8 +600,11 @@ static void drawClover(M5Canvas *spi, int cx, int cy, float leafScale, float ste
   // 朝外），叶片离中心最远的部分变成了瓣/控制点那一侧（局部 y 最大约
   // 1.1r，控制点约 1.42r，比尖端的 1.2r 更远），所以外移量 GAP 之外再留
   // 的余量系数从 1.3 调到 1.4；瓣变圆润之后（drawHeartLeaf() 里瓣控制点
-  // 从 1.42r 松到约 1.51r）再顺带调到 1.5，继续留够余量。
-  float stemStartR = PLAY_CLOVER_LEAF_GAP_PX + 6.0f * leafScale * 1.5f;
+  // 从 1.42r 松到约 1.51r）再顺带调到 1.5；第九轮反馈瓣的横向展开系数又
+  // 从 1.25r 加大到 1.6r（控制点距原点约 1.81r，且横向分量变大，不再是
+  // 单纯沿 GAP 那一个轴的距离），继续把余量系数调到 2.0，留出更保守的
+  // 安全边际，不再精确对应某个具体的控制点距离。
+  float stemStartR = PLAY_CLOVER_LEAF_GAP_PX + 6.0f * leafScale * 2.0f;
   int stemStartY = (int)roundf(stemStartR);
   int s1x, s1y, s2x, s2y;
   rotateLocalOffset(0.0f, m * 10.0f * stemScale, stemStartY + 12.0f * stemScale, s1x, s1y);
@@ -1235,9 +1255,11 @@ class PuppyNose : public Drawable {
       drawBoneIcon(spi, swayCx, boneY, boneHalfLen, boneHalfH, boneR, col);
     }
 
-    // ---- 玩：嘴巴下方挂一个小骨头吊牌，上面一条短短的挂绳——挂绳长度是
-    //      固定的短值（PLAY_BONE_TAG_ROPE_LEN），只连着吊牌本身往上量这么
-    //      长，不再连到嘴巴（第二轮反馈明确要求改回短挂绳、不连嘴巴）。----
+    // ---- 玩：嘴巴下方挂一个小骨头吊牌，骨头两边各一条细弧线像项链一样
+    //      往上弯、在骨头正上方汇合——取代原来那条直挺挺的竖直挂绳（第八轮
+    //      反馈"骨头吊牌上面的竖线删掉，改成骨头两边增加细弧线（项链）"）。
+    //      弧线的汇合高度沿用原来挂绳的长度参数 PLAY_BONE_TAG_ROPE_LEN，
+    //      只是形状从一条直线变成两条对称的弧线。----
     float playScale = playTagAnim_.update(isPlay ? 1.0f : 0.0f);
     if (playScale > 0.02f) {
       int tagY = cy + (int)roundf(PLAY_BONE_TAG_Y * playScale);
@@ -1245,10 +1267,14 @@ class PuppyNose : public Drawable {
       int boneHalfH = max(1, (int)roundf(PLAY_BONE_TAG_HALF_H * playScale));
       int boneR = max(1, (int)roundf(PLAY_BONE_TAG_R * playScale));
       int ropeLen = (int)roundf(PLAY_BONE_TAG_ROPE_LEN * playScale);
-      int ropeTopY = tagY - boneR - ropeLen;
-      for (int t = -1; t <= 1; t++) {
-        spi->drawLine(cx + t, ropeTopY, cx + t, tagY - boneR, col);
-      }
+      int meetY = tagY - boneR - ropeLen;
+      int leftAttachX = cx - boneHalfLen - boneR;
+      int rightAttachX = cx + boneHalfLen + boneR;
+      int leftCtrlX = (leftAttachX + cx) / 2 - (int)roundf(2 * playScale);
+      int rightCtrlX = (rightAttachX + cx) / 2 + (int)roundf(2 * playScale);
+      int ctrlY = (tagY + meetY) / 2;
+      spi->drawBezier(leftAttachX, tagY - boneR, leftCtrlX, ctrlY, cx, meetY, col);
+      spi->drawBezier(rightAttachX, tagY - boneR, rightCtrlX, ctrlY, cx, meetY, col);
       drawBoneIcon(spi, cx, tagY, boneHalfLen, boneHalfH, boneR, col);
     }
   }
