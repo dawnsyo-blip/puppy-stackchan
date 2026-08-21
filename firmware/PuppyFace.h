@@ -387,6 +387,13 @@ static const int PLAY_BONE_TAG_Y = 42;       // 吊牌骨头中心相对鼻子�
 static const int PLAY_BONE_TAG_ROPE_LEN = 8;
 static const int PLAY_BONE_TAG_NECKLACE_EXTRA_PX = 4; // 项链弧线两端比骨头本身（含两端圆头）
                                                        // 再往外多探出多少像素
+// 第三轮反馈"弧线改为从骨头两端延伸出去的弧线，保留现在的曲度和宽度，
+// 可以理解为把现有的弧线向下平移，然后去掉和骨头重叠的线段"——不是重新
+// 设计一条新曲线，而是把原来那条完整的弧线（两端在外、中间鼓向骨头顶部）
+// 整体往下平移这么多像素，让它的中间部分真正穿过骨头所在的区域，再把
+// 落在骨头横向范围内的那一段裁掉不画，只留下骨头两端各自伸出去的一截，
+// 见 draw() 里项链那段的采样+裁剪写法。
+static const int PLAY_BONE_TAG_NECKLACE_SHIFT_PX = 6;
 
 // 苜蓿草（三/四叶草）整个装饰体系已经删掉了——用了好几轮反馈迭代草的
 // 形状/间距/草茎，最后一轮反馈直接决定换成花，草的那套常量/函数
@@ -394,12 +401,14 @@ static const int PLAY_BONE_TAG_NECKLACE_EXTRA_PX = 4; // 项链弧线两端比�
 // 保留旧代码不调用。下面是替换成的花。
 
 // 花：中间一个圆 + 外圈五个圆形花瓣（参考用户提供的示意图，一朵简单的
-// 镂空线框雏菊），见 drawFlower()。三朵固定在屏幕左上角两朵、右上角
-// 一朵（PLAY_FLOWER1/2/3_X/Y，不对齐、故意错开），每朵各自循环播放"缓慢
-// 旋转+缓慢下降一小段距离→消失→回到起点重新开始"的动画，见
-// drawFallingFlower()。没有实机验证过位置/大小/动画节奏是否合适。
+// 镂空线框雏菊），见 drawFlower()。固定在屏幕左上角两朵（不对齐、故意
+// 错开），每朵各自循环播放"缓慢旋转+缓慢下降一小段距离→消失→回到起点
+// 重新开始"的动画，见 drawFallingFlower()。原来右上角还有第三朵，第二轮
+// 反馈"删掉、原位置换成太阳"之后只剩两朵，且第二朵挪了位置（见下面
+// PLAY_FLOWER2_X/Y）。没有实机验证过位置/大小/动画节奏是否合适。
 static const float PLAY_FLOWER_SCALE = 0.8f;         // 整朵花的缩放
-static const float PLAY_FLOWER_CENTER_R = 5.0f;      // 花心圆半径（缩放前）
+static const float PLAY_FLOWER_CENTER_R = 3.0f;      // 花心圆半径（缩放前）——第二轮反馈"里面的圆
+                                                       // 变小一点"，从5降到3
 static const float PLAY_FLOWER_PETAL_R = 5.0f;       // 花瓣圆半径（缩放前）
 static const float PLAY_FLOWER_PETAL_DIST = 8.0f;    // 花瓣圆心到花心的距离（缩放前）
 static const unsigned long PLAY_FLOWER_ROTATE_PERIOD_MS = 3500; // 花瓣绕花心转一整圈的周期，
@@ -411,11 +420,26 @@ static const float PLAY_FLOWER_VISIBLE_RATIO = 0.8f; // 一个循环里"下降+�
                                                        // 花回到起点——不是下降到底直接瞬间跳回起点，
                                                        // 中间真的有一段看不见的间隔
 static const int PLAY_FLOWER1_X = 45, PLAY_FLOWER1_Y = 28;   // 左上第一朵
-static const int PLAY_FLOWER2_X = 75, PLAY_FLOWER2_Y = 55;   // 左上第二朵，跟第一朵错开，不对齐
-static const int PLAY_FLOWER3_X = 265, PLAY_FLOWER3_Y = 35;  // 右上一朵
-static const unsigned long PLAY_FLOWER1_PHASE_MS = 0;        // 三朵花下降/消失循环的时间错位，
-static const unsigned long PLAY_FLOWER2_PHASE_MS = 1300;     // 不要三朵同步下降/消失，看起来更自然
-static const unsigned long PLAY_FLOWER3_PHASE_MS = 2600;
+static const int PLAY_FLOWER2_X = 20, PLAY_FLOWER2_Y = 65;   // 左上第二朵——第二轮反馈"挪到第一朵
+                                                       // 下面且左边一点，不要和花或耳朵重叠"，从
+                                                       // (75,55) 挪到这里；左耳区域大致从 x≈60 开始，
+                                                       // 这里留了足够余量
+static const unsigned long PLAY_FLOWER1_PHASE_MS = 0;        // 两朵花下降/消失循环的时间错位，
+static const unsigned long PLAY_FLOWER2_PHASE_MS = 1300;     // 不要同步下降/消失，看起来更自然
+
+// 太阳：漩涡核心（复用"晕"表情眼睛的螺旋画法，见 drawSpiral()）+ 环绕
+// 一圈长短交替的射线。第二轮反馈"右上角的花删掉，原位置换成太阳"，固定
+// 在原来 PLAY_FLOWER3 的位置。没有实机验证过。
+static const int PLAY_SUN_X = 265, PLAY_SUN_Y = 35;
+static const float PLAY_SUN_SCALE = 0.9f;
+static const float PLAY_SUN_SPIRAL_MAX_R = 6.0f;     // 漩涡核心半径（缩放前），比"晕"表情眼睛的
+                                                       // 16 小很多，太阳只是个小图标
+static const float PLAY_SUN_SPIRAL_TURNS = 1.5f;     // 漩涡圈数
+static const unsigned long PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS = 3000; // 漩涡自转周期
+static const float PLAY_SUN_RAY_INNER_R = 8.0f;      // 射线起点到中心的距离（缩放前）
+static const float PLAY_SUN_RAY_LEN_LONG = 6.0f;     // 长射线的长度（缩放前）
+static const float PLAY_SUN_RAY_LEN_SHORT = 3.0f;    // 短射线的长度（缩放前）
+static const int PLAY_SUN_RAYS = 12;                 // 射线数量，长短交替
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -502,16 +526,17 @@ static void drawBoneIcon(M5Canvas *spi, int cx, int cy, int halfLen, int halfH, 
   spi->fillCircle(cx + halfLen, cy + halfH, r, col);
 }
 
-// 画一朵花：中间一个圆（花心）+ 外圈五个圆形花瓣，均匀绕花心分布，全部
-// 描边不填充（参考用户提供的示意图——一朵镂空线框雏菊）。rotationPhase
-// 是花瓣绕花心的角度偏移，由调用方（drawFallingFlower()）传入一个随时间
-// 连续增长的值，实现"缓慢旋转"——虽然五片花瓣本身彼此全同，整株在离散的
-// 72°倍数角度时长得完全一样，但中间任意角度的花瓣位置是不同的，所以连续
-// 旋转仍然是看得见的（花瓣绕花心转圈），不会因为图案本身的 5 重对称而
-// 显得静止。
+// 画一朵花：中间一个圆（花心）+ 外圈五个圆形花瓣，均匀绕花心分布（参考
+// 用户提供的示意图——一朵镂空线框雏菊）。花瓣描边不填充，花心是实心的
+// （第二轮反馈"里面的圆变小一点、变成实心"，花瓣本身没有改）。
+// rotationPhase 是花瓣绕花心的角度偏移，由调用方（drawFallingFlower()）
+// 传入一个随时间连续增长的值，实现"缓慢旋转"——虽然五片花瓣本身彼此全同，
+// 整株在离散的 72°倍数角度时长得完全一样，但中间任意角度的花瓣位置是
+// 不同的，所以连续旋转仍然是看得见的（花瓣绕花心转圈），不会因为图案
+// 本身的 5 重对称而显得静止。
 static void drawFlower(M5Canvas *spi, int cx, int cy, float scale, float rotationPhase, uint16_t col) {
   int centerR = max(1, (int)roundf(PLAY_FLOWER_CENTER_R * scale));
-  spi->drawCircle(cx, cy, centerR, col);
+  spi->fillCircle(cx, cy, centerR, col);
   int petalR = max(1, (int)roundf(PLAY_FLOWER_PETAL_R * scale));
   float petalDist = PLAY_FLOWER_PETAL_DIST * scale;
   for (int i = 0; i < 5; i++) {
@@ -538,6 +563,61 @@ static void drawFallingFlower(M5Canvas *spi, int baseX, int baseY, float scale,
   int dy = (int)roundf(PLAY_FLOWER_DROP_PX * dropFrac);
   float rotationPhase = 2.0f * PI * (float)now / (float)PLAY_FLOWER_ROTATE_PERIOD_MS;
   drawFlower(spi, baseX, baseY + dy, scale, rotationPhase, col);
+}
+
+// 二次贝塞尔在参数 t∈[0,1] 处的点（标准 B(t)=(1-t)²P0+2(1-t)tP1+t²P2 公式），
+// 给项链弧线沿曲线采样、跳过跟骨头重叠的那一段用，不直接画出来。
+static void quadBezierPoint(float p0x, float p0y, float c1x, float c1y,
+                             float p2x, float p2y, float t, float &ox, float &oy) {
+  float mt = 1.0f - t;
+  ox = mt * mt * p0x + 2.0f * mt * t * c1x + t * t * p2x;
+  oy = mt * mt * p0y + 2.0f * mt * t * c1y + t * t * p2y;
+}
+
+// 画一条从中心向外的螺旋折线（漩涡），用短直线段近似一条连续曲线——
+// "晕"表情的漩涡眼、太阳装饰的漩涡核心共用这个函数（第三轮反馈"太阳可以
+// 参考'晕'里面的小狗眼睛作为漩涡"，把原来写死在 PuppyEye 里的那段循环
+// 抽出来，PuppyEye 那边也改成调用这里，两处不再各自维护一份一样的代码）。
+// maxR 是螺旋最终半径，turns 是圈数，rotationPhase 是整条螺旋此刻的自转
+// 相位（调用方传一个随时间增长的值，实现持续自转）。
+static void drawSpiral(M5Canvas *spi, int cx, int cy, float maxR, float turns,
+                        float rotationPhase, uint16_t col) {
+  const int STEPS = 28;
+  int lastX = cx, lastY = cy;
+  for (int i = 1; i <= STEPS; i++) {
+    float t = (float)i / STEPS;
+    float theta = t * turns * 2.0f * PI + rotationPhase;
+    float r = maxR * t;
+    int x = cx + (int)roundf(r * cosf(theta));
+    int y = cy + (int)roundf(r * sinf(theta));
+    for (int dt = -1; dt <= 1; dt++) {
+      spi->drawLine(lastX + dt, lastY, x + dt, y, col);
+    }
+    lastX = x;
+    lastY = y;
+  }
+}
+
+// 画一个太阳："玩"表情屏幕角落的装饰，取代原来右上角那朵花（见
+// PLAY_SUN_X/Y）。核心是一个持续自转的漩涡（复用 drawSpiral()，跟"晕"
+// 表情眼睛是同一个画法，自己单独算一份自转相位，不跟眼睛共用状态）；
+// 周围环绕 PLAY_SUN_RAYS 条从中心辐射出去的射线，长短交替（i 为偶数时长、
+// 奇数时短），射线起点离中心留了 PLAY_SUN_RAY_INNER_R 的空隙，不紧贴着
+// 漩涡核心。没有实机验证过。
+static void drawSun(M5Canvas *spi, int cx, int cy, float scale, uint16_t col) {
+  float rotationPhase = 2.0f * PI * (float)(millis() % PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS) /
+                         (float)PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS;
+  drawSpiral(spi, cx, cy, PLAY_SUN_SPIRAL_MAX_R * scale, PLAY_SUN_SPIRAL_TURNS, rotationPhase, col);
+  float innerR = PLAY_SUN_RAY_INNER_R * scale;
+  for (int i = 0; i < PLAY_SUN_RAYS; i++) {
+    float ang = (float)i * (2.0f * PI / PLAY_SUN_RAYS);
+    float len = ((i % 2) == 0 ? PLAY_SUN_RAY_LEN_LONG : PLAY_SUN_RAY_LEN_SHORT) * scale;
+    int x0 = cx + (int)roundf(innerR * cosf(ang));
+    int y0 = cy + (int)roundf(innerR * sinf(ang));
+    int x1 = cx + (int)roundf((innerR + len) * cosf(ang));
+    int y1 = cy + (int)roundf((innerR + len) * sinf(ang));
+    spi->drawLine(x0, y0, x1, y1, col);
+  }
 }
 
 // 开心 / 好奇 / 思考时耳朵左右轻轻摆动的偏移量（sin 驱动，周期 1.2s，振幅 4px）。
@@ -818,7 +898,9 @@ class PuppyEye : public Drawable {
       return;
     }
 
-    // ---- 晕：从中心向外的螺旋折线（漩涡），用短直线段近似一条连续曲线；
+    // ---- 晕：从中心向外的螺旋折线（漩涡）——画法本身抽成了 drawSpiral()
+    //      （原来是写死在这里的一段循环，后来太阳装饰也要用同样的漩涡，
+    //      抽出来两边共用，见 drawSpiral() 定义处的说明）。
     //      DIZZY_SPIRAL_TURNS/DIZZY_SPIRAL_MAX_R 见顶部常量定义处的调整记录。
     //      整条螺旋叠加一个随时间线性增长的相位（rotationPhase），让它缓慢
     //      自转——屏幕坐标系 y 轴向下，theta 增大在这个坐标系下视觉效果是
@@ -827,23 +909,10 @@ class PuppyEye : public Drawable {
     //      再额外加 DIZZY_RIGHT_EYE_PHASE_DEG——转速仍然相同（同一个周期），
     //      只是右眼永远领先左眼这个固定角度，不会转到完全一致的画面。----
     if (style == 8) {
-      const int DIZZY_SPIRAL_STEPS = 28;      // 折线段数，越多越平滑
-      int maxR = (int)roundf(DIZZY_SPIRAL_MAX_R * s);
+      float maxR = DIZZY_SPIRAL_MAX_R * s;
       float rotationPhase = 2.0f * PI * (float)(millis() % DIZZY_SPIRAL_ROTATE_PERIOD_MS) / (float)DIZZY_SPIRAL_ROTATE_PERIOD_MS;
       if (!isLeft) rotationPhase += DIZZY_RIGHT_EYE_PHASE_DEG * PI / 180.0f;
-      int lastX = cx, lastY = cy;
-      for (int i = 1; i <= DIZZY_SPIRAL_STEPS; i++) {
-        float t = (float)i / DIZZY_SPIRAL_STEPS;
-        float theta = t * DIZZY_SPIRAL_TURNS * 2.0f * PI + rotationPhase;
-        float r = maxR * t;
-        int x = cx + (int)roundf(r * cosf(theta));
-        int y = cy + (int)roundf(r * sinf(theta));
-        for (int dt = -1; dt <= 1; dt++) {
-          spi->drawLine(lastX + dt, lastY, x + dt, y, col);
-        }
-        lastX = x;
-        lastY = y;
-      }
+      drawSpiral(spi, cx, cy, maxR, DIZZY_SPIRAL_TURNS, rotationPhase, col);
       return;
     }
 
@@ -1182,21 +1251,40 @@ class PuppyNose : public Drawable {
     }
 
     // ---- 玩：嘴巴下方挂一个小骨头吊牌，上面一条细弧线项链——两端往骨头
-    //      两侧外面延伸（不是收拢到骨头正上方的一个点），中间往下鼓向骨头
-    //      顶部，画法直接照搬 EAT_BIB_STRAP_ARC 那条系带的写法（同一个
-    //      "两端展开、中间鼓向主体"的形状，只是这里鼓向骨头而不是口水巾
-    //      主体）——第二轮反馈明确要求"项链的两条线向两边延伸，像吃饭里
-    //      的围裙系带，不是聚集在一起"，之前"两条弧线收拢到骨头正上方一点"
-    //      那版已经改掉。----
+    //      两侧外面延伸（不是收拢到骨头正上方的一个点），画法本来直接照搬
+    //      EAT_BIB_STRAP_ARC 那条系带的写法（一整条弧线，中间鼓向骨头
+    //      顶部）。第三轮反馈"弧线改为从骨头两端延伸出去的弧线，保留现在
+    //      的曲度和宽度，可以理解为把现有的弧线向下平移，然后去掉和骨头
+    //      重叠的线段"——不是重新设计曲线，而是把同一条弧线（两端位置、
+    //      控制点都不变，只是整体沿 Y 轴平移 PLAY_BONE_TAG_NECKLACE_
+    //      SHIFT_PX）再沿曲线采样，跳过横向落在骨头范围内的那一段不画，
+    //      只留下骨头两端各自伸出去的两截——用 quadBezierPoint() 采样
+    //      是因为 M5GFX 的 drawBezier() 只能画一整条曲线，没有"画一段"
+    //      的接口，只能自己采样再挑着画。----
     float playScale = playTagAnim_.update(isPlay ? 1.0f : 0.0f);
     if (playScale > 0.02f) {
       int tagY = cy + (int)roundf(PLAY_BONE_TAG_Y * playScale);
       int boneHalfLen = (int)roundf(PLAY_BONE_TAG_HALF_LEN * playScale);
       int boneHalfH = max(1, (int)roundf(PLAY_BONE_TAG_HALF_H * playScale));
       int boneR = max(1, (int)roundf(PLAY_BONE_TAG_R * playScale));
-      int necklaceY = tagY - boneR - (int)roundf(PLAY_BONE_TAG_ROPE_LEN * playScale);
-      int necklaceHalfW = boneHalfLen + boneR + (int)roundf(PLAY_BONE_TAG_NECKLACE_EXTRA_PX * playScale);
-      spi->drawBezier(cx - necklaceHalfW, necklaceY, cx, tagY - boneR, cx + necklaceHalfW, necklaceY, col);
+      int shiftY = (int)roundf(PLAY_BONE_TAG_NECKLACE_SHIFT_PX * playScale);
+      float necklaceY = (float)(tagY - boneR - (int)roundf(PLAY_BONE_TAG_ROPE_LEN * playScale) + shiftY);
+      float necklaceHalfW = (float)(boneHalfLen + boneR) + PLAY_BONE_TAG_NECKLACE_EXTRA_PX * playScale;
+      float ctrlY = (float)(tagY - boneR + shiftY);
+      float boneSpanHalf = (float)(boneHalfLen + boneR);
+      const int STEPS = 20;
+      float prevX, prevY;
+      quadBezierPoint(cx - necklaceHalfW, necklaceY, (float)cx, ctrlY, cx + necklaceHalfW, necklaceY, 0.0f, prevX, prevY);
+      for (int i = 1; i <= STEPS; i++) {
+        float t = (float)i / STEPS;
+        float x, y;
+        quadBezierPoint(cx - necklaceHalfW, necklaceY, (float)cx, ctrlY, cx + necklaceHalfW, necklaceY, t, x, y);
+        if (fabsf(prevX - cx) > boneSpanHalf && fabsf(x - cx) > boneSpanHalf) {
+          spi->drawLine((int)roundf(prevX), (int)roundf(prevY), (int)roundf(x), (int)roundf(y), col);
+        }
+        prevX = x;
+        prevY = y;
+      }
       drawBoneIcon(spi, cx, tagY, boneHalfLen, boneHalfH, boneR, col);
     }
   }
@@ -1645,18 +1733,20 @@ class PuppyEar : public Drawable {
     drawThickBezier(spi, x0, y0, ctrl1X, ctrl1Y, xBot, yBot, thick, col);
     drawThickBezier(spi, xBot, yBot, ctrl2X, ctrl2Y, x3, y3, thick, col);
 
-    // ===== 玩：左上角两朵、右上角一朵花（见 drawFallingFlower()），固定
-    //      屏幕坐标，不跟着表情/舵机镜像移动——只在右耳组件里画一次，跟
-    //      关键词按钮/字幕是同一个"固定装饰只画一次"的模式。原来这里是
-    //      三/四叶草（drawClover()/drawHeartLeaf()），迭代了很多轮之后
-    //      反馈直接换成花，草的那套代码已经整个删掉。三朵花各自独立循环
-    //      播放"缓慢旋转+缓慢下降→消失→回到起点"的动画，用不同的
-    //      PLAY_FLOWERn_PHASE_MS 错开，不会同步。第一版位置/大小/动画
-    //      节奏没有实机验证过。=====
+    // ===== 玩：左上角两朵花（见 drawFallingFlower()）+ 右上角一个太阳
+    //      （见 drawSun()），固定屏幕坐标，不跟着表情/舵机镜像移动——只在
+    //      右耳组件里画一次，跟关键词按钮/字幕是同一个"固定装饰只画一次"
+    //      的模式。原来这里是三/四叶草，迭代了很多轮之后反馈直接换成花，
+    //      草的那套代码已经整个删掉；花本来是三朵（左上两朵、右上一朵），
+    //      第二轮反馈"右上角的花删掉，换成太阳"之后右上角只剩太阳。两朵
+    //      花各自独立循环播放"缓慢旋转+缓慢下降→消失→回到起点"的动画，
+    //      用不同的 PLAY_FLOWERn_PHASE_MS 错开，不会同步；太阳的漩涡核心
+    //      持续自转，射线本身不参与循环、也不下降/消失。第一版位置/大小/
+    //      动画节奏没有实机验证过。=====
     if (!isLeft && isPlay) {
       drawFallingFlower(spi, PLAY_FLOWER1_X, PLAY_FLOWER1_Y, PLAY_FLOWER_SCALE, PLAY_FLOWER1_PHASE_MS, col);
       drawFallingFlower(spi, PLAY_FLOWER2_X, PLAY_FLOWER2_Y, PLAY_FLOWER_SCALE, PLAY_FLOWER2_PHASE_MS, col);
-      drawFallingFlower(spi, PLAY_FLOWER3_X, PLAY_FLOWER3_Y, PLAY_FLOWER_SCALE, PLAY_FLOWER3_PHASE_MS, col);
+      drawSun(spi, PLAY_SUN_X, PLAY_SUN_Y, PLAY_SUN_SCALE, col);
     }
 
     // ===== 思考表情：从右耳组件画眼镜鼻梁 =====
