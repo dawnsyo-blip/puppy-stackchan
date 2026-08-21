@@ -315,6 +315,9 @@ static const float ANGRY_EAR_WOBBLE_PERIOD_MS = 900.0f; // 摆动周期比 DEAD 
 static const float EAT_SCALE = 0.8f;            // 五官整体缩小20%（跟 EXCITED_SCALE 同一个用法）
 static const float EAT_EYE_INWARD_PX = 8.0f;    // 眼睛朝鼻子方向靠拢的像素数
 static const float EAT_EAR_INWARD_PX = 12.0f;   // 耳朵朝中轴线靠拢的像素数
+static const float EAT_EAR_WOBBLE_DEG = 4.0f;   // 耳朵绕耳根轻微来回旋转的幅度（±4°），两只耳朵
+                                                 // 同相位（跟生气的反相不一样），没有实机验证过
+static const float EAT_EAR_WOBBLE_PERIOD_MS = 1500.0f; // 摆动周期，没有实机验证过
 static const float EAT_NOSE_CLOSER_PX = 10.0f;  // 鼻子（连带嘴巴/舌头）朝眼睛方向靠拢的像素数
 static const float EAT_TONGUE_SCALE = 0.8f;     // 舌头缩放比例，跟 EAT_SCALE 保持一致的比例
 // 嘴巴本身（含舌头）大致延伸到相对鼻子中心 Y≈20 的位置（mouthOffY=10 +
@@ -513,9 +516,10 @@ static void drawBoneIcon(M5Canvas *spi, int cx, int cy, int halfLen, int halfH, 
 // 描边、不填充——第五轮反馈短暂改成过实心填充，第七轮反馈又改回描边
 // （"草叶也变成描边也不是实心，保留每个♥的轮廓，内部不需要添加线条"）；
 // 这两条反馈方向相反，实心填充那版已经删掉，不是两种画法都保留。局部
-// 坐标系里叶尖朝 -y 方向、凹口朝 +y 方向（画的时候整体绕 rotRad 转，把
-// 叶尖转到朝向绘制原点的方向——注意这个原点不是整株的中心，drawClover()
-// 会把它沿叶尖方向外移一段距离，见那边的说明）。
+// 坐标系里叶尖朝 -y 方向、凹口/瓣朝 +y 方向（画的时候整体绕 rotRad 转）。
+// 注意这里的 (cx,cy) 不是整株的中心——drawClover() 会把它沿凹口/瓣的方向
+// （+y）外移一段距离，让叶尖留在离中心更近的一侧、瓣被推得更远，见那边
+// 的说明。
 static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float scale, uint16_t col) {
   float r = 6.0f * scale;
   int tx, ty, ncx, ncy, lx, ly, rx, ry, lcx, lcy, rcx, rcy, lbx, lby, rbx, rby;
@@ -547,24 +551,30 @@ static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float sca
 static void drawClover(M5Canvas *spi, int cx, int cy, float leafScale, float stemScale,
                         int leafCount, bool mirror, uint16_t col) {
   float startAngle = (leafCount == 4) ? (PI / 4.0f) : 0.0f;
-  // 每片叶子的绘制原点沿自己的尖端方向（局部 -y，旋转前朝上）往外挪
-  // PLAY_CLOVER_LEAF_GAP_PX，不再共用整株的中心点——第七轮反馈"单片草叶
+  // 每片叶子的绘制原点沿自己的"凹口/瓣"方向（局部 +y，旋转前朝下）往外挪
+  // PLAY_CLOVER_LEAF_GAP_PX，不再共用整株的中心点——上一轮反馈"单片草叶
   // 的形状不像心形"，根因是所有叶片共用同一个原点，靠近中心的凹口/瓣
   // 区域几片叶子挤在一起互相重叠，糊成一片看不出单片的轮廓；外移之后
-  // 相邻叶片之间才会留出实际的空隙（同一轮反馈"给每个叶片之间留出空隙"）。
+  // 相邻叶片之间才会留出实际的空隙。**这一轮反馈修正了一个方向错误**：
+  // 上一版往叶尖方向（局部 -y）外移，结果尖端被推得离中心更远、圆润的
+  // 瓣反而离中心更近，是反的——真正的四叶草是尖端（窄的一头，相当于叶柄
+  // 附着处）朝中心、圆润的瓣朝外。改成往 +y（凹口/瓣的方向）外移，这样
+  // 尖端留在离中心更近的一侧，瓣被推得更远，方向才对。
   for (int i = 0; i < leafCount; i++) {
     float rot = (float)i * (2.0f * PI / leafCount) + startAngle;
     int ox, oy;
-    rotateLocalOffset(rot, 0.0f, -PLAY_CLOVER_LEAF_GAP_PX, ox, oy);
+    rotateLocalOffset(rot, 0.0f, PLAY_CLOVER_LEAF_GAP_PX, ox, oy);
     drawHeartLeaf(spi, cx + ox, cy + oy, rot, leafScale, col);
   }
   int m = mirror ? -1 : 1;
   // 草茎起点不能是叶片汇聚的中心点 (cx,cy)——草茎如果从正中心画起，会穿过
-  // 叶片占据的整个范围，看起来像压在叶片上（第五轮反馈明确要求"草茎不要
-  // 遮住叶片"）。改成从叶片能到达的最远距离（外移量 GAP + 叶尖到叶片自己
-  // 原点的距离 6*leafScale*1.2，留一点余量）之外的点开始画，草茎的控制点/
-  // 终点也跟着从这个新起点往外延伸，不是从中心量起。
-  float stemStartR = PLAY_CLOVER_LEAF_GAP_PX + 6.0f * leafScale * 1.3f;
+  // 叶片占据的整个范围，看起来像压在叶片上（"草茎不要遮住叶片"）。改成
+  // 从叶片能到达的最远距离之外的点开始画，草茎的控制点/终点也跟着从这个
+  // 新起点往外延伸，不是从中心量起。方向修正之后（尖端朝中心、圆润的瓣
+  // 朝外），叶片离中心最远的部分变成了瓣/控制点那一侧（局部 y 最大约
+  // 1.1r，控制点约 1.42r，比尖端的 1.2r 更远），所以外移量 GAP 之外再留
+  // 的余量系数从 1.3 调到 1.4，确保覆盖到控制点那个更远的参考值。
+  float stemStartR = PLAY_CLOVER_LEAF_GAP_PX + 6.0f * leafScale * 1.4f;
   int stemStartY = (int)roundf(stemStartR);
   int s1x, s1y, s2x, s2y;
   rotateLocalOffset(0.0f, m * 10.0f * stemScale, stemStartY + 12.0f * stemScale, s1x, s1y);
@@ -1596,6 +1606,15 @@ class PuppyEar : public Drawable {
       float phase = isLeft ? PI : 0.0f;
       earTwist += (ANGRY_EAR_WOBBLE_DEG * PI / 180.0f) *
                   sinf(2.0f * PI * (float)millis() / ANGRY_EAR_WOBBLE_PERIOD_MS + phase);
+    }
+
+    // 吃饭：两只耳朵同步（不分相位）绕自己耳根轻微来回旋转，像吃东西时
+    // 耳朵跟着轻轻晃——跟生气的"左右反相、气鼓鼓地抖"是不同的情绪基调，
+    // 这里两只耳朵用同一个相位，看起来是柔和地一起摆动，不是各自抖动。
+    // 幅度/周期都没有实机验证过。
+    if (isEat) {
+      earTwist += (EAT_EAR_WOBBLE_DEG * PI / 180.0f) *
+                  sinf(2.0f * PI * (float)millis() / EAT_EAR_WOBBLE_PERIOD_MS);
     }
 
     float pivotLX = dir * earW;  // 耳根顶点（远离头部一侧的顶部端点）局部坐标
