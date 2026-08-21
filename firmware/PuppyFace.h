@@ -273,44 +273,92 @@ static const float DEAD_NOSE_CLOSER_PX = 8.0f;              // 鼻子朝眼睛�
 // 生气(angry，设计中)：眼睛跟常态一样的竖椭圆，上方加两条弯度不同的
 // 不对称眉毛——左眉是中点上拱的弧线（"⌒"，像挑眉），右眉是一条朝鼻子
 // 一侧压低的直线（皱眉），一挑一压做出不对称的凶感，不是同一条弧线
-// 左右镜像。第一版默认值，没有实机验证过，等 expr_preview.ino 里反复
-// 调过之后再回来更新这段记录。
-static const int ANGRY_BROW_GAP = 20;      // 眉毛距离眼睛顶部的间隙（像素）
+// 左右镜像；两只耳朵各自绕自己耳根轻微来回旋转（气鼓鼓地抖耳朵），
+// 左右反相摆动，不是同步的。第一版默认值，没有实机验证过。
+// 第一轮反馈：眉毛离眼睛更近——GAP 从 20 减到 12。
+static const int ANGRY_BROW_GAP = 12;      // 眉毛距离眼睛顶部的间隙（像素，第一轮从20减到12）
 static const int ANGRY_BROW_HALF_W = 10;   // 眉毛半宽
 static const int ANGRY_LEFT_BROW_ARC = 8;  // 左眉中点比两端连线高多少像素（上拱幅度）
 static const int ANGRY_RIGHT_BROW_TILT = 9; // 右眉内侧（靠鼻子）比外侧低多少像素（压低幅度）
+static const float ANGRY_EAR_WOBBLE_DEG = 5.0f;         // 耳朵绕耳根来回旋转的幅度（±5°），
+                                              // 没有实机验证过，跟 DEAD_EAR_WOBBLE_DEG 同量级估的
+static const float ANGRY_EAR_WOBBLE_PERIOD_MS = 900.0f; // 摆动周期比 DEAD 的 1200ms 稍快，
+                                              // 显得更"气鼓鼓"，没有实机验证过
 
 // 骨头图案：矩形本体（"横杠"）+ 四角各一个圆撑出两端的圆润轮廓，圆的半径
 // 比矩形高度的一半更大，两端才会鼓出来变成经典的"狗骨头"外形。吃饭
 // （口水巾上）和玩（挂在嘴巴下方的吊牌）共用这一个绘制函数，只是尺寸
 // 不同——具体见 drawBoneIcon() 定义处。
-static const int EAT_BONE_HALF_LEN = 9;   // 骨头半长（矩形本体一半宽度）
-static const int EAT_BONE_HALF_H = 2;     // 骨头矩形本体半高
-static const int EAT_BONE_R = 4;          // 骨头两端圆的半径
+// 吃饭那份骨头第一轮反馈：中间矩形高度增加20%（HALF_H: 2→2.4），骨头
+// 整体（含矩形半长、矩形半高、两端圆半径）再缩小10%——两步依次应用，
+// 不是简单地把两个百分比相加/相减。
+static const float EAT_BONE_HALF_LEN = 8.1f;  // 9 * 0.9(整体缩小10%)
+static const float EAT_BONE_HALF_H = 2.16f;   // 2 * 1.2(矩形高度+20%) * 0.9(整体缩小10%)
+static const float EAT_BONE_R = 3.6f;         // 4 * 0.9(整体缩小10%)
 
 // 吃饭(eat，设计中)：嘴巴下方一个口水巾（梯形/口袋状轮廓，两条系带线
-// 从嘴角斜下到围兜"肩部"，底部一条圆弧收口），巾上正中间画一个骨头图案
-// （复用 drawBoneIcon()）。第一版默认值，没有实机验证过。
-static const int EAT_BIB_TOP_Y = 20;         // 系带处相对鼻子中心的Y偏移
-static const int EAT_BIB_HALF_TOP_W = 9;     // 系带处半宽
-static const int EAT_BIB_HALF_BOTTOM_W = 26; // 围兜底部半宽（更宽，呈口袋状）
-static const int EAT_BIB_BOTTOM_Y = 52;      // 围兜底部相对鼻子中心的Y偏移
-static const int EAT_BIB_BOTTOM_BULGE = 14;  // 底部圆弧向下鼓出的深度
-static const int EAT_BONE_ON_BIB_Y = 34;     // 骨头图案在围兜上的Y位置（相对鼻子中心）
+// 从围兜"肩部"斜上连到一条独立的圆弧"系带"——系带不再直接连在嘴巴上，
+// 中间空出一截脖子；底部一条圆弧收口，巾上正中间画一个骨头图案（复用
+// drawBoneIcon()）；嘴巴加了舌头（复用兴奋/死那段 U 型舌头画法）。
+// 五官整体（眼睛/耳朵/鼻子嘴巴）缩小 EAT_SCALE、彼此更靠拢，营造"埋头
+// 吃东西"的紧凑感。第一版默认值，没有实机验证过。
+// 第一轮反馈：①嘴巴加舌头；②五官整体缩小20%、更紧凑（新增 EAT_SCALE 一
+// 整套，仿照 exciteLike 的处理方式）；③系带改成一条独立的圆弧，不再直接
+// 连在嘴巴上，线条加粗；④口水巾整体离嘴巴更远（TOP_Y 从20加大到32）；
+// ⑤骨头图案见上面 EAT_BONE_* 的调整记录。
+static const float EAT_SCALE = 0.8f;            // 五官整体缩小20%（跟 EXCITED_SCALE 同一个用法）
+static const float EAT_EYE_INWARD_PX = 8.0f;    // 眼睛朝鼻子方向靠拢的像素数
+static const float EAT_EAR_INWARD_PX = 12.0f;   // 耳朵朝中轴线靠拢的像素数
+static const float EAT_NOSE_CLOSER_PX = 10.0f;  // 鼻子（连带嘴巴/舌头）朝眼睛方向靠拢的像素数
+static const float EAT_TONGUE_SCALE = 0.8f;     // 舌头缩放比例，跟 EAT_SCALE 保持一致的比例
+// 嘴巴本身（含舌头）大致延伸到相对鼻子中心 Y≈20 的位置（mouthOffY=10 +
+// 缩小后的 curveDepth≈10），下面这几个 Y 偏移都排在这条线以下，从上到下
+// 依次是：系带圆弧 → （空隙）→ 口水巾主体肩部 → 骨头图案 → 口水巾底部。
+static const int EAT_BIB_STRAP_ARC_Y = 24;      // 系带圆弧相对鼻子中心的Y偏移——独立于嘴巴，
+                                                 // 明确排在嘴巴下方，不再直接连在嘴巴上
+static const int EAT_BIB_STRAP_ARC_HALF_W = 7;  // 系带圆弧半宽
+static const int EAT_BIB_STRAP_ARC_BULGE = 4;   // 系带圆弧向下鼓出的深度（弧线本身的弯曲程度）
+static const int EAT_BIB_TOP_Y = 38;            // 口水巾主体顶部（肩部）相对鼻子中心的Y偏移——
+                                                 // 跟系带圆弧之间空出一截"脖子"，不是紧贴着
+static const int EAT_BIB_HALF_TOP_W = 9;        // 口水巾顶部（肩部）半宽
+static const int EAT_BIB_HALF_BOTTOM_W = 26;    // 围兜底部半宽（更宽，呈口袋状）
+static const int EAT_BIB_BOTTOM_Y = 70;         // 围兜底部相对鼻子中心的Y偏移
+static const int EAT_BIB_BOTTOM_BULGE = 14;     // 底部圆弧向下鼓出的深度
+static const int EAT_BONE_ON_BIB_Y = 52;        // 骨头图案在围兜上的Y位置（相对鼻子中心）
 
 // 玩(play，设计中)：右眼静态"<"（不受眨眼影响，跟"思考"的眨眼款式共用同一套
 // 折线画法，但玩耍时永远是这个样子，不会睁开）；嘴巴下方一个小骨头吊牌
-// （没有口水巾，只用一条"挂绳"线连到嘴巴下沿）；右耳上停一只蝴蝶（见
-// drawButterfly()）。第一版默认值，没有实机验证过。
+// （没有口水巾，只用一条"挂绳"线连到嘴巴下沿）；左下角两株、右下角一株
+// 四叶草（见 drawFourLeafClover()），固定画在屏幕角落，不跟着表情移动。
+// 五官整体（眼睛/耳朵/鼻子嘴巴）缩小 PLAY_SCALE、彼此更靠拢，处理方式跟
+// 吃饭的 EAT_SCALE 一套。第一版默认值，没有实机验证过。
+// 第一轮反馈：①去掉蝴蝶（drawButterfly() 保留函数本身，只是不再从这里
+// 调用了）；②五官整体缩小20%、更紧凑（新增 PLAY_SCALE 一整套）；③吊牌
+// 离嘴巴更远（TAG_Y 从30加大到42）；④加三株四叶草。
+static const float PLAY_SCALE = 0.8f;           // 五官整体缩小20%
+static const float PLAY_EYE_INWARD_PX = 8.0f;   // 眼睛朝鼻子方向靠拢的像素数
+static const float PLAY_EAR_INWARD_PX = 12.0f;  // 耳朵朝中轴线靠拢的像素数
+static const float PLAY_NOSE_CLOSER_PX = 10.0f; // 鼻子（连带嘴巴）朝眼睛方向靠拢的像素数
 static const int PLAY_EYE_A = 7;             // 右眼"<"外侧顶点的偏移（跟"思考"眨眼的a=5比更大，
-                                              // 常驻显示需要比瞬间眨眼更明显）
-static const int PLAY_EYE_B = 4;             // 右眼"<"内侧顶点的偏移
+                                              // 常驻显示需要比瞬间眨眼更明显；会再乘 PLAY_SCALE）
+static const int PLAY_EYE_B = 4;             // 右眼"<"内侧顶点的偏移（会再乘 PLAY_SCALE）
 static const int PLAY_BONE_TAG_HALF_LEN = 6; // 吊牌骨头比口水巾上的骨头小一圈
 static const int PLAY_BONE_TAG_HALF_H = 1;
 static const int PLAY_BONE_TAG_R = 3;
-static const int PLAY_BONE_TAG_Y = 30;       // 吊牌骨头中心相对鼻子中心的Y偏移
-static const int PLAY_BUTTERFLY_SCALE_PCT = 100;  // 蝴蝶整体缩放（百分比），先给100%，
-                                              // 没有实机验证过大小是否合适
+static const int PLAY_BONE_TAG_Y = 42;       // 吊牌骨头中心相对鼻子中心的Y偏移（第一轮从30加大到42）
+
+// 四叶草：四片心形叶子绕中心点放射状排列（每片叶尖朝中心），加一条从
+// 中心往下延伸的弯曲叶柄。心形叶片本身用 drawHeartLeaf() 画（两个圆
+// 撑出顶部两瓣 + 一个三角形收尾到底部尖点）。三株摆在屏幕左下角两株、
+// 右下角一株，固定屏幕坐标，不跟着表情/舵机镜像移动——参考示意图（用户
+// 提供，忽略图中"小红书"水印）判断的大致比例，没有实机验证过位置/大小
+// 是否合适。
+static const float PLAY_CLOVER_LEAF_R = 6.0f;   // 心形叶片基准半径（未缩放前）
+static const float PLAY_CLOVER_SCALE = 0.7f;    // 整株缩放
+static const int PLAY_CLOVER1_X = 40, PLAY_CLOVER1_Y = 205;   // 左下第一株
+static const int PLAY_CLOVER2_X = 66, PLAY_CLOVER2_Y = 178;   // 左下第二株，跟第一株错开，不完全对齐
+static const int PLAY_CLOVER3_X = 278, PLAY_CLOVER3_Y = 175;  // 右下一株（避开关键词按钮固定占用的
+                                                                // (270,205) 附近区域，往上挪了一点）
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -397,28 +445,36 @@ static void drawBoneIcon(M5Canvas *spi, int cx, int cy, int halfLen, int halfH, 
   spi->fillCircle(cx + halfLen, cy + halfH, r, col);
 }
 
-// 画一只蝴蝶："玩"表情停在右耳上的装饰。身体是水滴形——沿身体轴线叠加
-// 几个半径递减的圆近似出来，尾部仍保留一个不算小的圆润半径，不收成尖点
-// （反馈明确要求"尾巴不要太尖"）；两片翅膀是"有些变形的圆"，用旋转椭圆
-// 实现，两片朝相反方向倾斜，看起来不是完全对称的正圆。rotRad 让整只蝴蝶
-// 跟着 body 轴线方向转（0 = 身体朝竖直方向，头在上尾在下）。
-static void drawButterfly(M5Canvas *spi, int cx, int cy, float scale, float rotRad, uint16_t col) {
-  const int BODY_STEPS = 4;
-  const float bodyLen = 11.0f * scale;
-  for (int i = 0; i < BODY_STEPS; i++) {
-    float t = (float)i / (BODY_STEPS - 1);  // 0=头 1=尾
-    float r = (4.5f - 2.0f * t) * scale;    // 半径从头到尾递减，尾部仍保留 2.5*scale 的圆润半径
-    int lx, ly;
-    rotateLocalOffset(rotRad, 0.0f, -bodyLen * 0.5f + bodyLen * t, lx, ly);
-    spi->fillCircle(cx + lx, cy + ly, max(1, (int)roundf(r)), col);
+// 画一片心形叶子（四叶草的一片）：两个圆撑出顶部两瓣 + 一个三角形收尾到
+// 底部尖点，比纯粹的三角形/水滴更圆润。局部坐标系里叶尖朝 -y 方向（画的
+// 时候整体绕 rotRad 转，把叶尖转到朝向"中心"的方向）。
+static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float scale, uint16_t col) {
+  float r = 6.0f * scale;
+  int c1x, c1y, c2x, c2y, tipx, tipy;
+  rotateLocalOffset(rotRad, -r * 0.8f, r * 0.5f, c1x, c1y);
+  rotateLocalOffset(rotRad, r * 0.8f, r * 0.5f, c2x, c2y);
+  rotateLocalOffset(rotRad, 0.0f, -r * 1.3f, tipx, tipy);
+  int rr = max(1, (int)roundf(r));
+  spi->fillCircle(cx + c1x, cy + c1y, rr, col);
+  spi->fillCircle(cx + c2x, cy + c2y, rr, col);
+  spi->fillTriangle(cx + c1x, cy + c1y, cx + c2x, cy + c2y, cx + tipx, cy + tipy, col);
+}
+
+// 画一株四叶草："玩"表情左下/右下角的装饰（见 PLAY_CLOVER1/2/3_X/Y）。四片
+// 心形叶子绕中心点放射状排列（45°/135°/225°/315°，叶尖都朝向中心），加
+// 一条从中心往右下方延伸的弯曲叶柄。参考用户提供的示意图判断的大致比例，
+// 没有实机验证过。
+static void drawFourLeafClover(M5Canvas *spi, int cx, int cy, float scale, uint16_t col) {
+  for (int i = 0; i < 4; i++) {
+    float rot = (float)i * PI / 2.0f + PI / 4.0f;
+    drawHeartLeaf(spi, cx, cy, rot, scale, col);
   }
-  int wx1, wy1, wx2, wy2;
-  rotateLocalOffset(rotRad, -7.0f * scale, -1.5f * scale, wx1, wy1);
-  rotateLocalOffset(rotRad, 7.0f * scale, -1.5f * scale, wx2, wy2);
-  int wrx = max(1, (int)roundf(6.0f * scale));
-  int wry = max(1, (int)roundf(4.5f * scale));
-  fillRotatedEllipse(spi, cx + wx1, cy + wy1, wrx, wry, rotRad + 0.4f, col);
-  fillRotatedEllipse(spi, cx + wx2, cy + wy2, wrx, wry, rotRad - 0.4f, col);
+  int s1x, s1y, s2x, s2y;
+  rotateLocalOffset(0.0f, 10.0f * scale, 12.0f * scale, s1x, s1y);
+  rotateLocalOffset(0.0f, 5.0f * scale, 24.0f * scale, s2x, s2y);
+  for (int t = -1; t <= 1; t++) {
+    spi->drawBezier(cx + t, cy, cx + s1x + t, cy + s1y, cx + s2x + t, cy + s2y, col);
+  }
 }
 
 // 开心 / 好奇 / 思考时耳朵左右轻轻摆动的偏移量（sin 驱动，周期 1.2s，振幅 4px）。
@@ -496,6 +552,7 @@ class PuppyEye : public Drawable {
     bool isDead = custom && g_customExpr == "dead";
     bool isAngry = custom && g_customExpr == "angry";
     bool isPlay = custom && g_customExpr == "play";
+    bool isEat = custom && g_customExpr == "eat";
     // peekaboo 比"兴奋"整体再放大 PEEKABOO_SIZE_MUL（10%），乘在所有用到
     // EXCITED_SCALE/EXCITED_*_PX 的地方；真正的"兴奋"不受影响（sizeMul=1）。
     float sizeMul = isPeekaboo ? PEEKABOO_SIZE_MUL : 1.0f;
@@ -510,9 +567,11 @@ class PuppyEye : public Drawable {
     float rotTotal = doubtAngle;
 
     // 兴奋/peekaboo：两只眼睛各自朝对方靠拢一点（左眼往右挪，右眼往左挪）。
-    // 死：眼睛缩小以后也朝鼻子（中轴线）方向靠拢一点，同一个机制复用。
+    // 死/吃饭/玩：眼睛缩小以后也朝鼻子（中轴线）方向靠拢一点，同一个机制复用。
     float eyeInwardTarget = exciteLike ? EXCITED_EYE_INWARD_PX * sizeMul
-                                        : (isDead ? DEAD_EYE_INWARD_PX : 0.0f);
+                                        : (isDead ? DEAD_EYE_INWARD_PX
+                                        : (isEat ? EAT_EYE_INWARD_PX
+                                        : (isPlay ? PLAY_EYE_INWARD_PX : 0.0f)));
     int eyeInward = (int)roundf(eyeInwardAnim_.update(eyeInwardTarget));
     cx += isLeft ? eyeInward : -eyeInward;
 
@@ -777,15 +836,16 @@ class PuppyEye : public Drawable {
 
     // ---- 玩：左眼跟常态一样的竖椭圆；右眼是静态"<"（不受眨眼动画影响，
     //      跟"思考"右眼眨眼用的是同一个折线画法，但玩耍时永远是这个样子，
-    //      不会睁开）——一副"眯着一只眼"的俏皮表情。----
+    //      不会睁开）——一副"眯着一只眼"的俏皮表情。整体按 PLAY_SCALE 缩小
+    //      （第一轮反馈：五官整体缩小20%、更紧凑）。----
     if (style == 11) {
       if (isLeft) {
-        int rx = (int)roundf(8 * s);
-        int ry = (int)roundf(13 * s);
+        int rx = (int)roundf(8 * PLAY_SCALE * s);
+        int ry = (int)roundf(13 * PLAY_SCALE * s);
         spi->fillEllipse(cx + ox, cy + oy, rx, ry, col);
       } else {
-        int a = (int)roundf(PLAY_EYE_A * s);
-        int b = (int)roundf(PLAY_EYE_B * s);
+        int a = (int)roundf(PLAY_EYE_A * PLAY_SCALE * s);
+        int b = (int)roundf(PLAY_EYE_B * PLAY_SCALE * s);
         for (int t = -1; t <= 1; t++) {
           spi->drawLine(cx + ox + a + t, cy + oy - a, cx + ox - b + t, cy + oy, col);
           spi->drawLine(cx + ox - b + t, cy + oy, cx + ox + a + t, cy + oy + a, col);
@@ -794,10 +854,13 @@ class PuppyEye : public Drawable {
       return;
     }
 
-    // ---- 常态 / 好奇：竖向椭圆，带眨眼动画；好奇时椭圆本身也跟着转 ----
+    // ---- 常态 / 好奇 / 吃饭：竖向椭圆，带眨眼动画；好奇时椭圆本身也跟着转；
+    //      吃饭整体按 EAT_SCALE 缩小（第一轮反馈：五官整体缩小20%、更
+    //      紧凑）----
     float openRatio = isLeft ? ctx->getLeftEyeOpenRatio() : ctx->getRightEyeOpenRatio();
-    int rx = (int)roundf(8 * s);
-    int ry = max(1, (int)(13 * openRatio * s));
+    float eatEyeScale = isEat ? EAT_SCALE : 1.0f;
+    int rx = (int)roundf(8 * eatEyeScale * s);
+    int ry = max(1, (int)(13 * eatEyeScale * openRatio * s));
     if (rotTotal != 0.0f) {
       fillRotatedEllipse(spi, cx + ox, cy + oy, rx, ry, rotTotal, col);
     } else {
@@ -863,13 +926,17 @@ class PuppyNose : public Drawable {
                           : (exciteLike ? 10.0f * EXCITED_SCALE * sizeMul * noseMouthMul
                                         : (isGrieved ? 10.0f * GRIEVED_NOSE_SCALE
                                                       : (isDizzy ? 10.0f * DIZZY_NOSE_MOUTH_SCALE
-                                                                 : (isDead ? 10.0f * DEAD_NOSE_SCALE : 10.0f))));
+                                                                 : (isDead ? 10.0f * DEAD_NOSE_SCALE
+                                                                 : (isEat ? 10.0f * EAT_SCALE
+                                                                 : (isPlay ? 10.0f * PLAY_SCALE : 10.0f))))));
     float targetRy = isPrivacy
                           ? 6.0f
                           : (exciteLike ? 7.0f * EXCITED_SCALE * sizeMul * noseMouthMul
                                         : (isGrieved ? 7.0f * GRIEVED_NOSE_SCALE
                                                       : (isDizzy ? 7.0f * DIZZY_NOSE_MOUTH_SCALE
-                                                                 : (isDead ? 7.0f * DEAD_NOSE_SCALE : 7.0f))));
+                                                                 : (isDead ? 7.0f * DEAD_NOSE_SCALE
+                                                                 : (isEat ? 7.0f * EAT_SCALE
+                                                                 : (isPlay ? 7.0f * PLAY_SCALE : 7.0f))))));
     float targetOffX = isPrivacy ? -8.0f : 0.0f;
     float targetOffY = isPrivacy ? -5.0f : 0.0f;
 
@@ -892,6 +959,15 @@ class PuppyNose : public Drawable {
       // （DIZZY_NOSE_MOUTH_SCALE），下面舌头深度也要乘同一个系数。
       targetCw = 20.0f * DIZZY_NOSE_MOUTH_SCALE;
       targetCd = 12.0f * DIZZY_NOSE_MOUTH_SCALE;
+    } else if (isEat) {
+      // 吃饭：张嘴吐舌（见下面 exciteLike||isDead||isEat 那段），基础尺寸
+      // 跟"开心"一样宽，再整体缩小 EAT_SCALE。
+      targetCw = 20.0f * EAT_SCALE;
+      targetCd = 12.0f * EAT_SCALE;
+    } else if (isPlay) {
+      // 玩：不张嘴吐舌，只是标准嘴巴弧线整体缩小 PLAY_SCALE。
+      targetCw = 16.0f * PLAY_SCALE;
+      targetCd = 8.0f * PLAY_SCALE;
     }
 
     // ---- 过渡插值 ----
@@ -918,7 +994,9 @@ class PuppyNose : public Drawable {
     float noseCloserPx = exciteLike ? EXCITED_NOSE_UP_PX * sizeMul
                                      : (isGrieved ? GRIEVED_NOSE_CLOSER_PX
                                                    : (isDizzy ? DIZZY_NOSE_CLOSER_PX
-                                                              : (isDead ? DEAD_NOSE_CLOSER_PX : 0.0f)));
+                                                              : (isDead ? DEAD_NOSE_CLOSER_PX
+                                                              : (isEat ? EAT_NOSE_CLOSER_PX
+                                                              : (isPlay ? PLAY_NOSE_CLOSER_PX : 0.0f)))));
     float noseUp = noseUpAnim_.update(noseCloserPx);
     cy -= (int)roundf(noseUp);
 
@@ -961,13 +1039,16 @@ class PuppyNose : public Drawable {
     //      exciteLike 才画——嘴巴本身的张开尺寸（含 DIZZY_NOSE_MOUTH_SCALE
     //      缩放）不受影响，只是不再往嘴巴里加这一笔。死（isDead）复用同一段
     //      舌头画法，嘴巴本身是常态弧线大小（curveWidth/curveDepth 没有被
-    //      isDead 改过），只是缩放系数换成 DEAD_TONGUE_SCALE。----
-    if (exciteLike || isDead) {
+    //      isDead 改过），只是缩放系数换成 DEAD_TONGUE_SCALE。吃饭
+    //      （isEat，第一轮反馈加的）也复用同一段舌头画法，缩放系数换成
+    //      EAT_TONGUE_SCALE，嘴巴本身尺寸已经在上面 targetCw/targetCd 里
+    //      按 EAT_SCALE 缩小过了。----
+    if (exciteLike || isDead || isEat) {
       int tongueHalfW = curveWidth / 2;
       // 嘴巴弧线是二次贝塞尔 (0,mouthOffY) -> (curveWidth/2, mouthOffY+curveDepth)
       // -> (curveWidth, mouthOffY+2)，在 x=curveWidth/2 处（t=0.5）的精确 y：
       float tongueAttachY = mouthOffY + curveDepth * 0.5f + 0.5f;
-      float tongueScaleMul = isDead ? DEAD_TONGUE_SCALE : (EXCITED_SCALE * sizeMul);
+      float tongueScaleMul = isDead ? DEAD_TONGUE_SCALE : (isEat ? EAT_TONGUE_SCALE : (EXCITED_SCALE * sizeMul));
       const int tongueDepth = (int)roundf(8 * tongueScaleMul);  // U 形往下鼓出的深度
       for (int t = -1; t <= 1; t++) {
         int t0x, t0y, t1x, t1y, t2x, t2y;
@@ -978,12 +1059,24 @@ class PuppyNose : public Drawable {
       }
     }
 
-    // ---- 吃饭：嘴巴下方一个口水巾（梯形/口袋状轮廓——两条系带线从嘴角
-    //      斜下到围兜"肩部"，底部一条圆弧收口），巾上正中间画一个骨头图案。
-    //      整体用 eatBibAnim_ 做 0→1 的淡入淡出，跟其它表情切换的过渡节奏
-    //      保持一致（不是切进/切出这个表情就瞬间出现/消失）。----
+    // ---- 吃饭：嘴巴下方（隔着一截"脖子"）先画一条独立的圆弧"系带"（不再
+    //      直接连在嘴巴上），再往下是口水巾主体（梯形/口袋状轮廓——两条
+    //      斜线从系带正下方连到围兜"肩部"，底部一条圆弧收口），巾上正中间
+    //      画一个骨头图案。整体用 eatBibAnim_ 做 0→1 的淡入淡出，跟其它
+    //      表情切换的过渡节奏保持一致（不是切进/切出这个表情就瞬间
+    //      出现/消失）。----
     float eatScale = eatBibAnim_.update(isEat ? 1.0f : 0.0f);
     if (eatScale > 0.02f) {
+      // 系带：一条独立的圆弧，线条比其它线条粗一圈（t 范围比默认的
+      // -1..1 更宽），强调这是一根系带而不是普通描边。
+      int strapY = cy + (int)roundf(EAT_BIB_STRAP_ARC_Y * eatScale);
+      int strapHalfW = (int)roundf(EAT_BIB_STRAP_ARC_HALF_W * eatScale);
+      int strapBulge = (int)roundf(EAT_BIB_STRAP_ARC_BULGE * eatScale);
+      for (int t = -2; t <= 2; t++) {
+        spi->drawBezier(cx - strapHalfW, strapY + t, cx, strapY + strapBulge + t,
+                         cx + strapHalfW, strapY + t, col);
+      }
+
       int topY = cy + (int)roundf(EAT_BIB_TOP_Y * eatScale);
       int botY = cy + (int)roundf(EAT_BIB_BOTTOM_Y * eatScale);
       int topHalfW = (int)roundf(EAT_BIB_HALF_TOP_W * eatScale);
@@ -992,7 +1085,7 @@ class PuppyNose : public Drawable {
       int lTopX = cx - topHalfW, rTopX = cx + topHalfW;
       int lBotX = cx - botHalfW, rBotX = cx + botHalfW;
       for (int t = -1; t <= 1; t++) {
-        // 两条系带线：嘴角附近（系带处）斜下到围兜"肩部"
+        // 两条边线：从系带正下方斜下到围兜"肩部"
         spi->drawLine(lTopX + t, topY, lBotX + t, botY, col);
         spi->drawLine(rTopX + t, topY, rBotX + t, botY, col);
         // 底部圆弧收口
@@ -1069,8 +1162,7 @@ class PuppyEar : public Drawable {
 
   bool wasExcited_ = false;
   unsigned long excitedStartMs_ = 0;
-  FloatTransition earInwardAnim_;  // 兴奋：耳朵朝眼睛方向靠拢
-  FloatTransition playButterflyAnim_;  // 玩：右耳上蝴蝶的出现/消失淡入淡出
+  FloatTransition earInwardAnim_;  // 兴奋/吃饭/玩：耳朵朝眼睛方向靠拢
   // 兴奋：左右爪印各自的出现/消失缓动。用比默认 500ms 更短的 150ms，确保就算
   // 交替节奏很快（最短 EXCITED_PAW_MIN_MS=300ms 一段）也能在下一次轮到它之前
   // 完整淡出，不会出现"上一次淡出还没走完，新一轮又换了位置"的跳变。
@@ -1201,6 +1293,8 @@ class PuppyEar : public Drawable {
     bool isDizzy = custom && g_customExpr == "dizzy";
     bool isDead = custom && g_customExpr == "dead";
     bool isPlay = custom && g_customExpr == "play";
+    bool isEat = custom && g_customExpr == "eat";
+    bool isAngry = custom && g_customExpr == "angry";
     // peekaboo 比"兴奋"整体再放大 PEEKABOO_SIZE_MUL（10%），乘在所有用到
     // EXCITED_SCALE/EXCITED_*_PX 的地方；真正的"兴奋"不受影响（sizeMul=1）。
     float sizeMul = isPeekaboo ? PEEKABOO_SIZE_MUL : 1.0f;
@@ -1294,6 +1388,20 @@ class PuppyEar : public Drawable {
         earWTarget = 45;
       }
     }
+    if (isEat) {
+      // 吃饭：耳朵整体缩小 EAT_SCALE，处理方式跟 exciteLike 一样（在当前
+      // 目标值基础上缩放，不是从常态基准值重新算，这样不管前面哪个分支
+      // 改过目标值都能正确叠加）。
+      earLenTarget = (int)roundf(earLenTarget * EAT_SCALE);
+      earWTarget = (int)roundf(earWTarget * EAT_SCALE);
+      topYTarget = (int)roundf(topYTarget * EAT_SCALE);
+    }
+    if (isPlay) {
+      // 玩：同上，换成 PLAY_SCALE。
+      earLenTarget = (int)roundf(earLenTarget * PLAY_SCALE);
+      earWTarget = (int)roundf(earWTarget * PLAY_SCALE);
+      topYTarget = (int)roundf(topYTarget * PLAY_SCALE);
+    }
 
     // ---- 过渡插值 ----
     int earLen = (int)roundf(lenAnim_.update((float)earLenTarget));
@@ -1301,9 +1409,11 @@ class PuppyEar : public Drawable {
     int topY = (int)roundf(topYAnim_.update((float)topYTarget));
 
     // ---- 兴奋/peekaboo：耳朵整体朝眼睛方向靠拢一点（水平方向），静态常驻，
-    //      不随时间变化。死：耳朵朝中轴线靠拢一点，同一个机制复用 ----
+    //      不随时间变化。死/吃饭/玩：耳朵朝中轴线靠拢一点，同一个机制复用 ----
     float earInwardTarget = exciteLike ? EXCITED_EAR_INWARD_PX * sizeMul
-                                        : (isDead ? DEAD_EAR_INWARD_PX : 0.0f);
+                                        : (isDead ? DEAD_EAR_INWARD_PX
+                                        : (isEat ? EAT_EAR_INWARD_PX
+                                        : (isPlay ? PLAY_EAR_INWARD_PX : 0.0f)));
     int earInward = (int)roundf(earInwardAnim_.update(earInwardTarget));
     cx -= dir * earInward;
 
@@ -1357,6 +1467,16 @@ class PuppyEar : public Drawable {
     if (isDead && isLeft && deadReadyToDroop) {
       earTwist += (DEAD_EAR_WOBBLE_DEG * PI / 180.0f) *
                   sinf(2.0f * PI * (float)millis() / DEAD_EAR_WOBBLE_PERIOD_MS);
+    }
+
+    // 生气：两只耳朵各自绕自己耳根轻微来回旋转（气鼓鼓地抖耳朵），跟死的
+    // 左耳摆动是同一个"叠加在 earTwist 上"的写法；左右反相（isLeft 时相位
+    // 加 PI），不是同步摆动，看起来更像双耳各自在气恼地抖动，不是整齐划一
+    // 的动作。
+    if (isAngry) {
+      float phase = isLeft ? PI : 0.0f;
+      earTwist += (ANGRY_EAR_WOBBLE_DEG * PI / 180.0f) *
+                  sinf(2.0f * PI * (float)millis() / ANGRY_EAR_WOBBLE_PERIOD_MS + phase);
     }
 
     float pivotLX = dir * earW;  // 耳根顶点（远离头部一侧的顶部端点）局部坐标
@@ -1429,20 +1549,14 @@ class PuppyEar : public Drawable {
     drawThickBezier(spi, x0, y0, ctrl1X, ctrl1Y, xBot, yBot, thick, col);
     drawThickBezier(spi, xBot, yBot, ctrl2X, ctrl2Y, x3, y3, thick, col);
 
-    // ===== 玩：右耳上停一只蝴蝶（见 drawButterfly()），只在右耳组件里画
-    //      一次。位置取耳朵上半段（耳根到耳尖连线 35% 处）再往外挪一点，
-    //      落在耳朵外侧、不压在耳朵轮廓线上；整体缓慢上下浮动模拟停驻时
-    //      翅膀带来的轻微起伏，不是完全静止。第一版位置/幅度都没有实机
-    //      验证过。=====
-    if (!isLeft) {
-      float butterflyScale = playButterflyAnim_.update(isPlay ? 1.0f : 0.0f) *
-                              (PLAY_BUTTERFLY_SCALE_PCT / 100.0f);
-      if (butterflyScale > 0.02f) {
-        int bx = x0 + (int)roundf((xBot - x0) * 0.35f) + dir * 10;
-        int by = y0 + (int)roundf((yBot - y0) * 0.35f) - 12;
-        by += (int)roundf(3.0f * sinf(2.0f * PI * (float)millis() / 1600.0f));
-        drawButterfly(spi, bx, by, butterflyScale, rotTotal, col);
-      }
+    // ===== 玩：左下角两株、右下角一株四叶草（见 drawFourLeafClover()），
+    //      固定屏幕坐标，不跟着表情/舵机镜像移动——只在右耳组件里画一次，
+    //      跟关键词按钮/字幕是同一个"固定装饰只画一次"的模式。第一版
+    //      位置/大小没有实机验证过。=====
+    if (!isLeft && isPlay) {
+      drawFourLeafClover(spi, PLAY_CLOVER1_X, PLAY_CLOVER1_Y, PLAY_CLOVER_SCALE, col);
+      drawFourLeafClover(spi, PLAY_CLOVER2_X, PLAY_CLOVER2_Y, PLAY_CLOVER_SCALE, col);
+      drawFourLeafClover(spi, PLAY_CLOVER3_X, PLAY_CLOVER3_Y, PLAY_CLOVER_SCALE, col);
     }
 
     // ===== 思考表情：从右耳组件画眼镜鼻梁 =====
