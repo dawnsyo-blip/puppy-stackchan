@@ -55,6 +55,7 @@ import math
 import urllib.request
 from pathlib import Path
 from enum import Enum
+from datetime import datetime
 from urllib.parse import quote
 
 import numpy as np
@@ -565,7 +566,63 @@ EXPRESSION_MAP = {
     "peekaboo": "peekaboo",
     "dizzy":    "dizzy",
     "dead":     "dead",
+    "angry":    "angry",
 }
+
+# --- 定时提醒 + 生气催促 ---
+# 小狗在指定时间主动提醒主人（喝水/吃饭/走动），提醒后如果 10 分钟内主人
+# 一直没离开座位，小狗表现出"生气"行为催促。只在 host 端实现，固件早就有
+# angry 表情 + LED/舵机/触摸/摄像头这些全部需要的能力，不用改固件。
+REMINDERS = [
+    {
+        "hour": 10, "minute": 0,
+        "expression": "want_play",       # 占位，见下面 REMINDER_EXPR_MAP 的说明
+        "keywords": ["出去", "玩", "水"],
+        "label": "drink_water",
+    },
+    {
+        "hour": 12, "minute": 0,
+        "expression": "want_eat",
+        "keywords": ["吃饭", "时间", "饿"],
+        "label": "eat_lunch",
+    },
+    {
+        "hour": 15, "minute": 30,
+        "expression": "want_play",
+        "keywords": ["出去", "走", "动"],
+        "label": "move_around",
+    },
+]
+
+REMINDER_WINDOW_SEC = 120          # 到达设定时间前后 2 分钟内算命中
+REMINDER_COOLDOWN_SEC = 600        # 同一条提醒触发后 10 分钟内不再重复
+REMINDER_RECHECK_SEC = 600         # 提醒发出后 10 分钟复查主人是否还在
+REMINDER_SAMPLE_INTERVAL_SEC = 60  # 复查期间每 60 秒采样一次人脸（远低于会
+                                    # 触发 ESP32 堆碎片化重启的高频轮询阈值）
+REMINDER_PRESENCE_THRESHOLD = 0.7  # 采样中 ≥70% 检测到人脸 → 判定"一直在"
+
+# "want_play"/"want_eat" 这两个专属表情还没设计，暂时借用 excited/happy。
+# 所有取提醒表情的地方都走这张映射表，以后设计好专属表情、固件 handleFace()
+# 接上新分支后，只改这张表的值（比如 "want_play": "want_play"），不用到处
+# 找散落的硬编码。
+REMINDER_EXPR_MAP = {
+    "want_play": "excited",
+    "want_eat":  "happy",
+}
+
+ANGRY_LED_RGB = (255, 30, 0)           # 红灯颜色，没有实机验证过
+ANGRY_LED_BLINK_PERIOD_MS = 400        # 闪烁周期——固件 updateLed() 的 BLINK
+                                        # 一个完整周期（亮+暗）就是 period_ms，
+                                        # 不是亮暗各占一半再乘二
+ANGRY_LED_BLINK_COUNT = 3              # 闪烁次数
+ANGRY_FACE_FOUND_DELAY_SEC = 1.0       # 找到人脸后停顿，让用户看到小狗在生气
+ANGRY_YAW_TURN = -200                  # ⚠️ 意图是"左转不理你"。如果实机测出来
+                                        # 转的方向感觉反了，取反这个值即可
+                                        # （这个项目里舵机转向的"左右"从
+                                        # host 端猜测到实机确认之间不止一次
+                                        # 翻过车，见 CLAUDE.md）。
+ANGRY_YAW_SPEED = 300
+ANGRY_FORGIVE_HOLD_SEC = 3.0           # 原谅前保持生气表情的时长
 
 
 # ╔══════════════════════════════════════════════╗
@@ -584,6 +641,7 @@ class State(Enum):
     DIZZY    = "晕"
     DEAD     = "装死"
     GAME_HIDE_SEEK = "捉迷藏"
+    ANGRY    = "生气"
 
 
 # ╔══════════════════════════════════════════════╗
@@ -1781,6 +1839,19 @@ class PuppyEngine:
             )
             self._partial_transcribe_thread.start()
 
+        # 定时提醒 + 生气催促（见 _check_reminders()/_play_angry_reminder()）。
+        # self._reminder_cooldowns 的 key 是 REMINDERS 里的 label，value 是
+        # 上次触发的 time.time()，每次检查前清理超过 REMINDER_COOLDOWN_SEC
+        # 的旧条目，避免无限增长。self._reminder_recheck_target 非 None 时
+        # 表示"有一条提醒发出去了，正在等 10 分钟看主人是否还在"；同一时间
+        # 只跟踪一条复查，_check_reminders() 里会用这个当前置条件，避免两条
+        # 提醒的复查窗口撞在一起互相覆盖。
+        self._reminder_cooldowns: dict[str, float] = {}
+        self._reminder_recheck_target: float | None = None
+        self._reminder_presence_samples: list[bool] = []
+        self._reminder_last_sample_time: float = 0.0
+        self._reminder_pending_label: str | None = None
+
         print("[引擎] 小狗行为引擎 v4 启动！")
         print(f"[引擎] 当前状态: {self.state.value}")
         print("[引擎] 碰一下屏幕 → 小开心（摸头反应）")
@@ -1789,6 +1860,7 @@ class PuppyEngine:
         print("[引擎] 呼唤\"小狗小狗\" → 开心")
         print("[引擎] 说\"我们玩捉迷藏吧\" → 捉迷藏找物品游戏（游戏中长按头顶可中途退出）")
         print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应（隐私状态下忽略语音）")
+        print(f"[引擎] 定时提醒 {len(REMINDERS)} 条，发出后 {REMINDER_RECHECK_SEC/60:.0f} 分钟内主人一直在 → 生气催促（双击头顶原谅）")
         print("[引擎] Ctrl+C 退出\n")
 
     # ---------- 状态转移 ----------
@@ -1943,6 +2015,13 @@ class PuppyEngine:
             # 装死状态下这条路径是真的会被走到的（见 handle_touch_trigger()
             # 的 DEAD 分支说明），不是纯理论上的兜底。
             set_led(off=True)
+        elif self.state == State.ANGRY:
+            # _play_angry_reminder() 播完闪烁后本来就切到红灯常亮，这里显式
+            # 写出来（不靠 else 兜底）——碰屏幕之类的触摸反馈灯理论上不会在
+            # ANGRY 期间被触发（_play_angry_reminder() 是同步阻塞的，期间
+            # tick() 不会跑），但显式写出来比隐式假设更安全，也跟 DEAD 分支
+            # 是同一个考虑。
+            set_led_mode("solid", *ANGRY_LED_RGB)
         else:  # IDLE
             set_led(off=True)
 
@@ -3210,6 +3289,193 @@ class PuppyEngine:
             self.state = State.IDLE
             self.state_enter_time = time.time()
 
+    # ---------- 定时提醒 + 生气催促 ----------
+    # 小狗在指定时间主动提醒主人，提醒后如果 REMINDER_RECHECK_SEC 内主人一直
+    # 没离开座位，就生气催促（_play_angry_reminder()）。发出提醒本身
+    # （_deliver_reminder()）是一次同步动作，跟 run_conversation_turn() 占住
+    # tick() 几秒是同一种模式，不需要单独的状态；生气催促序列本身则是一个
+    # 完整的同步阻塞方法（跟 play_game_hide_seek() 是同一种架构），执行期间
+    # tick() 完全停摆，所以生气序列内部的触摸/中止判断都直接读 get_touch()
+    # 原始值或复用 _game_check_abort()，不走 self.check_touch()/
+    # handle_touch_trigger() 那一整套——那套是给正常 tick() 循环设计的，会
+    # 顺带触发跟生气无关的副作用（触摸反馈灯、双击→兴奋的全局手势分发等）。
+    # handle_touch_trigger() 因此不需要加 State.ANGRY 分支：唯一可能在
+    # ANGRY 期间被调用的路径是 wait_for_playback() 内部的轮询，而生气序列
+    # 目前完全不播放语音（不调 speak_keywords()），不会经过那条路径。
+    # 以后如果给生气加语音播报，要重新检查这一条是否还成立。
+
+    def _check_reminders(self):
+        """检查 REMINDERS 里有没有条目命中当前时间窗口，命中且不在冷却期
+        就发出提醒。一次 tick 最多触发一条（找到就 break）。已经有一条
+        提醒在复查中（self._reminder_recheck_target 不是 None）时不发新
+        的——同一时间只跟踪一条复查状态，避免被第二条提醒覆盖。"""
+        if self._reminder_recheck_target is not None:
+            return
+
+        now_ts = time.time()
+        expired = [label for label, ts in self._reminder_cooldowns.items()
+                   if now_ts - ts > REMINDER_COOLDOWN_SEC]
+        for label in expired:
+            del self._reminder_cooldowns[label]
+
+        now_dt = datetime.now()
+        for reminder in REMINDERS:
+            label = reminder["label"]
+            if label in self._reminder_cooldowns:
+                continue
+            target_today = now_dt.replace(hour=reminder["hour"], minute=reminder["minute"],
+                                           second=0, microsecond=0)
+            if abs((now_dt - target_today).total_seconds()) <= REMINDER_WINDOW_SEC:
+                self._reminder_cooldowns[label] = now_ts
+                self._deliver_reminder(reminder)
+                break
+
+    def _deliver_reminder(self, reminder):
+        """发出一条提醒：扫描确认人在场 → 切表情 + 念关键词 → 恢复开心 →
+        启动 10 分钟复查计时。人不在时直接放弃，不进复查——催促一个不在场
+        的人没有意义。"""
+        label = reminder["label"]
+        print(f"[REMINDER] {label}: 检查是否发出提醒...")
+        if not self.scan_for_face():
+            print(f"[REMINDER] {label}: 没找到人，不提醒")
+            return
+
+        expr = REMINDER_EXPR_MAP.get(reminder["expression"], "happy")
+        set_expression(expr)
+        set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
+        self.speak_keywords(reminder["keywords"])
+        self.enter_happy()
+
+        print(f"[REMINDER] {label}: 提醒已发出，{REMINDER_RECHECK_SEC/60:.0f} 分钟后复查主人是否还在")
+        self._reminder_recheck_target = time.time() + REMINDER_RECHECK_SEC
+        self._reminder_presence_samples = []
+        self._reminder_last_sample_time = time.time()
+        self._reminder_pending_label = label
+
+    def _reminder_recheck_tick(self):
+        """10 分钟复查：每隔 REMINDER_SAMPLE_INTERVAL_SEC 采样一次人脸在不
+        在，时间到了按采样比例判定"主人是否一直在场"。PRIVACY 状态下不
+        采样（跟 tick() 里 PRIVACY 分支故意不做人脸检测是同一个理由——
+        不该在隐私状态下无端拍照），跳过的这一轮既不算"在"也不算"不
+        在"，单纯不计入样本。"""
+        if self._reminder_recheck_target is None:
+            return
+
+        now = time.time()
+        if (self.state != State.PRIVACY
+                and now - self._reminder_last_sample_time >= REMINDER_SAMPLE_INTERVAL_SEC):
+            found, _ = self.detect_face_once()
+            self._reminder_presence_samples.append(found)
+            self._reminder_last_sample_time = now
+
+        if now < self._reminder_recheck_target:
+            return
+
+        samples = self._reminder_presence_samples
+        ratio = (sum(samples) / len(samples)) if samples else 0.0
+        label = self._reminder_pending_label
+        self._reminder_recheck_target = None
+        self._reminder_presence_samples = []
+        self._reminder_pending_label = None
+
+        if ratio >= REMINDER_PRESENCE_THRESHOLD:
+            print(f"[REMINDER] {label}: 主人一直在场（在场率 {ratio:.0%}），生气催促！")
+            self._play_angry_reminder()
+        else:
+            print(f"[REMINDER] {label}: 主人已离开（在场率 {ratio:.0%}），不催促")
+
+    def _play_angry_reminder(self):
+        """复查确认主人仍在座位 → 生气催促序列：红灯闪烁→常亮 → 找人脸 →
+        侧头"不理你" → 等双击原谅 → 回正 → 保持生气 3 秒 → 开心。同步
+        阻塞方法，执行期间 tick() 停摆。"""
+        print("[REMINDER] 主人还在! 生气催促...")
+        self.state = State.ANGRY
+        self.state_enter_time = time.time()
+
+        set_expression("angry")
+        set_led_mode("blink", *ANGRY_LED_RGB, period_ms=ANGRY_LED_BLINK_PERIOD_MS)
+        # 固件 updateLed() 的 BLINK 一个完整周期（亮+暗）就是 period_ms，
+        # 不是亮暗各占一半再乘二。
+        time.sleep(ANGRY_LED_BLINK_PERIOD_MS / 1000.0 * ANGRY_LED_BLINK_COUNT)
+        set_led_mode("solid", *ANGRY_LED_RGB)
+
+        # scan_for_face() 内部会把表情切成 curious（见该方法实现），找到人
+        # 之后要显式切回 angry，它自己不会帮你切回去。
+        found = self.scan_for_face()
+        if found:
+            set_expression("angry")
+        else:
+            # scan_for_face() 已经扫过一圈没找到——不能再调它一次（会重复
+            # 播放转头扫描 + 再切一次 curious），改成在当前角度用
+            # detect_face_once() 轻量轮询等人出现，同时允许长按强制退出。
+            while True:
+                time.sleep(FACE_CHECK_INTERVAL_SEC)
+                found, face_x = self.detect_face_once()
+                if found:
+                    self.face_detected = True
+                    self.face_confirm_count = FACE_CONFIRM_FRAMES
+                    self.last_face_seen_time = time.time()
+                    self.track_face_servo(face_x)
+                    set_expression("angry")
+                    break
+                if self._game_check_abort():
+                    print("[REMINDER] 长按头顶 → 强制退出生气")
+                    self._angry_forgive()
+                    return
+
+        time.sleep(ANGRY_FACE_FOUND_DELAY_SEC)
+
+        status = get_status()
+        current_yaw = status.get("yaw", 450) if status else 450
+        target_yaw = max(min(current_yaw + ANGRY_YAW_TURN, 1280), -1280)
+        move_servo(yaw=target_yaw, speed=ANGRY_YAW_SPEED, mute=True)
+
+        self._angry_wait_for_forgive()
+
+    def _angry_wait_for_forgive(self):
+        """保持生气侧头，等双击头顶触发原谅（长按也可以强制退出，兜底）。
+        直接读 get_touch() 原始返回值，不走 self.check_touch()——跟
+        _game_check_abort() 是同一个理由，避免触发跟生气无关的触摸反馈灯/
+        计数副作用。"""
+        last_double_tap = self.last_double_tap_count
+        if last_double_tap is None:
+            touch0 = get_touch()
+            last_double_tap = touch0.get("double_tap_count", 0) if touch0 else 0
+
+        while True:
+            time.sleep(TOUCH_POLL_SEC)
+            touch = get_touch()
+            if touch is None:
+                continue
+
+            current_double_tap = touch.get("double_tap_count", last_double_tap)
+            if current_double_tap != last_double_tap:
+                print("[REMINDER] 双击头顶 → 原谅")
+                self._angry_forgive()
+                return
+
+            if touch.get("held_ms", 0) >= PRIVACY_HOLD_SEC * 1000:
+                print("[REMINDER] 长按头顶 → 原谅（兜底）")
+                self._angry_forgive()
+                return
+
+    def _angry_forgive(self):
+        """双击/长按 → 原谅收尾：回正对人脸 → 保持 3 秒生气 → 开心。"""
+        go_home()
+        time.sleep(ANGRY_FORGIVE_HOLD_SEC)
+
+        # 整个生气序列（找人 + 等待原谅）可能持续很久，期间 tick() 没有机会
+        # 调用 check_voice_wake() 排空 MicStream 队列——攒下的这段音频不是
+        # 用户"刚刚"说的话，原样丢弃，不然 enter_happy() 之后下一次 tick()
+        # 会把这段陈旧的录音当成新说的话处理，跟 CLAUDE.md"装死期间语音会
+        # 堆积"是同一个坑；只是装死状态下 tick() 仍在跑、check_voice_wake()
+        # 每个 tick 都能持续排空，生气是完全阻塞的没有这个机会，只能在序列
+        # 结束这一刻做一次性冲刷。
+        self.mic_stream.take_utterance()
+
+        self.enter_happy()
+        print("[REMINDER] 原谅! 切回开心")
+
     # ---------- 计时器 ----------
 
     def idle_seconds(self):
@@ -3383,6 +3649,16 @@ class PuppyEngine:
             # 保持装死姿势，什么都不用做，跟 PRIVACY 分支的 pass 是同一个
             # 写法。
             pass
+
+        # --- 定时提醒 + 生气催促（最低优先级）---
+        # 复查采样（_reminder_recheck_tick()）跟当前具体状态无关（除了
+        # PRIVACY 不拍照，见该方法说明），提醒一旦发出就要不间断采样，不能
+        # 因为小狗恰好不在 IDLE/HAPPY 就漏掉采样点，导致复查时样本不足被
+        # 误判成"人不在"。只有"要不要发一条新提醒"（_check_reminders()）
+        # 才限定在 IDLE/HAPPY——困倦/隐私/游戏/对话进行中不应该被新提醒打断。
+        self._reminder_recheck_tick()
+        if self.state in (State.IDLE, State.HAPPY):
+            self._check_reminders()
 
         # CURIOUS / THINKING 是瞬时状态：run_conversation_turn() 会同步跑完
         # 录音→识别→LLM→分支应对的整个过程才返回，tick() 观察不到这两个状态。
