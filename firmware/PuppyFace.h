@@ -27,9 +27,9 @@
  *                         handleFace()/host）
  *   custom "eat"       → 吃饭（嘴巴下方一个口水巾，巾上一个骨头图案；
  *                         设计中，还没接入 handleFace()/host）
- *   custom "play"      → 玩（右眼静态"<"、嘴巴下方挂一个小骨头吊牌、
- *                         右耳上停一只蝴蝶；设计中，还没接入
- *                         handleFace()/host）
+ *   custom "play"      → 玩（右眼静态"<"、嘴巴下方挂一个小骨头吊牌+项链、
+ *                         屏幕左上/右上角三朵循环下落又消失的花；设计中，
+ *                         还没接入 handleFace()/host）
  *
  * 表情切换时，尺寸类参数（耳朵长宽、鼻子/嘴巴大小、旋转角度）会用
  * FloatTransition 在 500ms 内线性插值过渡；开心/好奇/思考时耳朵左右
@@ -378,69 +378,44 @@ static const int PLAY_BONE_TAG_HALF_LEN = 6; // 吊牌骨头比口水巾上的�
 static const int PLAY_BONE_TAG_HALF_H = 1;
 static const int PLAY_BONE_TAG_R = 3;
 static const int PLAY_BONE_TAG_Y = 42;       // 吊牌骨头中心相对鼻子中心的Y偏移（第一轮从30加大到42）
-static const int PLAY_BONE_TAG_ROPE_LEN = 8; // 骨头到项链弧线汇合点的高度（第八轮反馈从直挺挺的
-                                              // 挂绳改成两条对称弧线之后，这个值改成控制弧线
-                                              // 弯多高，名字沿用旧的没改，含义已经不是"绳长"了）
-                                              // （第二轮反馈明确要求改回短挂绳）
+// PLAY_BONE_TAG_ROPE_LEN 这个挂绳/项链高度参数改动了两次：先是从直挺挺
+// 的竖直挂绳改成两条从骨头两端往上收拢、在骨头正上方汇合的弧线；后来
+// 反馈"项链的两条线应该向两边延伸（像吃饭表情口水巾的系带），不是聚集在
+// 一起"——现在改成跟 EAT_BIB_STRAP_ARC 同一个画法：一条弧线，两端伸到
+// 骨头两侧外面（往两边延伸），中间往下鼓向骨头顶部（不是收拢到一个点）。
+// 这个常量现在表示弧线两端所在的高度，名字沿用旧的没改。
+static const int PLAY_BONE_TAG_ROPE_LEN = 8;
+static const int PLAY_BONE_TAG_NECKLACE_EXTRA_PX = 4; // 项链弧线两端比骨头本身（含两端圆头）
+                                                       // 再往外多探出多少像素
 
-// 苜蓿草（三/四叶草）：leafCount 片心形叶子绕中心点放射状均匀排列（每片
-// 叶尖朝中心），加一条从中心延伸的弯曲叶柄。心形叶片本身用 drawHeartLeaf()
-// 画——4 段二次贝塞尔拼出真正的心形轮廓（不是圆形，第二轮反馈明确指出过
-// "是心形而不是圆形"）。叶片先后是镂空线框（第一轮反馈要求"镂空"）后来
-// 又改回实心（第六轮反馈参考新示意图明确要求"实心心形♥……不需要里面的
-// 线条了"）——镂空只是中间某一轮的取向，不是一直不变的规则，改动历史见
-// drawHeartLeaf() 定义处的注释。三株摆在屏幕左下角两株、右下角一株，固定
-// 屏幕坐标，不跟着表情/舵机镜像
-// 移动——参考示意图（用户提供，忽略图中"小红书"水印）判断的大致比例，
-// 没有实机验证过位置/大小是否合适。左下角第二株（从左到右数第二株）
-// 改成三叶草（其余两株仍是四叶草），同时整体镜像翻转——叶子排列本身左右
-// 对称，镜像前后叶子位置其实看不出差别，真正会变的是叶柄的弯曲方向
-// （drawClover() 的 mirror 参数控制），从往右下弯改成往左下弯。
-// 四叶草（第一、三株）叶片/草茎分开缩放——第四轮反馈"叶片更大、草茎更短"
-// 只作用在三叶草上时就已经拆开过一次；第五轮反馈"所有草的叶片都放大到
-// 现在的两倍"，四叶草也要跟着拆，草茎缩放维持原来共用的 0.7 不变，只翻倍
-// 叶片。
-// 第六轮反馈"所有草的整体叶片面积都放大到同样的大小"——上一轮四叶草
-// (1.4)和三叶草(1.9)叶片缩放不一样，这一轮统一成同一个值，三株共用
-// PLAY_CLOVER_LEAF_SCALE（沿用四叶草原来的 1.4，没有理由偏向哪一株，
-// 就近取了已经在用的那个值）；草茎缩放不受这条反馈影响，两株四叶草继续
-// 用 PLAY_CLOVER_STEM_SCALE、三叶草继续用它自己的
-// PLAY_CLOVER3LEAF_STEM_SCALE，没有统一。
-// 第七轮反馈"单片草叶的形状确实不像心形"——根因是所有叶片共用同一个
-// 绘制原点（整株中心），彼此在中心附近重叠糊成一片，看不出单片轮廓；
-// 同一轮反馈"把叶片整体的面积放大，单个草叶♥的面积缩小，给每个叶片之间
-// 留出空隙"——这三条其实是同一个根因的三个表现，drawClover() 里改成每片
-// 叶子的绘制原点沿自己的尖端方向外移 PLAY_CLOVER_LEAF_GAP_PX 之后就一起
-// 解决了：单片叶子缩小（下面 LEAF_SCALE 从 1.4 降到 0.9）+ 外移出去
-// （GAP）=> 整株的外接范围（叶片能到达的最远距离 = GAP + 叶尖到自己原点
-// 的距离）比之前的 1.4 版本更大，同时叶片彼此之间有了真正的空隙、不再
-// 重叠。草叶本身这一轮也改回了描边（不是实心，见 drawHeartLeaf() 定义处
-// 的说明）。
-// 第八轮反馈：①瓣要更圆润（下面 drawHeartLeaf() 的控制点改了）；②每个
-// ♥之间的间距拉大、单片叶片面积也增加——GAP 从 7 加大到 11，LEAF_SCALE
-// 从 0.9 加大到 1.15；③四叶草茎的长度统一到当时三叶草的长度——原来两个
-// 独立的 PLAY_CLOVER_STEM_SCALE(0.7)/PLAY_CLOVER3LEAF_STEM_SCALE(0.4)
-// 合并成一个共用值 0.4，三株茎长度一致，第二个常量已删掉；④草茎变细——
-// 见 drawClover() 里画草茎那一段，从 3px 描边改成单像素线。
-// 第九轮反馈"单片的♥缩小，加大不同♥之间的距离，但尖端依然是靠近的"——
-// 这三条乍看互相矛盾（缩小+加大距离通常会一起把尖端也带离中心），实际
-// 靠两个独立的旋钮分别满足：①单片整体缩小（LEAF_SCALE 从 1.15 降到
-// 0.85）；②绘制原点外移量 GAP 也跟着按比例调小（11→9），让"尖端到中心
-// 的距离 ≈ GAP − 1.2×半径"这个差值基本维持不变，尖端不会因为缩小/外移
-// 的调整而跑远；③瓣之间的距离靠 drawHeartLeaf() 里瓣自身的横向展开比例
-// 加大来实现（局部 x 方向撑得更宽，相邻两片叶子的瓣自然分得更开），跟
-// GAP/LEAF_SCALE 是两件独立的事，不会影响尖端位置。
-static const float PLAY_CLOVER_LEAF_SCALE = 0.85f; // 三株统一共用的叶片缩放（从1.15降到0.85）
-static const float PLAY_CLOVER_LEAF_GAP_PX = 9.0f;  // 每片叶子绘制原点外移的距离——跟着 LEAF_SCALE
-                                                     // 一起按比例调小（11→9），保持尖端到中心的距离
-                                                     // 基本不变
-static const float PLAY_CLOVER_STEM_SCALE = 0.4f;  // 三株统一共用的草茎缩放（原来四叶草0.7比三叶草0.4
-                                                     // 长，这一轮统一成三叶草的长度）
-static const int PLAY_CLOVER1_X = 40, PLAY_CLOVER1_Y = 205;   // 左下第一株
-static const int PLAY_CLOVER2_X = 66, PLAY_CLOVER2_Y = 178;   // 左下第二株，跟第一株错开，不完全对齐；
-                                                                // 镜像翻转的那一株
-static const int PLAY_CLOVER3_X = 278, PLAY_CLOVER3_Y = 175;  // 右下一株（避开关键词按钮固定占用的
-                                                                // (270,205) 附近区域，往上挪了一点）
+// 苜蓿草（三/四叶草）整个装饰体系已经删掉了——用了好几轮反馈迭代草的
+// 形状/间距/草茎，最后一轮反馈直接决定换成花，草的那套常量/函数
+// （PLAY_CLOVER_*、drawHeartLeaf()、drawClover()）已经整个移除，不是
+// 保留旧代码不调用。下面是替换成的花。
+
+// 花：中间一个圆 + 外圈五个圆形花瓣（参考用户提供的示意图，一朵简单的
+// 镂空线框雏菊），见 drawFlower()。三朵固定在屏幕左上角两朵、右上角
+// 一朵（PLAY_FLOWER1/2/3_X/Y，不对齐、故意错开），每朵各自循环播放"缓慢
+// 旋转+缓慢下降一小段距离→消失→回到起点重新开始"的动画，见
+// drawFallingFlower()。没有实机验证过位置/大小/动画节奏是否合适。
+static const float PLAY_FLOWER_SCALE = 0.8f;         // 整朵花的缩放
+static const float PLAY_FLOWER_CENTER_R = 5.0f;      // 花心圆半径（缩放前）
+static const float PLAY_FLOWER_PETAL_R = 5.0f;       // 花瓣圆半径（缩放前）
+static const float PLAY_FLOWER_PETAL_DIST = 8.0f;    // 花瓣圆心到花心的距离（缩放前）
+static const unsigned long PLAY_FLOWER_ROTATE_PERIOD_MS = 3500; // 花瓣绕花心转一整圈的周期，
+                                                       // 旋转是连续的，跟下面的下降/消失循环各自独立
+static const unsigned long PLAY_FLOWER_CYCLE_MS = 4000;  // 下降/消失循环的整个周期
+static const float PLAY_FLOWER_DROP_PX = 10.0f;      // 一个循环内下降的距离
+static const float PLAY_FLOWER_VISIBLE_RATIO = 0.8f; // 一个循环里"下降+可见"占的比例，剩下的时间
+                                                       // 隐藏（"消失"），隐藏结束后循环重新开始、
+                                                       // 花回到起点——不是下降到底直接瞬间跳回起点，
+                                                       // 中间真的有一段看不见的间隔
+static const int PLAY_FLOWER1_X = 45, PLAY_FLOWER1_Y = 28;   // 左上第一朵
+static const int PLAY_FLOWER2_X = 75, PLAY_FLOWER2_Y = 55;   // 左上第二朵，跟第一朵错开，不对齐
+static const int PLAY_FLOWER3_X = 265, PLAY_FLOWER3_Y = 35;  // 右上一朵
+static const unsigned long PLAY_FLOWER1_PHASE_MS = 0;        // 三朵花下降/消失循环的时间错位，
+static const unsigned long PLAY_FLOWER2_PHASE_MS = 1300;     // 不要三朵同步下降/消失，看起来更自然
+static const unsigned long PLAY_FLOWER3_PHASE_MS = 2600;
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -527,91 +502,42 @@ static void drawBoneIcon(M5Canvas *spi, int cx, int cy, int halfLen, int halfH, 
   spi->fillCircle(cx + halfLen, cy + halfH, r, col);
 }
 
-// 画一片心形叶子（三/四叶草的一片）：4 段二次贝塞尔描边勾出心形轮廓——
-// 顶部凹口(notch)两侧各一段"外拱"曲线鼓成圆润的瓣，再各一段曲线收窄到
-// 底部尖点，不是简单的两个圆（第二轮反馈明确指出过"是心形而不是圆形"）。
-// 描边、不填充——第五轮反馈短暂改成过实心填充，第七轮反馈又改回描边
-// （"草叶也变成描边也不是实心，保留每个♥的轮廓，内部不需要添加线条"）；
-// 这两条反馈方向相反，实心填充那版已经删掉，不是两种画法都保留。局部
-// 坐标系里叶尖朝 -y 方向、凹口/瓣朝 +y 方向（画的时候整体绕 rotRad 转）。
-// 注意这里的 (cx,cy) 不是整株的中心——drawClover() 会把它沿凹口/瓣的方向
-// （+y）外移一段距离，让叶尖留在离中心更近的一侧、瓣被推得更远，见那边
-// 的说明。
-// 第八轮反馈"瓣更加圆润"——瓣最外侧点和外拱控制点都往外、往上调整过
-// （outer 从 (1.0r,0.6r) 松到 (1.15r,0.45r)，控制点从 (0.9r,1.1r) 松到
-// (1.25r,0.85r)），让瓣的弧线更接近饱满的圆弧、不是狭长的下垂形状。
-// 第九轮反馈"加大不同♥之间的距离，但尖端依然是靠近的"——尖端(tx,ty)的
-// 局部坐标没有动，只把瓣的横向展开系数（1.15r/1.25r）进一步加大到
-// 1.5r/1.6r，让瓣在自己局部坐标系里往两侧撑得更开；相邻两片叶子转过不同
-// 角度后，瓣与瓣之间的实际距离就会拉开，跟尖端（不受这个系数影响）的位置
-// 无关——不需要靠 drawClover() 里的整体外移量 GAP 来分开叶片，那样做会
-// 把尖端也一起带走。
-static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float scale, uint16_t col) {
-  float r = 6.0f * scale;
-  int tx, ty, ncx, ncy, lx, ly, rx, ry, lcx, lcy, rcx, rcy, lbx, lby, rbx, rby;
-  rotateLocalOffset(rotRad, 0.0f, -r * 1.2f, tx, ty);         // 尖点
-  rotateLocalOffset(rotRad, 0.0f, r * 0.4f, ncx, ncy);        // 顶部凹口
-  rotateLocalOffset(rotRad, -r * 1.5f, r * 0.45f, lx, ly);    // 左瓣最外侧
-  rotateLocalOffset(rotRad, r * 1.5f, r * 0.45f, rx, ry);     // 右瓣最外侧
-  rotateLocalOffset(rotRad, -r * 1.6f, r * 0.85f, lcx, lcy);  // 左瓣外拱控制点
-  rotateLocalOffset(rotRad, r * 1.6f, r * 0.85f, rcx, rcy);   // 右瓣外拱控制点
-  rotateLocalOffset(rotRad, -r * 1.3f, -r * 0.4f, lbx, lby);  // 左侧收到尖点的控制点
-  rotateLocalOffset(rotRad, r * 1.3f, -r * 0.4f, rbx, rby);   // 右侧收到尖点的控制点
-  spi->drawBezier(cx + ncx, cy + ncy, cx + rcx, cy + rcy, cx + rx, cy + ry, col);
-  spi->drawBezier(cx + rx, cy + ry, cx + rbx, cy + rby, cx + tx, cy + ty, col);
-  spi->drawBezier(cx + ncx, cy + ncy, cx + lcx, cy + lcy, cx + lx, cy + ly, col);
-  spi->drawBezier(cx + lx, cy + ly, cx + lbx, cy + lby, cx + tx, cy + ty, col);
+// 画一朵花：中间一个圆（花心）+ 外圈五个圆形花瓣，均匀绕花心分布，全部
+// 描边不填充（参考用户提供的示意图——一朵镂空线框雏菊）。rotationPhase
+// 是花瓣绕花心的角度偏移，由调用方（drawFallingFlower()）传入一个随时间
+// 连续增长的值，实现"缓慢旋转"——虽然五片花瓣本身彼此全同，整株在离散的
+// 72°倍数角度时长得完全一样，但中间任意角度的花瓣位置是不同的，所以连续
+// 旋转仍然是看得见的（花瓣绕花心转圈），不会因为图案本身的 5 重对称而
+// 显得静止。
+static void drawFlower(M5Canvas *spi, int cx, int cy, float scale, float rotationPhase, uint16_t col) {
+  int centerR = max(1, (int)roundf(PLAY_FLOWER_CENTER_R * scale));
+  spi->drawCircle(cx, cy, centerR, col);
+  int petalR = max(1, (int)roundf(PLAY_FLOWER_PETAL_R * scale));
+  float petalDist = PLAY_FLOWER_PETAL_DIST * scale;
+  for (int i = 0; i < 5; i++) {
+    float ang = (float)i * (2.0f * PI / 5.0f) + rotationPhase;
+    int px = cx + (int)roundf(petalDist * cosf(ang));
+    int py = cy + (int)roundf(petalDist * sinf(ang));
+    spi->drawCircle(px, py, petalR, col);
+  }
 }
 
-// 画一株三/四叶草："玩"表情左下/右下角的装饰（见 PLAY_CLOVER1/2/3_X/Y）。
-// leafCount 片心形叶子绕中心点放射状均匀排列（叶尖都朝向中心），加一条从
-// 中心延伸的弯曲叶柄。四叶草用 45°/135°/225°/315°（对角对称的"X"排列）；
-// 三叶草用 0°/120°/240°（一片朝正上方，另两片对称撇向左下/右下，是常见
-// 三叶草的排列方式）。叶子排列本身左右对称，mirror 参数不会改变观感，
-// 只翻转叶柄的弯曲方向（默认往右下弯，mirror=true 时往左下弯）——第二轮
-// 反馈要求"从左到右第二株镜像翻转"，第三轮反馈又要求"第二株改成三叶草"，
-// 第四轮反馈"三叶草叶片更大、草茎更短"，第五轮反馈"所有草叶片放大到两倍、
-// 草茎不要遮住叶片"，都作用在这三株身上。leafScale/stemScale 分开传是第
-// 四轮加的——之前叶子和草茎共用同一个 scale，没法只放大叶子或只缩短草茎。
-// 参考用户提供的示意图判断的大致比例，没有实机验证过。
-static void drawClover(M5Canvas *spi, int cx, int cy, float leafScale, float stemScale,
-                        int leafCount, bool mirror, uint16_t col) {
-  float startAngle = (leafCount == 4) ? (PI / 4.0f) : 0.0f;
-  // 每片叶子的绘制原点沿自己的"凹口/瓣"方向（局部 +y，旋转前朝下）往外挪
-  // PLAY_CLOVER_LEAF_GAP_PX，不再共用整株的中心点——上一轮反馈"单片草叶
-  // 的形状不像心形"，根因是所有叶片共用同一个原点，靠近中心的凹口/瓣
-  // 区域几片叶子挤在一起互相重叠，糊成一片看不出单片的轮廓；外移之后
-  // 相邻叶片之间才会留出实际的空隙。**这一轮反馈修正了一个方向错误**：
-  // 上一版往叶尖方向（局部 -y）外移，结果尖端被推得离中心更远、圆润的
-  // 瓣反而离中心更近，是反的——真正的四叶草是尖端（窄的一头，相当于叶柄
-  // 附着处）朝中心、圆润的瓣朝外。改成往 +y（凹口/瓣的方向）外移，这样
-  // 尖端留在离中心更近的一侧，瓣被推得更远，方向才对。
-  for (int i = 0; i < leafCount; i++) {
-    float rot = (float)i * (2.0f * PI / leafCount) + startAngle;
-    int ox, oy;
-    rotateLocalOffset(rot, 0.0f, PLAY_CLOVER_LEAF_GAP_PX, ox, oy);
-    drawHeartLeaf(spi, cx + ox, cy + oy, rot, leafScale, col);
-  }
-  int m = mirror ? -1 : 1;
-  // 草茎起点不能是叶片汇聚的中心点 (cx,cy)——草茎如果从正中心画起，会穿过
-  // 叶片占据的整个范围，看起来像压在叶片上（"草茎不要遮住叶片"）。改成
-  // 从叶片能到达的最远距离之外的点开始画，草茎的控制点/终点也跟着从这个
-  // 新起点往外延伸，不是从中心量起。方向修正之后（尖端朝中心、圆润的瓣
-  // 朝外），叶片离中心最远的部分变成了瓣/控制点那一侧（局部 y 最大约
-  // 1.1r，控制点约 1.42r，比尖端的 1.2r 更远），所以外移量 GAP 之外再留
-  // 的余量系数从 1.3 调到 1.4；瓣变圆润之后（drawHeartLeaf() 里瓣控制点
-  // 从 1.42r 松到约 1.51r）再顺带调到 1.5；第九轮反馈瓣的横向展开系数又
-  // 从 1.25r 加大到 1.6r（控制点距原点约 1.81r，且横向分量变大，不再是
-  // 单纯沿 GAP 那一个轴的距离），继续把余量系数调到 2.0，留出更保守的
-  // 安全边际，不再精确对应某个具体的控制点距离。
-  float stemStartR = PLAY_CLOVER_LEAF_GAP_PX + 6.0f * leafScale * 2.0f;
-  int stemStartY = (int)roundf(stemStartR);
-  int s1x, s1y, s2x, s2y;
-  rotateLocalOffset(0.0f, m * 10.0f * stemScale, stemStartY + 12.0f * stemScale, s1x, s1y);
-  rotateLocalOffset(0.0f, m * 5.0f * stemScale, stemStartY + 24.0f * stemScale, s2x, s2y);
-  // 草茎变细：从 3px 描边（t=-1..1）改成单像素线（第八轮反馈明确要求
-  // "草茎变细"）。
-  spi->drawBezier(cx, cy + stemStartY, cx + s1x, cy + s1y, cx + s2x, cy + s2y, col);
+// 一朵会循环下落又消失的花："玩"表情屏幕角落的装饰（见 PLAY_FLOWER1/2/3_
+// X/Y）。旋转是连续的、不受下面这个循环影响；下落/消失是另一条独立的时间
+// 线：整个循环 PLAY_FLOWER_CYCLE_MS 里，前 PLAY_FLOWER_VISIBLE_RATIO 的
+// 时间可见并从起点缓慢下降 PLAY_FLOWER_DROP_PX，剩下的时间完全不画（真正
+// 意义上的"消失"，不是瞬间跳回起点），循环结束后回到起点重新开始。
+// phaseOffsetMs 让不同花错开各自的循环时间点，三朵不会同步下降/消失。
+static void drawFallingFlower(M5Canvas *spi, int baseX, int baseY, float scale,
+                               unsigned long phaseOffsetMs, uint16_t col) {
+  unsigned long now = millis();
+  unsigned long t = (now + phaseOffsetMs) % PLAY_FLOWER_CYCLE_MS;
+  float cycleFrac = (float)t / (float)PLAY_FLOWER_CYCLE_MS;
+  if (cycleFrac >= PLAY_FLOWER_VISIBLE_RATIO) return;  // 隐藏阶段，什么都不画
+  float dropFrac = cycleFrac / PLAY_FLOWER_VISIBLE_RATIO;  // 0..1，可见阶段内的下降进度
+  int dy = (int)roundf(PLAY_FLOWER_DROP_PX * dropFrac);
+  float rotationPhase = 2.0f * PI * (float)now / (float)PLAY_FLOWER_ROTATE_PERIOD_MS;
+  drawFlower(spi, baseX, baseY + dy, scale, rotationPhase, col);
 }
 
 // 开心 / 好奇 / 思考时耳朵左右轻轻摆动的偏移量（sin 驱动，周期 1.2s，振幅 4px）。
@@ -1255,26 +1181,22 @@ class PuppyNose : public Drawable {
       drawBoneIcon(spi, swayCx, boneY, boneHalfLen, boneHalfH, boneR, col);
     }
 
-    // ---- 玩：嘴巴下方挂一个小骨头吊牌，骨头两边各一条细弧线像项链一样
-    //      往上弯、在骨头正上方汇合——取代原来那条直挺挺的竖直挂绳（第八轮
-    //      反馈"骨头吊牌上面的竖线删掉，改成骨头两边增加细弧线（项链）"）。
-    //      弧线的汇合高度沿用原来挂绳的长度参数 PLAY_BONE_TAG_ROPE_LEN，
-    //      只是形状从一条直线变成两条对称的弧线。----
+    // ---- 玩：嘴巴下方挂一个小骨头吊牌，上面一条细弧线项链——两端往骨头
+    //      两侧外面延伸（不是收拢到骨头正上方的一个点），中间往下鼓向骨头
+    //      顶部，画法直接照搬 EAT_BIB_STRAP_ARC 那条系带的写法（同一个
+    //      "两端展开、中间鼓向主体"的形状，只是这里鼓向骨头而不是口水巾
+    //      主体）——第二轮反馈明确要求"项链的两条线向两边延伸，像吃饭里
+    //      的围裙系带，不是聚集在一起"，之前"两条弧线收拢到骨头正上方一点"
+    //      那版已经改掉。----
     float playScale = playTagAnim_.update(isPlay ? 1.0f : 0.0f);
     if (playScale > 0.02f) {
       int tagY = cy + (int)roundf(PLAY_BONE_TAG_Y * playScale);
       int boneHalfLen = (int)roundf(PLAY_BONE_TAG_HALF_LEN * playScale);
       int boneHalfH = max(1, (int)roundf(PLAY_BONE_TAG_HALF_H * playScale));
       int boneR = max(1, (int)roundf(PLAY_BONE_TAG_R * playScale));
-      int ropeLen = (int)roundf(PLAY_BONE_TAG_ROPE_LEN * playScale);
-      int meetY = tagY - boneR - ropeLen;
-      int leftAttachX = cx - boneHalfLen - boneR;
-      int rightAttachX = cx + boneHalfLen + boneR;
-      int leftCtrlX = (leftAttachX + cx) / 2 - (int)roundf(2 * playScale);
-      int rightCtrlX = (rightAttachX + cx) / 2 + (int)roundf(2 * playScale);
-      int ctrlY = (tagY + meetY) / 2;
-      spi->drawBezier(leftAttachX, tagY - boneR, leftCtrlX, ctrlY, cx, meetY, col);
-      spi->drawBezier(rightAttachX, tagY - boneR, rightCtrlX, ctrlY, cx, meetY, col);
+      int necklaceY = tagY - boneR - (int)roundf(PLAY_BONE_TAG_ROPE_LEN * playScale);
+      int necklaceHalfW = boneHalfLen + boneR + (int)roundf(PLAY_BONE_TAG_NECKLACE_EXTRA_PX * playScale);
+      spi->drawBezier(cx - necklaceHalfW, necklaceY, cx, tagY - boneR, cx + necklaceHalfW, necklaceY, col);
       drawBoneIcon(spi, cx, tagY, boneHalfLen, boneHalfH, boneR, col);
     }
   }
@@ -1723,15 +1645,18 @@ class PuppyEar : public Drawable {
     drawThickBezier(spi, x0, y0, ctrl1X, ctrl1Y, xBot, yBot, thick, col);
     drawThickBezier(spi, xBot, yBot, ctrl2X, ctrl2Y, x3, y3, thick, col);
 
-    // ===== 玩：左下角两株、右下角一株苜蓿草（见 drawClover()），固定屏幕
-    //      坐标，不跟着表情/舵机镜像移动——只在右耳组件里画一次，跟关键词
-    //      按钮/字幕是同一个"固定装饰只画一次"的模式。左下角第二株是三叶
-    //      （其余两株是四叶）、且镜像翻转，两条反馈都作用在它身上。第一版
-    //      位置/大小没有实机验证过。=====
+    // ===== 玩：左上角两朵、右上角一朵花（见 drawFallingFlower()），固定
+    //      屏幕坐标，不跟着表情/舵机镜像移动——只在右耳组件里画一次，跟
+    //      关键词按钮/字幕是同一个"固定装饰只画一次"的模式。原来这里是
+    //      三/四叶草（drawClover()/drawHeartLeaf()），迭代了很多轮之后
+    //      反馈直接换成花，草的那套代码已经整个删掉。三朵花各自独立循环
+    //      播放"缓慢旋转+缓慢下降→消失→回到起点"的动画，用不同的
+    //      PLAY_FLOWERn_PHASE_MS 错开，不会同步。第一版位置/大小/动画
+    //      节奏没有实机验证过。=====
     if (!isLeft && isPlay) {
-      drawClover(spi, PLAY_CLOVER1_X, PLAY_CLOVER1_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER_STEM_SCALE, 4, false, col);
-      drawClover(spi, PLAY_CLOVER2_X, PLAY_CLOVER2_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER_STEM_SCALE, 3, true, col);
-      drawClover(spi, PLAY_CLOVER3_X, PLAY_CLOVER3_Y, PLAY_CLOVER_LEAF_SCALE, PLAY_CLOVER_STEM_SCALE, 4, false, col);
+      drawFallingFlower(spi, PLAY_FLOWER1_X, PLAY_FLOWER1_Y, PLAY_FLOWER_SCALE, PLAY_FLOWER1_PHASE_MS, col);
+      drawFallingFlower(spi, PLAY_FLOWER2_X, PLAY_FLOWER2_Y, PLAY_FLOWER_SCALE, PLAY_FLOWER2_PHASE_MS, col);
+      drawFallingFlower(spi, PLAY_FLOWER3_X, PLAY_FLOWER3_Y, PLAY_FLOWER_SCALE, PLAY_FLOWER3_PHASE_MS, col);
     }
 
     // ===== 思考表情：从右耳组件画眼镜鼻梁 =====
