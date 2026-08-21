@@ -344,8 +344,9 @@ static const float EAT_BONE_R = 2.88f;          // 3.6 * 0.8
 
 // 摇晃动画：口水巾顶部（系带+主体顶部两角）固定不动，围兜"肩部"以下
 // （底部两角、底部圆弧、骨头图案）跟着一条正弦曲线左右摆动，像挂件一样
-// 以顶部为支点摇晃——第五轮反馈加的，没有实机验证过幅度/速度是否合适。
-static const float EAT_BIB_SWAY_AMP_PX = 5.0f;      // 摇晃幅度（像素）
+// 以顶部为支点摇晃——加上之后反馈"动画做得很好，但幅度可以减小"，从
+// 5px 降到 2.5px；周期没有再提，维持不变。
+static const float EAT_BIB_SWAY_AMP_PX = 2.5f;      // 摇晃幅度（像素，从5降到2.5）
 static const float EAT_BIB_SWAY_PERIOD_MS = 1800.0f; // 摇晃一个来回的周期，比耳朵摆动
                                                        // （1200ms 量级）更慢，更像悬挂物的
                                                        // 自然晃动，不是快速抖动
@@ -400,7 +401,19 @@ static const int PLAY_BONE_TAG_ROPE_LEN = 8; // 挂绳长度，短短的，只�
 // 就近取了已经在用的那个值）；草茎缩放不受这条反馈影响，两株四叶草继续
 // 用 PLAY_CLOVER_STEM_SCALE、三叶草继续用它自己的
 // PLAY_CLOVER3LEAF_STEM_SCALE，没有统一。
-static const float PLAY_CLOVER_LEAF_SCALE = 1.4f;  // 三株统一共用的叶片缩放
+// 第七轮反馈"单片草叶的形状确实不像心形"——根因是所有叶片共用同一个
+// 绘制原点（整株中心），彼此在中心附近重叠糊成一片，看不出单片轮廓；
+// 同一轮反馈"把叶片整体的面积放大，单个草叶♥的面积缩小，给每个叶片之间
+// 留出空隙"——这三条其实是同一个根因的三个表现，drawClover() 里改成每片
+// 叶子的绘制原点沿自己的尖端方向外移 PLAY_CLOVER_LEAF_GAP_PX 之后就一起
+// 解决了：单片叶子缩小（下面 LEAF_SCALE 从 1.4 降到 0.9）+ 外移出去
+// （GAP）=> 整株的外接范围（叶片能到达的最远距离 = GAP + 叶尖到自己原点
+// 的距离）比之前的 1.4 版本更大，同时叶片彼此之间有了真正的空隙、不再
+// 重叠。草叶本身这一轮也改回了描边（不是实心，见 drawHeartLeaf() 定义处
+// 的说明）。
+static const float PLAY_CLOVER_LEAF_SCALE = 0.9f;  // 三株统一共用的叶片缩放（单片更小，从1.4降到0.9）
+static const float PLAY_CLOVER_LEAF_GAP_PX = 7.0f; // 每片叶子绘制原点外移的距离，产生叶片间空隙，
+                                                     // 同时把整株的外接范围撑大
 static const float PLAY_CLOVER_STEM_SCALE = 0.7f;  // 四叶草（第一、三株）草茎缩放
 static const float PLAY_CLOVER3LEAF_STEM_SCALE = 0.4f;   // 三叶草草茎缩放，比四叶草更短
 static const int PLAY_CLOVER1_X = 40, PLAY_CLOVER1_Y = 205;   // 左下第一株
@@ -494,70 +507,30 @@ static void drawBoneIcon(M5Canvas *spi, int cx, int cy, int halfLen, int halfH, 
   spi->fillCircle(cx + halfLen, cy + halfH, r, col);
 }
 
-// 二次贝塞尔在参数 t∈[0,1] 处的点（标准 B(t)=(1-t)²P0+2(1-t)tP1+t²P2 公式），
-// 给 drawHeartLeaf() 沿曲线采样用，不直接画出来。
-static void quadBezierPoint(float p0x, float p0y, float c1x, float c1y,
-                             float p2x, float p2y, float t, float &ox, float &oy) {
-  float mt = 1.0f - t;
-  ox = mt * mt * p0x + 2.0f * mt * t * c1x + t * t * p2x;
-  oy = mt * mt * p0y + 2.0f * mt * t * c1y + t * t * p2y;
-}
-
-// 画一片实心心形叶子（三/四叶草的一片）：用 4 段二次贝塞尔描出心形轮廓
-// （顶部凹口(notch)两侧各一段"外拱"曲线鼓成圆润的瓣，再各一段曲线收窄到
-// 底部尖点——不是简单的两个圆，第二轮反馈明确指出过"是心形而不是圆形"），
-// 沿这条轮廓采样一圈点，从内部枢轴点扇形三角填充整个心形（第五轮反馈
-// 明确要求"实心心形，不需要里面的线条了"，改成实心之后原来 4 条独立描边
-// 曲线不再单独画，只用来生成填充用的轮廓采样点）。局部坐标系里叶尖朝 -y
-// 方向、凹口朝 +y 方向（画的时候整体绕 rotRad 转，把叶尖转到朝向"中心"
-// 的方向）。
+// 画一片心形叶子（三/四叶草的一片）：4 段二次贝塞尔描边勾出心形轮廓——
+// 顶部凹口(notch)两侧各一段"外拱"曲线鼓成圆润的瓣，再各一段曲线收窄到
+// 底部尖点，不是简单的两个圆（第二轮反馈明确指出过"是心形而不是圆形"）。
+// 描边、不填充——第五轮反馈短暂改成过实心填充，第七轮反馈又改回描边
+// （"草叶也变成描边也不是实心，保留每个♥的轮廓，内部不需要添加线条"）；
+// 这两条反馈方向相反，实心填充那版已经删掉，不是两种画法都保留。局部
+// 坐标系里叶尖朝 -y 方向、凹口朝 +y 方向（画的时候整体绕 rotRad 转，把
+// 叶尖转到朝向绘制原点的方向——注意这个原点不是整株的中心，drawClover()
+// 会把它沿叶尖方向外移一段距离，见那边的说明）。
 static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float scale, uint16_t col) {
   float r = 6.0f * scale;
-  // 心形关键点（局部坐标，未旋转）
-  const float tipX = 0.0f, tipY = -r * 1.2f;        // 尖点
-  const float ncx = 0.0f, ncy = r * 0.4f;           // 顶部凹口
-  const float lx = -r * 1.0f, ly = r * 0.6f;        // 左瓣最外侧
-  const float rx = r * 1.0f, ry = r * 0.6f;         // 右瓣最外侧
-  const float lcx = -r * 0.9f, lcy = r * 1.1f;      // 左瓣外拱控制点
-  const float rcx = r * 0.9f, rcy = r * 1.1f;       // 右瓣外拱控制点
-  const float lbx = -r * 1.3f, lby = -r * 0.4f;     // 左侧收到尖点的控制点
-  const float rbx = r * 1.3f, rby = -r * 0.4f;      // 右侧收到尖点的控制点
-
-  const int STEPS = 4;              // 每段贝塞尔采样点数，越多边缘越光滑
-  const int N = STEPS * 4;          // 4 段轮廓，闭合多边形共 N 个采样点
-  float lpx[N], lpy[N];             // 局部坐标（未旋转）的轮廓采样点
-  int idx = 0;
-  for (int i = 0; i < STEPS; i++) {  // 顶部凹口 -> 右瓣外侧
-    quadBezierPoint(ncx, ncy, rcx, rcy, rx, ry, (float)i / STEPS, lpx[idx], lpy[idx]); idx++;
-  }
-  for (int i = 0; i < STEPS; i++) {  // 右瓣外侧 -> 尖点
-    quadBezierPoint(rx, ry, rbx, rby, tipX, tipY, (float)i / STEPS, lpx[idx], lpy[idx]); idx++;
-  }
-  for (int i = 0; i < STEPS; i++) {  // 尖点 -> 左瓣外侧
-    quadBezierPoint(tipX, tipY, lbx, lby, lx, ly, (float)i / STEPS, lpx[idx], lpy[idx]); idx++;
-  }
-  for (int i = 0; i < STEPS; i++) {  // 左瓣外侧 -> 回到顶部凹口
-    quadBezierPoint(lx, ly, lcx, lcy, ncx, ncy, (float)i / STEPS, lpx[idx], lpy[idx]); idx++;
-  }
-
-  // 扇形填充的枢轴点必须落在心形内部——局部原点 (0,0) 偏向凹口一侧、离
-  // 心形的几何中心有一点距离但仍在轮廓内，够用；不能直接拿凹口本身
-  // (0, r*0.4) 当枢轴，那个点太靠近轮廓边缘，两侧扇形三角会有一点点穿出
-  // 轮廓的风险。
-  int pcx, pcy;
-  rotateLocalOffset(rotRad, 0.0f, 0.0f, pcx, pcy);
-  int prevX, prevY;
-  rotateLocalOffset(rotRad, lpx[0], lpy[0], prevX, prevY);
-  for (int i = 1; i < N; i++) {
-    int px, py;
-    rotateLocalOffset(rotRad, lpx[i], lpy[i], px, py);
-    spi->fillTriangle(cx + pcx, cy + pcy, cx + prevX, cy + prevY, cx + px, cy + py, col);
-    prevX = px; prevY = py;
-  }
-  // 闭合最后一段（最后一个采样点 -> 第一个采样点）
-  int firstX, firstY;
-  rotateLocalOffset(rotRad, lpx[0], lpy[0], firstX, firstY);
-  spi->fillTriangle(cx + pcx, cy + pcy, cx + prevX, cy + prevY, cx + firstX, cy + firstY, col);
+  int tx, ty, ncx, ncy, lx, ly, rx, ry, lcx, lcy, rcx, rcy, lbx, lby, rbx, rby;
+  rotateLocalOffset(rotRad, 0.0f, -r * 1.2f, tx, ty);         // 尖点
+  rotateLocalOffset(rotRad, 0.0f, r * 0.4f, ncx, ncy);        // 顶部凹口
+  rotateLocalOffset(rotRad, -r * 1.0f, r * 0.6f, lx, ly);     // 左瓣最外侧
+  rotateLocalOffset(rotRad, r * 1.0f, r * 0.6f, rx, ry);      // 右瓣最外侧
+  rotateLocalOffset(rotRad, -r * 0.9f, r * 1.1f, lcx, lcy);   // 左瓣外拱控制点
+  rotateLocalOffset(rotRad, r * 0.9f, r * 1.1f, rcx, rcy);    // 右瓣外拱控制点
+  rotateLocalOffset(rotRad, -r * 1.3f, -r * 0.4f, lbx, lby);  // 左侧收到尖点的控制点
+  rotateLocalOffset(rotRad, r * 1.3f, -r * 0.4f, rbx, rby);   // 右侧收到尖点的控制点
+  spi->drawBezier(cx + ncx, cy + ncy, cx + rcx, cy + rcy, cx + rx, cy + ry, col);
+  spi->drawBezier(cx + rx, cy + ry, cx + rbx, cy + rby, cx + tx, cy + ty, col);
+  spi->drawBezier(cx + ncx, cy + ncy, cx + lcx, cy + lcy, cx + lx, cy + ly, col);
+  spi->drawBezier(cx + lx, cy + ly, cx + lbx, cy + lby, cx + tx, cy + ty, col);
 }
 
 // 画一株三/四叶草："玩"表情左下/右下角的装饰（见 PLAY_CLOVER1/2/3_X/Y）。
@@ -574,18 +547,24 @@ static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float sca
 static void drawClover(M5Canvas *spi, int cx, int cy, float leafScale, float stemScale,
                         int leafCount, bool mirror, uint16_t col) {
   float startAngle = (leafCount == 4) ? (PI / 4.0f) : 0.0f;
+  // 每片叶子的绘制原点沿自己的尖端方向（局部 -y，旋转前朝上）往外挪
+  // PLAY_CLOVER_LEAF_GAP_PX，不再共用整株的中心点——第七轮反馈"单片草叶
+  // 的形状不像心形"，根因是所有叶片共用同一个原点，靠近中心的凹口/瓣
+  // 区域几片叶子挤在一起互相重叠，糊成一片看不出单片的轮廓；外移之后
+  // 相邻叶片之间才会留出实际的空隙（同一轮反馈"给每个叶片之间留出空隙"）。
   for (int i = 0; i < leafCount; i++) {
     float rot = (float)i * (2.0f * PI / leafCount) + startAngle;
-    drawHeartLeaf(spi, cx, cy, rot, leafScale, col);
+    int ox, oy;
+    rotateLocalOffset(rot, 0.0f, -PLAY_CLOVER_LEAF_GAP_PX, ox, oy);
+    drawHeartLeaf(spi, cx + ox, cy + oy, rot, leafScale, col);
   }
   int m = mirror ? -1 : 1;
-  // 草茎起点不能直接是叶片汇聚的中心点 (cx,cy)——叶片放大以后（第五轮
-  // 反馈"叶片放大到两倍"），四片/三片叶尖会伸到中心周围一圈半径内
-  // （drawHeartLeaf() 里叶尖到中心的距离是 6*leafScale*1.2），草茎如果
-  // 从正中心画起，会穿过这圈叶尖、看起来像压在叶片上（第五轮反馈明确要求
-  // "草茎不要遮住叶片"）。改成从叶尖半径之外（留一点余量）的点开始画，
-  // 草茎的控制点/终点也跟着从这个新起点往外延伸，不是从中心量起。
-  float stemStartR = 6.0f * leafScale * 1.3f;  // 略大于叶尖到中心的实际距离(6*leafScale*1.2)
+  // 草茎起点不能是叶片汇聚的中心点 (cx,cy)——草茎如果从正中心画起，会穿过
+  // 叶片占据的整个范围，看起来像压在叶片上（第五轮反馈明确要求"草茎不要
+  // 遮住叶片"）。改成从叶片能到达的最远距离（外移量 GAP + 叶尖到叶片自己
+  // 原点的距离 6*leafScale*1.2，留一点余量）之外的点开始画，草茎的控制点/
+  // 终点也跟着从这个新起点往外延伸，不是从中心量起。
+  float stemStartR = PLAY_CLOVER_LEAF_GAP_PX + 6.0f * leafScale * 1.3f;
   int stemStartY = (int)roundf(stemStartR);
   int s1x, s1y, s2x, s2y;
   rotateLocalOffset(0.0f, m * 10.0f * stemScale, stemStartY + 12.0f * stemScale, s1x, s1y);
