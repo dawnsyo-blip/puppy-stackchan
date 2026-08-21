@@ -370,6 +370,12 @@ static const float EAT_BIB_SWAY_PERIOD_MS = 1800.0f; // 摇晃一个来回的周
 static const float PLAY_SCALE = 0.8f;           // 五官整体缩小20%
 static const float PLAY_EYE_INWARD_PX = 8.0f;   // 眼睛朝鼻子方向靠拢的像素数
 static const float PLAY_EAR_INWARD_PX = 12.0f;  // 耳朵朝中轴线靠拢的像素数
+// 第五轮反馈"给耳朵增加围绕耳朵根部同步缓慢向右晃动的动画，模拟风吹来的
+// 样子"——两只耳朵同相位、只往一个方向偏（阵风感），见 PuppyEar::draw()
+// 里 isPlay 那段。幅度/周期、以及"向右"对应的具体旋转符号都没有实机
+// 验证过。
+static const float PLAY_WIND_EAR_AMP_DEG = 6.0f;
+static const unsigned long PLAY_WIND_EAR_PERIOD_MS = 2500;
 static const float PLAY_NOSE_CLOSER_PX = 10.0f; // 鼻子（连带嘴巴）朝眼睛方向靠拢的像素数
 static const int PLAY_EYE_A = 7;             // 右眼"<"外侧顶点的偏移（跟"思考"眨眼的a=5比更大，
                                               // 常驻显示需要比瞬间眨眼更明显；会再乘 PLAY_SCALE）
@@ -404,38 +410,51 @@ static const int PLAY_BONE_TAG_NECKLACE_SHIFT_PX = 6;
 
 // 花：中间一个圆 + 外圈五个圆形花瓣（参考用户提供的示意图，一朵简单的
 // 镂空线框雏菊），见 drawFlower()。固定在屏幕左下角两朵（不对齐、故意
-// 错开），持续缓慢旋转。原来还有"缓慢下降一小段距离→消失→回到起点"的
-// 循环（drawFallingFlower()），第四轮反馈"取消下降动画，位置改在左下角，
-// 但保持旋转"——下降/消失那套逻辑已经整个删掉，drawFallingFlower() 函数
-// 本身也删了，现在直接调 drawFlower() 常驻显示、只用旋转相位。原来在
-// 左上角是因为要给右上角的太阳让位置；这一轮挪到左下角之后，跟太阳（还在
-// 右上角）已经不会挤在一起，位置选择不再受太阳影响。没有实机验证过
-// 位置/大小是否合适。
+// 错开），持续缓慢旋转。中间有一轮反馈"取消下降动画，但保持旋转"，把
+// 之前"缓慢下降一小段距离→消失→回到起点"的循环整个删掉、改成纯旋转不
+// 移动；这一轮反馈又要求重新加回移动，但轨迹换成"抛物线往右下角"，见
+// drawFlower() 调用方（PuppyEar::draw() 里 isPlay 那段）现在怎么算位置
+// 偏移——不再单独包一层 drawFallingFlower()/drawMovingFlower() 之类的
+// 函数，直接在调用处算好偏移量再传给 drawFlower()，这样"要不要移动、
+// 按什么轨迹移动"都能直接在调用处看到，不需要跳到另一个函数里找。没有
+// 实机验证过位置/大小/轨迹参数是否合适。
 static const float PLAY_FLOWER_SCALE = 0.8f;         // 整朵花的缩放
 static const float PLAY_FLOWER_CENTER_R = 3.0f;      // 花心圆半径（缩放前）——第二轮反馈"里面的圆
                                                        // 变小一点"，从5降到3
 static const float PLAY_FLOWER_PETAL_R = 5.0f;       // 花瓣圆半径（缩放前）
 static const float PLAY_FLOWER_PETAL_DIST = 8.0f;    // 花瓣圆心到花心的距离（缩放前）
-static const unsigned long PLAY_FLOWER_ROTATE_PERIOD_MS = 3500; // 花瓣绕花心转一整圈的周期
-static const int PLAY_FLOWER1_X = 40, PLAY_FLOWER1_Y = 200;  // 左下第一朵
+static const unsigned long PLAY_FLOWER_ROTATE_PERIOD_MS = 3500; // 花瓣绕花心转一整圈的周期，
+                                                       // 旋转是连续的，跟下面移动/消失的循环各自独立
+static const int PLAY_FLOWER1_X = 40, PLAY_FLOWER1_Y = 200;  // 左下第一朵（抛物线起点）
 static const int PLAY_FLOWER2_X = 68, PLAY_FLOWER2_Y = 175;  // 左下第二朵，跟第一朵错开
+// 抛物线移动：整个循环 PLAY_FLOWER_ARC_CYCLE_MS 里，前 PLAY_FLOWER_ARC_
+// VISIBLE_RATIO 的时间可见并沿抛物线往右下角移动，X 方向匀速推进到
+// PLAY_FLOWER_ARC_DX，Y 方向按 X 方向进度的平方增长到 PLAY_FLOWER_ARC_DY
+// （模拟重力：一开始下落慢、越往后掉得越快，跟真的抛物线轨迹一样），
+// 剩下的时间完全不画（真正意义上的"消失"，不是瞬间跳回起点），循环
+// 结束后回到起点重新开始。两朵花的循环时间点用 PLAY_FLOWERn_ARC_PHASE_MS
+// 错开，不会同步移动/消失。
+static const unsigned long PLAY_FLOWER_ARC_CYCLE_MS = 4000;
+static const float PLAY_FLOWER_ARC_VISIBLE_RATIO = 0.8f;
+static const float PLAY_FLOWER_ARC_DX = 20.0f;
+static const float PLAY_FLOWER_ARC_DY = 16.0f;
+static const unsigned long PLAY_FLOWER1_ARC_PHASE_MS = 0;
+static const unsigned long PLAY_FLOWER2_ARC_PHASE_MS = 1500;
 
-// 太阳：漩涡核心（复用"晕"表情眼睛的螺旋画法，见 drawSpiral()）+ 环绕
-// 一圈长短交替的射线。第二轮反馈"右上角的花删掉，原位置换成太阳"，固定
-// 在原来 PLAY_FLOWER3 的位置。第三轮反馈：①整体变大50%（SCALE 从0.9到
-// 1.35）；②射线数量从12减到8；③射线和漩涡之间要留空隙（INNER_R 从8加大
-// 到11，漩涡本身半径只有6，之前的间隙不够明显）；④漩涡先不要旋转——见
-// drawSun() 里 rotationPhase 固定成0，PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS
-// 常量保留没删，只是暂时没用上，以后要重新打开自转可以直接用。没有实机
-// 验证过。
+// 太阳：核心 + 环绕一圈射线。第二轮反馈"右上角的花删掉，原位置换成太阳"，
+// 固定在原来 PLAY_FLOWER3 的位置。第三轮反馈：①整体变大50%（SCALE 从0.9
+// 到1.35）；②射线数量从12减到8；③射线和核心之间要留空隙（INNER_R 从8
+// 加大到11）。核心原来是漩涡（复用"晕"表情眼睛的螺旋画法），第五轮反馈
+// "漩涡取消，变成实心圆，因为漩涡的手绘质感太重了"——现在 PLAY_SUN_
+// CORE_R 就是这个实心圆的半径，drawSpiral()/PLAY_SUN_SPIRAL_TURNS/
+// PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS 这几个漩涡专属的东西已经不再给太阳用
+// （drawSpiral() 本身还留着给"晕"表情眼睛用）。
 static const int PLAY_SUN_X = 265, PLAY_SUN_Y = 35;
 static const float PLAY_SUN_SCALE = 1.35f;           // 0.9 * 1.5（整体变大50%）
-static const float PLAY_SUN_SPIRAL_MAX_R = 6.0f;     // 漩涡核心半径（缩放前），比"晕"表情眼睛的
-                                                       // 16 小很多，太阳只是个小图标
-static const float PLAY_SUN_SPIRAL_TURNS = 1.5f;     // 漩涡圈数
-static const unsigned long PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS = 3000; // 漩涡自转周期（暂时没用上）
+static const float PLAY_SUN_CORE_R = 6.0f;           // 太阳核心实心圆半径（缩放前），原来是漩涡的
+                                                       // 最终半径，改成实心圆之后直接复用同一个数值
 static const float PLAY_SUN_RAY_INNER_R = 11.0f;     // 射线起点到中心的距离（缩放前），从8加大到11，
-                                                       // 跟漩涡半径(6)之间留出更明显的空隙
+                                                       // 跟核心半径(6)之间留出更明显的空隙
 static const int PLAY_SUN_RAYS = 8;                  // 射线数量，长短交替（从12减到8）
 // 第四轮反馈"射线不要轴对称、长度设置3种、看起来更随意一点"——三档长度
 // （短/中/长）+ 每条射线一个手工挑的角度偏移，见 drawSun() 里怎么用这两个
@@ -447,6 +466,13 @@ static const float PLAY_SUN_RAY_LEN_LONG = 7.0f;
 static const int PLAY_SUN_RAY_LEN_TIER[8] = {2, 0, 1, 2, 0, 2, 1, 0};  // 0短 1中 2长
 static const float PLAY_SUN_RAY_ANGLE_JITTER_DEG[8] =
     {-8.0f, 6.0f, -4.0f, 11.0f, -10.0f, 3.0f, 8.0f, -6.0f};
+// 第五轮反馈：①射线变粗一点，参考小花线条的粗细估的（没有精确对应，
+// M5GFX 的 drawCircle() 本身也没有粗细参数可以精确比较）；②射线长度加一个
+// 缓慢缩短再恢复的"呼吸"动画，所有射线共用同一个呼吸相位（一起变化，不是
+// 各自独立），最短缩到原长的 PLAY_SUN_RAY_PULSE_MIN_RATIO 倍。
+static const int PLAY_SUN_RAY_THICKNESS = 1;             // 射线半粗细（0=单像素，1=3像素）
+static const unsigned long PLAY_SUN_RAY_PULSE_PERIOD_MS = 2200; // 呼吸一个来回的周期
+static const float PLAY_SUN_RAY_PULSE_MIN_RATIO = 0.5f;  // 缩到最短时是原长的几倍
 
 // ---- 关键词播报按钮：像一个从侧面看的狗粮碗线框——椭圆形"碗口"和圆角矩形
 // "碗身"都只画白色描边（不填充），碗口盖住碗身的顶边（用背景色椭圆擦除模拟
@@ -554,6 +580,22 @@ static void drawFlower(M5Canvas *spi, int cx, int cy, float scale, float rotatio
   }
 }
 
+// 算出某朵花在"抛物线往右下角移动→消失→回到起点"这个循环里，此刻应该
+// 往右下偏移多少像素——X 方向随循环进度匀速推进到 PLAY_FLOWER_ARC_DX，
+// Y 方向随 X 方向的进度平方增长到 PLAY_FLOWER_ARC_DY（模拟重力：一开始
+// 掉得慢、后面越来越快，就是抛物线的样子）。返回 false 表示此刻是循环的
+// "消失"阶段，调用方不应该画这朵花。phaseOffsetMs 让不同花错开各自的
+// 循环时间点。
+static bool computeFlowerArcOffset(unsigned long phaseOffsetMs, int &dx, int &dy) {
+  unsigned long t = (millis() + phaseOffsetMs) % PLAY_FLOWER_ARC_CYCLE_MS;
+  float cycleFrac = (float)t / (float)PLAY_FLOWER_ARC_CYCLE_MS;
+  if (cycleFrac >= PLAY_FLOWER_ARC_VISIBLE_RATIO) return false;
+  float p = cycleFrac / PLAY_FLOWER_ARC_VISIBLE_RATIO;
+  dx = (int)roundf(PLAY_FLOWER_ARC_DX * p);
+  dy = (int)roundf(PLAY_FLOWER_ARC_DY * p * p);
+  return true;
+}
+
 // 二次贝塞尔在参数 t∈[0,1] 处的点（标准 B(t)=(1-t)²P0+2(1-t)tP1+t²P2 公式），
 // 给项链弧线沿曲线采样、跳过跟骨头重叠的那一段用，不直接画出来。
 static void quadBezierPoint(float p0x, float p0y, float c1x, float c1y,
@@ -591,34 +633,43 @@ static void drawSpiral(M5Canvas *spi, int cx, int cy, float maxR, float turns,
 }
 
 // 画一个太阳："玩"表情屏幕角落的装饰，取代原来右上角那朵花（见
-// PLAY_SUN_X/Y）。核心是一个漩涡（复用 drawSpiral()，跟"晕"表情眼睛是
-// 同一个画法，但线条更细——反馈"漩涡变细一点"，传 thickness=0，眼睛那边
-// 还是 1）；周围环绕 PLAY_SUN_RAYS 条从中心辐射出去的射线，射线起点离
-// 中心留了 PLAY_SUN_RAY_INNER_R 的空隙，不紧贴着漩涡核心。反馈"漩涡先
-// 不要旋转"——rotationPhase 固定成 0，不再用 millis() 算随时间变化的
-// 相位；PLAY_SUN_SPIRAL_ROTATE_PERIOD_MS 常量保留没删，以后要重新打开
-// 自转直接把这里改回时间相位就行。
-// 反馈"射线不要轴对称、长度设置3种、看起来更随意一点"——之前是严格
-// 均匀分布的角度+长短交替，规律感太强；改成每条射线在均匀角度基础上叠加
-// 一个手工挑的角度偏移（PLAY_SUN_RAY_ANGLE_JITTER_DEG），长度也从"只有
-// 长/短交替"改成三档（短/中/长），每条射线用哪一档由
-// PLAY_SUN_RAY_LEN_TIER 手工排布、不是简单循环——不追求真随机，只要打破
-// 明显的对称/交替规律。这两个数组大小跟 PLAY_SUN_RAYS 绑定，改射线数量
-// 要记得同步改数组长度。没有实机验证过。
+// PLAY_SUN_X/Y）。核心原来是漩涡（复用 drawSpiral()，跟"晕"表情眼睛
+// 同一个画法），反馈"漩涡取消，变成实心圆，因为漩涡的手绘质感太重了，
+// 不太合适"——改成一个简单的 fillCircle()，drawSpiral() 那次改动的
+// thickness 参数继续留给"晕"表情眼睛用，太阳这边不再调它。
+// 周围环绕 PLAY_SUN_RAYS 条从中心辐射出去的射线，射线起点离核心留了
+// PLAY_SUN_RAY_INNER_R 的空隙。射线角度/长度档位不对称、手工排布出"看起来
+// 随意"的效果，见 PLAY_SUN_RAY_ANGLE_JITTER_DEG/PLAY_SUN_RAY_LEN_TIER
+// 定义处的说明。
+// 这一轮反馈还加了两条：①射线整体变粗（PLAY_SUN_RAY_THICKNESS，参考
+// 小花线条的粗细估的，没有精确对应）；②射线长度加一个缓慢缩短再恢复的
+// "呼吸"动画（PLAY_SUN_RAY_PULSE_*），每条射线各自的长度是"档位长度 ×
+// 呼吸系数"，呼吸系数在 [PLAY_SUN_RAY_PULSE_MIN_RATIO, 1.0] 之间来回，
+// 所有射线共用同一个呼吸相位（一起缩短、一起恢复，不是各自独立）。
+// 没有实机验证过。
 static void drawSun(M5Canvas *spi, int cx, int cy, float scale, uint16_t col) {
-  float rotationPhase = 0.0f;
-  drawSpiral(spi, cx, cy, PLAY_SUN_SPIRAL_MAX_R * scale, PLAY_SUN_SPIRAL_TURNS, rotationPhase, 0, col);
+  int coreR = max(1, (int)roundf(PLAY_SUN_CORE_R * scale));
+  spi->fillCircle(cx, cy, coreR, col);
   float innerR = PLAY_SUN_RAY_INNER_R * scale;
   float lenTiers[3] = {PLAY_SUN_RAY_LEN_SHORT, PLAY_SUN_RAY_LEN_MID, PLAY_SUN_RAY_LEN_LONG};
+  float pulsePhase = 2.0f * PI * (float)millis() / (float)PLAY_SUN_RAY_PULSE_PERIOD_MS;
+  // 呼吸系数：0.5-0.5*cos 让它从 1.0（原长）平滑过渡到 MIN_RATIO 再回到
+  // 1.0，不是瞬间跳变；((1+cos)/2 在 [0,1] 之间，映射到
+  // [MIN_RATIO, 1.0]。
+  float pulseRatio = PLAY_SUN_RAY_PULSE_MIN_RATIO +
+                      (1.0f - PLAY_SUN_RAY_PULSE_MIN_RATIO) * (0.5f + 0.5f * cosf(pulsePhase));
   for (int i = 0; i < PLAY_SUN_RAYS; i++) {
     float ang = (float)i * (2.0f * PI / PLAY_SUN_RAYS) +
                 PLAY_SUN_RAY_ANGLE_JITTER_DEG[i] * PI / 180.0f;
-    float len = lenTiers[PLAY_SUN_RAY_LEN_TIER[i]] * scale;
+    float len = lenTiers[PLAY_SUN_RAY_LEN_TIER[i]] * scale * pulseRatio;
     int x0 = cx + (int)roundf(innerR * cosf(ang));
     int y0 = cy + (int)roundf(innerR * sinf(ang));
     int x1 = cx + (int)roundf((innerR + len) * cosf(ang));
     int y1 = cy + (int)roundf((innerR + len) * sinf(ang));
-    spi->drawLine(x0, y0, x1, y1, col);
+    for (int t = -PLAY_SUN_RAY_THICKNESS; t <= PLAY_SUN_RAY_THICKNESS; t++) {
+      spi->drawLine(x0 + t, y0, x1 + t, y1, col);
+      spi->drawLine(x0, y0 + t, x1, y1 + t, col);
+    }
   }
 }
 
@@ -1665,6 +1716,20 @@ class PuppyEar : public Drawable {
                   sinf(2.0f * PI * (float)millis() / EAT_EAR_WOBBLE_PERIOD_MS);
     }
 
+    // 玩：两只耳朵同步（不按 dir 镜像，两只耳朵转同一个方向，不是对称
+    // 外撇/内收）绕自己耳根缓慢晃动，模拟一阵风吹过来——跟前面几种摆动
+    // 用普通 sinf() 左右对称摆不一样，这里用 (0.5-0.5*cos) 让角度只在
+    // [0, PLAY_WIND_EAR_AMP_DEG] 之间来回（只往一个方向偏、偏完再放松回
+    // 零，不会偏到反方向），更像阵风一阵一阵吹过来，而不是均匀左右摇摆。
+    // 偏移方向没有实机验证过是不是真的看起来"向右"——这个项目的旋转角度
+    // 正负号和视觉方向的对应关系之前多次踩过坑（比如生气/吃饭那几个耳朵
+    // 摆动都没验证过方向），如果实机看到耳朵是往左偏，把下面这个负号去掉
+    // 就会整体翻转成往右偏。
+    if (isPlay) {
+      float windPhase = 2.0f * PI * (float)millis() / (float)PLAY_WIND_EAR_PERIOD_MS;
+      earTwist += -(PLAY_WIND_EAR_AMP_DEG * PI / 180.0f) * (0.5f - 0.5f * cosf(windPhase));
+    }
+
     float pivotLX = dir * earW;  // 耳根顶点（远离头部一侧的顶部端点）局部坐标
     float pivotLY = topY;
 
@@ -1738,16 +1803,23 @@ class PuppyEar : public Drawable {
     // ===== 玩：左下角两朵花（见 drawFlower()）+ 右上角一个太阳（见
     //      drawSun()），固定屏幕坐标，不跟着表情/舵机镜像移动——只在右耳
     //      组件里画一次，跟关键词按钮/字幕是同一个"固定装饰只画一次"的
-    //      模式。花原来在左上角、还带一套"缓慢下降→消失→回到起点"的循环
-    //      （drawFallingFlower()），第四轮反馈"取消下降动画，位置改在
-    //      左下角，但保持旋转"——直接调 drawFlower() 常驻显示，只保留花瓣
-    //      持续旋转，下降/消失那套逻辑和 drawFallingFlower() 本身都删掉了。
-    //      太阳的漩涡先不转（见 drawSun()）。第一版位置/大小没有实机
+    //      模式。花一直持续旋转；位置偏移这次改回会动——"抛物线往右下角
+    //      移动→消失→回到起点"的循环（见 computeFlowerArcOffset()），
+    //      中间有一轮反馈要求"取消下降动画"改成过纯旋转不移动，这一轮又
+    //      要求"加抛物线移动"重新加回来，只是轨迹从直上直下换成了抛物线。
+    //      两朵花各自没算出偏移就跳过不画（此刻正处于循环的"消失"阶段）。
+    //      太阳先不转（见 drawSun()）。第一版位置/大小/轨迹参数没有实机
     //      验证过。=====
     if (!isLeft && isPlay) {
       float flowerRotationPhase = 2.0f * PI * (float)millis() / (float)PLAY_FLOWER_ROTATE_PERIOD_MS;
-      drawFlower(spi, PLAY_FLOWER1_X, PLAY_FLOWER1_Y, PLAY_FLOWER_SCALE, flowerRotationPhase, col);
-      drawFlower(spi, PLAY_FLOWER2_X, PLAY_FLOWER2_Y, PLAY_FLOWER_SCALE, flowerRotationPhase, col);
+      int dx1, dy1;
+      if (computeFlowerArcOffset(PLAY_FLOWER1_ARC_PHASE_MS, dx1, dy1)) {
+        drawFlower(spi, PLAY_FLOWER1_X + dx1, PLAY_FLOWER1_Y + dy1, PLAY_FLOWER_SCALE, flowerRotationPhase, col);
+      }
+      int dx2, dy2;
+      if (computeFlowerArcOffset(PLAY_FLOWER2_ARC_PHASE_MS, dx2, dy2)) {
+        drawFlower(spi, PLAY_FLOWER2_X + dx2, PLAY_FLOWER2_Y + dy2, PLAY_FLOWER_SCALE, flowerRotationPhase, col);
+      }
       drawSun(spi, PLAY_SUN_X, PLAY_SUN_Y, PLAY_SUN_SCALE, col);
     }
 
