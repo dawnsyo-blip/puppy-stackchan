@@ -301,33 +301,40 @@ static const float ANGRY_EAR_WOBBLE_PERIOD_MS = 900.0f; // 摆动周期比 DEAD 
 // 连在嘴巴上，线条加粗；④口水巾整体离嘴巴更远；⑤骨头图案见上面
 // EAT_BONE_* 的调整记录。
 // 第二轮反馈：①系带要跟口水巾主体连上——不再是"系带→空隙→口水巾"三段，
-// 系带圆弧的两个端点直接就是口水巾主体的顶部两角，中间不留空隙（原来
-// 独立的 EAT_BIB_TOP_Y/EAT_BIB_HALF_TOP_W 两个常量因此被系带自己的
-// ARC_Y/ARC_HALF_W 取代，删掉了）；②系带宽度要超过嘴巴宽度（吃饭状态下
-// 嘴巴半宽 curveWidth=20*EAT_SCALE=16，系带半宽从7加大到20，明显超过）；
-// ③口水巾主体顶部两角改成圆角（在两个顶角各画一个小圆磨平直角转折）；
-// ④骨头图案在上一轮基础上整体再缩小20%（EAT_BONE_* 三个常量各自再乘
-// 0.8）；⑤口水巾（现在从系带算起）离嘴巴的距离再加大——ARC_Y 从24
-// 加大到30。
+// 系带圆弧的两个端点贴着口水巾主体的顶部两角（中间不留竖直空隙）；②系带
+// 宽度要超过嘴巴宽度（吃饭状态下嘴巴半宽 curveWidth=20*EAT_SCALE=16，系带
+// 半宽加大到明显超过它）；③口水巾主体顶部两角改成圆角（在两个顶角各画一
+// 个小圆磨平直角转折）；④骨头图案在上一轮基础上整体再缩小20%（EAT_BONE_*
+// 三个常量各自再乘 0.8）；⑤口水巾离嘴巴的距离再加大。
+// 第三轮反馈：①系带两边要比口水巾本身长一点——上一轮图省事让系带端点
+// 直接当口水巾顶部两角，等于系带宽度=口水巾顶部宽度，没有"系带更长"这个
+// 效果；这一轮重新分开两个宽度：EAT_BIB_HALF_TOP_W（口水巾主体自己的顶部
+// 两角，比系带窄）单独定义，系带在同一条 Y 线上但半宽比它更大，视觉上是
+// 系带两端各探出口水巾肩部一小截，而不是两者宽度完全相同；②口水巾整体
+// 离嘴巴的距离再加大——ARC_Y 从30加大到36。
 static const float EAT_SCALE = 0.8f;            // 五官整体缩小20%（跟 EXCITED_SCALE 同一个用法）
 static const float EAT_EYE_INWARD_PX = 8.0f;    // 眼睛朝鼻子方向靠拢的像素数
 static const float EAT_EAR_INWARD_PX = 12.0f;   // 耳朵朝中轴线靠拢的像素数
 static const float EAT_NOSE_CLOSER_PX = 10.0f;  // 鼻子（连带嘴巴/舌头）朝眼睛方向靠拢的像素数
 static const float EAT_TONGUE_SCALE = 0.8f;     // 舌头缩放比例，跟 EAT_SCALE 保持一致的比例
 // 嘴巴本身（含舌头）大致延伸到相对鼻子中心 Y≈20 的位置（mouthOffY=10 +
-// 缩小后的 curveDepth≈10），系带圆弧排在这条线以下。系带的两个端点直接
-// 就是口水巾主体的顶部两角，两者是一体的，不再分两段。
-static const int EAT_BIB_STRAP_ARC_Y = 30;      // 系带圆弧相对鼻子中心的Y偏移（第二轮从24加大到30，
+// 缩小后的 curveDepth≈10），系带圆弧排在这条线以下。系带跟口水巾主体的
+// 顶部两角贴在同一条 Y 线上（没有竖直空隙），但系带半宽比口水巾主体顶部
+// 半宽更大，两端各探出去一小截。
+static const int EAT_BIB_STRAP_ARC_Y = 36;      // 系带圆弧相对鼻子中心的Y偏移（第三轮从30加大到36，
                                                  // 让口水巾整体离嘴巴更远）
-static const int EAT_BIB_STRAP_ARC_HALF_W = 20; // 系带圆弧半宽（第二轮从7加大到20，超过嘴巴半宽16，
-                                                 // 同时也是口水巾主体顶部两角的半宽——两者是同一组点）
+static const int EAT_BIB_STRAP_ARC_HALF_W = 22; // 系带圆弧半宽——比嘴巴半宽(16)、也比口水巾主体
+                                                 // 顶部半宽(EAT_BIB_HALF_TOP_W=18)更大，两端各探出
+                                                 // 口水巾肩部约4px
 static const int EAT_BIB_STRAP_ARC_BULGE = 4;   // 系带圆弧向下鼓出的深度（弧线本身的弯曲程度）
+static const int EAT_BIB_HALF_TOP_W = 18;       // 口水巾主体顶部（肩部）半宽，比系带窄
 static const int EAT_BIB_HALF_BOTTOM_W = 26;    // 围兜底部半宽（更宽，呈口袋状）
-static const int EAT_BIB_BOTTOM_Y = 62;         // 围兜底部相对鼻子中心的Y偏移（顶部改成从系带算起
-                                                 // 之后跟着重新计算，主体高度维持跟上一轮相近的~32px）
+static const int EAT_BIB_BOTTOM_Y = 68;         // 围兜底部相对鼻子中心的Y偏移（ARC_Y 加大后跟着
+                                                 // 顺延，主体高度维持跟上一轮相近的~32px）
 static const int EAT_BIB_BOTTOM_BULGE = 14;     // 底部圆弧向下鼓出的深度
 static const int EAT_BIB_CORNER_R = 3;          // 口水巾主体顶部两角的圆角半径（在角上画一个小圆磨平）
-static const int EAT_BONE_ON_BIB_Y = 46;        // 骨头图案在围兜上的Y位置（相对鼻子中心）
+static const int EAT_BONE_ON_BIB_Y = 52;        // 骨头图案在围兜上的Y位置（相对鼻子中心，跟着
+                                                 // ARC_Y 顺延）
 // 骨头图案在上一轮定稿值（HALF_LEN=8.1/HALF_H=2.16/R=3.6）基础上，这一轮
 // 反馈"整体再变小20%"，三个值各自再乘 0.8：
 static const float EAT_BONE_HALF_LEN = 6.48f;   // 8.1 * 0.8
@@ -361,16 +368,16 @@ static const int PLAY_BONE_TAG_Y = 42;       // 吊牌骨头中心相对鼻子�
 static const int PLAY_BONE_TAG_ROPE_LEN = 8; // 挂绳长度，短短的，只连着吊牌本身，不连到嘴巴
                                               // （第二轮反馈明确要求改回短挂绳）
 
-// 四叶草：四片心形叶子绕中心点放射状排列（每片叶尖朝中心），加一条从
-// 中心往下延伸的弯曲叶柄。心形叶片本身用 drawHeartLeaf() 画——两个圆的
-// 描边（不填充）撑出顶部两瓣，加两条边线收到底部尖点，整体是镂空的线框，
-// 不是实心（第一轮反馈明确要求"镂空"）。三株摆在屏幕左下角两株、右下角
-// 一株，固定屏幕坐标，不跟着表情/舵机镜像移动——参考示意图（用户提供，
-// 忽略图中"小红书"水印）判断的大致比例，没有实机验证过位置/大小是否
-// 合适。左下角第二株（从左到右数第二株）整体镜像翻转——四片叶子本身在
-// 45°/135°/225°/315° 上放射状排列，镜像前后叶子位置其实是对称的、看不出
-// 差别，真正会变的是叶柄的弯曲方向（drawFourLeafClover() 的 mirror 参数
-// 控制），从往右下弯改成往左下弯。
+// 苜蓿草（三/四叶草）：leafCount 片心形叶子绕中心点放射状均匀排列（每片
+// 叶尖朝中心），加一条从中心延伸的弯曲叶柄。心形叶片本身用 drawHeartLeaf()
+// 画——4 段二次贝塞尔拼出真正的心形轮廓（不是圆形，第二轮反馈明确指出过
+// "是心形而不是圆形"），镂空线框，不是实心（第一轮反馈明确要求"镂空"）。
+// 三株摆在屏幕左下角两株、右下角一株，固定屏幕坐标，不跟着表情/舵机镜像
+// 移动——参考示意图（用户提供，忽略图中"小红书"水印）判断的大致比例，
+// 没有实机验证过位置/大小是否合适。左下角第二株（从左到右数第二株）
+// 改成三叶草（其余两株仍是四叶草），同时整体镜像翻转——叶子排列本身左右
+// 对称，镜像前后叶子位置其实看不出差别，真正会变的是叶柄的弯曲方向
+// （drawClover() 的 mirror 参数控制），从往右下弯改成往左下弯。
 static const float PLAY_CLOVER_SCALE = 0.7f;    // 整株缩放
 static const int PLAY_CLOVER1_X = 40, PLAY_CLOVER1_Y = 205;   // 左下第一株
 static const int PLAY_CLOVER2_X = 66, PLAY_CLOVER2_Y = 178;   // 左下第二株，跟第一株错开，不完全对齐；
@@ -463,33 +470,42 @@ static void drawBoneIcon(M5Canvas *spi, int cx, int cy, int halfLen, int halfH, 
   spi->fillCircle(cx + halfLen, cy + halfH, r, col);
 }
 
-// 画一片心形叶子（四叶草的一片）：两个圆的描边（不填充）撑出顶部两瓣，
-// 加两条边线从各自圆心收到底部尖点——整体是镂空的线框（第一轮反馈明确
-// 要求"镂空"，不是实心）。局部坐标系里叶尖朝 -y 方向（画的时候整体绕
-// rotRad 转，把叶尖转到朝向"中心"的方向）。
+// 画一片心形叶子（三/四叶草的一片）：镂空线框（不填充），用 4 段二次
+// 贝塞尔拼出真正的心形轮廓——顶部凹口(notch)两侧各有一段"外拱"曲线鼓成
+// 圆润的瓣，再各一段曲线收窄到底部尖点，而不是简单的两个圆（第二轮反馈
+// 明确指出"是心形而不是圆形"，纯圆容易看着像两个泡泡而不是心）。局部
+// 坐标系里叶尖朝 -y 方向、凹口朝 +y 方向（画的时候整体绕 rotRad 转，把
+// 叶尖转到朝向"中心"的方向）。
 static void drawHeartLeaf(M5Canvas *spi, int cx, int cy, float rotRad, float scale, uint16_t col) {
   float r = 6.0f * scale;
-  int c1x, c1y, c2x, c2y, tipx, tipy;
-  rotateLocalOffset(rotRad, -r * 0.8f, r * 0.5f, c1x, c1y);
-  rotateLocalOffset(rotRad, r * 0.8f, r * 0.5f, c2x, c2y);
-  rotateLocalOffset(rotRad, 0.0f, -r * 1.3f, tipx, tipy);
-  int rr = max(1, (int)roundf(r));
-  spi->drawCircle(cx + c1x, cy + c1y, rr, col);
-  spi->drawCircle(cx + c2x, cy + c2y, rr, col);
-  spi->drawLine(cx + c1x, cy + c1y, cx + tipx, cy + tipy, col);
-  spi->drawLine(cx + c2x, cy + c2y, cx + tipx, cy + tipy, col);
+  int tx, ty, ncx, ncy, lx, ly, rx, ry, lcx, lcy, rcx, rcy, lbx, lby, rbx, rby;
+  rotateLocalOffset(rotRad, 0.0f, -r * 1.2f, tx, ty);         // 尖点
+  rotateLocalOffset(rotRad, 0.0f, r * 0.4f, ncx, ncy);        // 顶部凹口
+  rotateLocalOffset(rotRad, -r * 1.0f, r * 0.6f, lx, ly);     // 左瓣最外侧
+  rotateLocalOffset(rotRad, r * 1.0f, r * 0.6f, rx, ry);      // 右瓣最外侧
+  rotateLocalOffset(rotRad, -r * 0.9f, r * 1.1f, lcx, lcy);   // 左瓣外拱控制点
+  rotateLocalOffset(rotRad, r * 0.9f, r * 1.1f, rcx, rcy);    // 右瓣外拱控制点
+  rotateLocalOffset(rotRad, -r * 1.3f, -r * 0.4f, lbx, lby);  // 左侧收到尖点的控制点
+  rotateLocalOffset(rotRad, r * 1.3f, -r * 0.4f, rbx, rby);   // 右侧收到尖点的控制点
+  spi->drawBezier(cx + ncx, cy + ncy, cx + rcx, cy + rcy, cx + rx, cy + ry, col);
+  spi->drawBezier(cx + rx, cy + ry, cx + rbx, cy + rby, cx + tx, cy + ty, col);
+  spi->drawBezier(cx + ncx, cy + ncy, cx + lcx, cy + lcy, cx + lx, cy + ly, col);
+  spi->drawBezier(cx + lx, cy + ly, cx + lbx, cy + lby, cx + tx, cy + ty, col);
 }
 
-// 画一株四叶草："玩"表情左下/右下角的装饰（见 PLAY_CLOVER1/2/3_X/Y）。四片
-// 心形叶子绕中心点放射状排列（45°/135°/225°/315°，叶尖都朝向中心），加
-// 一条从中心延伸的弯曲叶柄。四片叶子在这四个角度上本身是对称的，mirror
-// 参数不会改变叶子的排列观感，只翻转叶柄的弯曲方向（默认往右下弯，
-// mirror=true 时往左下弯）——第二轮反馈要求"从左到右第二株镜像翻转"，
-// 三株里只有中间那株（PLAY_CLOVER2）传 true。参考用户提供的示意图判断
-// 的大致比例，没有实机验证过。
-static void drawFourLeafClover(M5Canvas *spi, int cx, int cy, float scale, bool mirror, uint16_t col) {
-  for (int i = 0; i < 4; i++) {
-    float rot = (float)i * PI / 2.0f + PI / 4.0f;
+// 画一株三/四叶草："玩"表情左下/右下角的装饰（见 PLAY_CLOVER1/2/3_X/Y）。
+// leafCount 片心形叶子绕中心点放射状均匀排列（叶尖都朝向中心），加一条从
+// 中心延伸的弯曲叶柄。四叶草用 45°/135°/225°/315°（对角对称的"X"排列）；
+// 三叶草用 0°/120°/240°（一片朝正上方，另两片对称撇向左下/右下，是常见
+// 三叶草的排列方式）。叶子排列本身左右对称，mirror 参数不会改变观感，
+// 只翻转叶柄的弯曲方向（默认往右下弯，mirror=true 时往左下弯）——第二轮
+// 反馈要求"从左到右第二株镜像翻转"，第三轮反馈又要求"第二株改成三叶草"，
+// 两条反馈都作用在同一株（PLAY_CLOVER2）上。参考用户提供的示意图判断的
+// 大致比例，没有实机验证过。
+static void drawClover(M5Canvas *spi, int cx, int cy, float scale, int leafCount, bool mirror, uint16_t col) {
+  float startAngle = (leafCount == 4) ? (PI / 4.0f) : 0.0f;
+  for (int i = 0; i < leafCount; i++) {
+    float rot = (float)i * (2.0f * PI / leafCount) + startAngle;
     drawHeartLeaf(spi, cx, cy, rot, scale, col);
   }
   int m = mirror ? -1 : 1;
@@ -1084,8 +1100,10 @@ class PuppyNose : public Drawable {
     }
 
     // ---- 吃饭：嘴巴下方先画一条独立的圆弧"系带"（线条比其它线条粗一圈，
-    //      强调这是一根系带而不是普通描边），系带的两个端点直接就是口水巾
-    //      主体（梯形/口袋状轮廓）的顶部两角——两者连在一起，中间不留空隙，
+    //      强调这是一根系带而不是普通描边），系带底部（弧线所在的 Y 线）
+    //      贴着口水巾主体（梯形/口袋状轮廓）的顶部两角——两者贴在一起，
+    //      中间不留竖直空隙，但系带比口水巾主体的顶部更宽，两端各探出去
+    //      一小截（EAT_BIB_STRAP_ARC_HALF_W > EAT_BIB_HALF_TOP_W）；口水巾
     //      顶部两角各画一个小圆磨平直角转折（圆角）；两条边线往下连到围兜
     //      "肩部"，底部一条圆弧收口，巾上正中间画一个骨头图案。整体用
     //      eatBibAnim_ 做 0→1 的淡入淡出，跟其它表情切换的过渡节奏保持
@@ -1100,10 +1118,10 @@ class PuppyNose : public Drawable {
                          cx + strapHalfW, strapY + t, col);
       }
 
-      // 口水巾主体：顶部两角直接用系带的端点（topY=strapY，topHalfW=
-      // strapHalfW），两者是同一组点，不再分两段。
+      // 口水巾主体：顶部两角跟系带同一条 Y 线（贴在一起，不留空隙），但
+      // 半宽是自己独立的 EAT_BIB_HALF_TOP_W，比系带窄，让系带两端露出来。
       int topY = strapY;
-      int topHalfW = strapHalfW;
+      int topHalfW = (int)roundf(EAT_BIB_HALF_TOP_W * eatScale);
       int botY = cy + (int)roundf(EAT_BIB_BOTTOM_Y * eatScale);
       int botHalfW = (int)roundf(EAT_BIB_HALF_BOTTOM_W * eatScale);
       int bulge = (int)roundf(EAT_BIB_BOTTOM_BULGE * eatScale);
@@ -1582,14 +1600,15 @@ class PuppyEar : public Drawable {
     drawThickBezier(spi, x0, y0, ctrl1X, ctrl1Y, xBot, yBot, thick, col);
     drawThickBezier(spi, xBot, yBot, ctrl2X, ctrl2Y, x3, y3, thick, col);
 
-    // ===== 玩：左下角两株、右下角一株四叶草（见 drawFourLeafClover()），
-    //      固定屏幕坐标，不跟着表情/舵机镜像移动——只在右耳组件里画一次，
-    //      跟关键词按钮/字幕是同一个"固定装饰只画一次"的模式。第一版
+    // ===== 玩：左下角两株、右下角一株苜蓿草（见 drawClover()），固定屏幕
+    //      坐标，不跟着表情/舵机镜像移动——只在右耳组件里画一次，跟关键词
+    //      按钮/字幕是同一个"固定装饰只画一次"的模式。左下角第二株是三叶
+    //      （其余两株是四叶）、且镜像翻转，两条反馈都作用在它身上。第一版
     //      位置/大小没有实机验证过。=====
     if (!isLeft && isPlay) {
-      drawFourLeafClover(spi, PLAY_CLOVER1_X, PLAY_CLOVER1_Y, PLAY_CLOVER_SCALE, false, col);
-      drawFourLeafClover(spi, PLAY_CLOVER2_X, PLAY_CLOVER2_Y, PLAY_CLOVER_SCALE, true, col);
-      drawFourLeafClover(spi, PLAY_CLOVER3_X, PLAY_CLOVER3_Y, PLAY_CLOVER_SCALE, false, col);
+      drawClover(spi, PLAY_CLOVER1_X, PLAY_CLOVER1_Y, PLAY_CLOVER_SCALE, 4, false, col);
+      drawClover(spi, PLAY_CLOVER2_X, PLAY_CLOVER2_Y, PLAY_CLOVER_SCALE, 3, true, col);
+      drawClover(spi, PLAY_CLOVER3_X, PLAY_CLOVER3_Y, PLAY_CLOVER_SCALE, 4, false, col);
     }
 
     // ===== 思考表情：从右耳组件画眼镜鼻梁 =====
