@@ -616,12 +616,19 @@ ANGRY_LED_BLINK_PERIOD_MS = 400        # 闪烁周期——固件 updateLed() �
                                         # 不是亮暗各占一半再乘二
 ANGRY_LED_BLINK_COUNT = 3              # 闪烁次数
 ANGRY_FACE_FOUND_DELAY_SEC = 1.0       # 找到人脸后停顿，让用户看到小狗在生气
-ANGRY_YAW_TURN = -200                  # ⚠️ 意图是"左转不理你"。如果实机测出来
-                                        # 转的方向感觉反了，取反这个值即可
-                                        # （这个项目里舵机转向的"左右"从
-                                        # host 端猜测到实机确认之间不止一次
-                                        # 翻过车，见 CLAUDE.md）。
+ANGRY_YAW_TURN = 200                   # 左转("哼，不理你")。用户在设计反馈里
+                                        # 明确写的是"左转（yaw+）"，跟 CLAUDE.md
+                                        # 里 API 文档记的"yaw 越大越向右"方向
+                                        # 相反——按用户这次给的方向改，但这个
+                                        # 符号本身还没有被实机看到转向后确认过
+                                        # （上一版转向这一步被过早的双击打断，
+                                        # 用户实际没看到这一下转动），如果实机
+                                        # 测出来是反的，取反这个值即可。
 ANGRY_YAW_SPEED = 300
+ANGRY_YAW_SETTLE_TOLERANCE = 30        # 判定"已经转到位"的容差，跟 enter_dead()
+                                        # 的 DEAD_PITCH_UP_SETTLE_TOLERANCE 同一个值
+ANGRY_YAW_SETTLE_TIMEOUT_SEC = 1.5     # 等舵机转到位的最长时间，超时就按当前
+                                        # 角度继续，不会卡死
 ANGRY_FORGIVE_HOLD_SEC = 3.0           # 原谅前保持生气表情的时长
 
 
@@ -3384,10 +3391,34 @@ class PuppyEngine:
         else:
             print(f"[REMINDER] {label}: 主人已离开（在场率 {ratio:.0%}），不催促")
 
+    def _angry_double_tap_check(self, baseline):
+        """发一次 get_touch()，返回 (新的 double_tap baseline, 这次是否比
+        baseline 多了一次双击, 这次读到的 held_ms)。face-wait 和
+        forgive-wait 两处循环共用这一份查询+比较逻辑，不各写一份、也不用
+        为双击和长按各发一次请求。直接读 get_touch() 原始值，不走
+        self.check_touch()——跟 _game_check_abort() 是同一个理由，避免
+        触发跟生气无关的触摸反馈灯/计数副作用。"""
+        touch = get_touch()
+        if touch is None:
+            return baseline, False, 0
+        current = touch.get("double_tap_count", baseline)
+        return current, current != baseline, touch.get("held_ms", 0)
+
     def _play_angry_reminder(self):
-        """复查确认主人仍在座位 → 生气催促序列：红灯闪烁→常亮 → 找人脸 →
-        侧头"不理你" → 等双击原谅 → 回正 → 保持生气 3 秒 → 开心。同步
-        阻塞方法，执行期间 tick() 停摆。"""
+        """复查确认主人仍在座位 → 生气催促序列：切表情+红灯闪烁→常亮 →
+        （不转头，原地）确认人脸还在 → 停顿 1 秒 → 左转"哼，不理你" →
+        全程保持生气表情，直到双击头顶原谅（长按也可以强制退出，兜底）→
+        回正 → 保持生气 3 秒 → 开心。同步阻塞方法，执行期间 tick() 停摆。
+
+        表情从进入生气到原谅之前只切一次、不再变化——之前的版本里确认
+        人脸这一步复用的是 scan_for_face()，它内部会把表情切成 curious、
+        还会转头扫视好几个位置，等于生气表情播出来一半就被盖掉，转头的
+        动作也跟"生气瞪着你不理你"的意图不符（实测反馈就是这个转头扫视
+        被用户看成了"舵机只有识别人脸的时候有运动"，后面真正的"左转不理
+        你"反而因为太快被双击打断而完全没看到）。现在改成不移动舵机、只
+        在当前角度用 detect_face_once() 轻量确认，找不到就原地等（跟
+        _game_check_abort()/双击一样可以随时被打断，不用等到转完头才能
+        原谅）。"""
         print("[REMINDER] 主人还在! 生气催促...")
         self.state = State.ANGRY
         self.state_enter_time = time.time()
@@ -3399,29 +3430,28 @@ class PuppyEngine:
         time.sleep(ANGRY_LED_BLINK_PERIOD_MS / 1000.0 * ANGRY_LED_BLINK_COUNT)
         set_led_mode("solid", *ANGRY_LED_RGB)
 
-        # scan_for_face() 内部会把表情切成 curious（见该方法实现），找到人
-        # 之后要显式切回 angry，它自己不会帮你切回去。
-        found = self.scan_for_face()
-        if found:
-            set_expression("angry")
-        else:
-            # scan_for_face() 已经扫过一圈没找到——不能再调它一次（会重复
-            # 播放转头扫描 + 再切一次 curious），改成在当前角度用
-            # detect_face_once() 轻量轮询等人出现，同时允许长按强制退出。
-            while True:
-                time.sleep(FACE_CHECK_INTERVAL_SEC)
-                found, face_x = self.detect_face_once()
-                if found:
-                    self.face_detected = True
-                    self.face_confirm_count = FACE_CONFIRM_FRAMES
-                    self.last_face_seen_time = time.time()
-                    self.track_face_servo(face_x)
-                    set_expression("angry")
-                    break
-                if self._game_check_abort():
-                    print("[REMINDER] 长按头顶 → 强制退出生气")
-                    self._angry_forgive()
-                    return
+        last_double_tap = self.last_double_tap_count
+        if last_double_tap is None:
+            last_double_tap, _, _ = self._angry_double_tap_check(0)
+
+        found, face_x = self.detect_face_once()
+        while not found:
+            time.sleep(FACE_CHECK_INTERVAL_SEC)
+            last_double_tap, tapped, held_ms = self._angry_double_tap_check(last_double_tap)
+            if tapped:
+                print("[REMINDER] 等人脸期间双击头顶 → 原谅")
+                self._angry_forgive()
+                return
+            if held_ms >= PRIVACY_HOLD_SEC * 1000:
+                print("[REMINDER] 长按头顶 → 强制退出生气")
+                self._angry_forgive()
+                return
+            found, face_x = self.detect_face_once()
+
+        self.face_detected = True
+        self.face_confirm_count = FACE_CONFIRM_FRAMES
+        self.last_face_seen_time = time.time()
+        self.track_face_servo(face_x)
 
         time.sleep(ANGRY_FACE_FOUND_DELAY_SEC)
 
@@ -3430,31 +3460,39 @@ class PuppyEngine:
         target_yaw = max(min(current_yaw + ANGRY_YAW_TURN, 1280), -1280)
         move_servo(yaw=target_yaw, speed=ANGRY_YAW_SPEED, mute=True)
 
-        self._angry_wait_for_forgive()
+        # 不能对着这个非阻塞的 move_servo() 盲等一个猜的固定时长就去开始
+        # 监听双击——上一版就是这么写的，双击稍微快一点就会在舵机还没转到
+        # 位时就调用 _angry_forgive()（里面的 go_home() 会立刻把目标角度
+        # 覆盖掉），物理上只看到舵机拐了个弯直接回正，"左转不理你"这一下
+        # 完全看不出来（跟 enter_dead() 踩过的"抬头动画被截断"是同一个坑，
+        # 见那边的说明）。轮询 /status 确认真的转到位了（有容差、有超时，
+        # 超时就按当前角度继续，不会卡死）再进入双击监听。
+        deadline = time.time() + ANGRY_YAW_SETTLE_TIMEOUT_SEC
+        settled = False
+        while time.time() < deadline:
+            status = get_status()
+            if status and abs(status.get("yaw", 0) - target_yaw) <= ANGRY_YAW_SETTLE_TOLERANCE:
+                settled = True
+                break
+            time.sleep(0.1)
+        if not settled:
+            print("[REMINDER] 等左转到位超时，按当前角度继续")
 
-    def _angry_wait_for_forgive(self):
+        self._angry_wait_for_forgive(last_double_tap)
+
+    def _angry_wait_for_forgive(self, last_double_tap):
         """保持生气侧头，等双击头顶触发原谅（长按也可以强制退出，兜底）。
-        直接读 get_touch() 原始返回值，不走 self.check_touch()——跟
-        _game_check_abort() 是同一个理由，避免触发跟生气无关的触摸反馈灯/
-        计数副作用。"""
-        last_double_tap = self.last_double_tap_count
-        if last_double_tap is None:
-            touch0 = get_touch()
-            last_double_tap = touch0.get("double_tap_count", 0) if touch0 else 0
-
+        last_double_tap 是调用方（_play_angry_reminder()）已经在等人脸阶段
+        跟踪过的基准值，不用重新读一次。"""
         while True:
             time.sleep(TOUCH_POLL_SEC)
-            touch = get_touch()
-            if touch is None:
-                continue
-
-            current_double_tap = touch.get("double_tap_count", last_double_tap)
-            if current_double_tap != last_double_tap:
+            last_double_tap, tapped, held_ms = self._angry_double_tap_check(last_double_tap)
+            if tapped:
                 print("[REMINDER] 双击头顶 → 原谅")
                 self._angry_forgive()
                 return
 
-            if touch.get("held_ms", 0) >= PRIVACY_HOLD_SEC * 1000:
+            if held_ms >= PRIVACY_HOLD_SEC * 1000:
                 print("[REMINDER] 长按头顶 → 原谅（兜底）")
                 self._angry_forgive()
                 return
