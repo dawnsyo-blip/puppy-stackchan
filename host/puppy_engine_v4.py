@@ -567,6 +567,7 @@ EXPRESSION_MAP = {
     "dizzy":    "dizzy",
     "dead":     "dead",
     "angry":    "angry",
+    "play":     "play",
 }
 
 # --- 定时提醒 + 生气催促 ---
@@ -601,13 +602,14 @@ REMINDER_SAMPLE_INTERVAL_SEC = 60  # 复查期间每 60 秒采样一次人脸（
                                     # 触发 ESP32 堆碎片化重启的高频轮询阈值）
 REMINDER_PRESENCE_THRESHOLD = 0.7  # 采样中 ≥70% 检测到人脸 → 判定"一直在"
 
-# "want_play"/"want_eat" 这两个专属表情还没设计，暂时借用 excited/happy。
-# 所有取提醒表情的地方都走这张映射表，以后设计好专属表情、固件 handleFace()
-# 接上新分支后，只改这张表的值（比如 "want_play": "want_play"），不用到处
-# 找散落的硬编码。
+# "want_eat" 专属表情还没设计，暂时借用 happy。"want_play" 曾经也走这张
+# 映射表（借用 excited），但"玩"这个表情后来正式设计完成并接入了固件
+# handleFace()（见 EXPRESSION_MAP 里的 "play"），_deliver_reminder() 现在
+# 对 want_play 直接调 set_expression("play")，不再查这张表——这里只留
+# want_eat 一条，等它也有专属表情了，同样只改这张表的值就行，不用到处找
+# 散落的硬编码。
 REMINDER_EXPR_MAP = {
-    "want_play": "excited",
-    "want_eat":  "happy",
+    "want_eat": "happy",
 }
 
 # --- "想出去玩"提醒的天气感知关键词库 ---
@@ -694,6 +696,46 @@ def get_weather_keywords(api_key, api_host, count=WEATHER_KEYWORD_COUNT):
         pool.append("暖")
     print(f"  [天气] {now.get('text', '?')} {temp_c}°C → 分类={category}")
     return random.sample(pool, min(count, len(pool)))
+
+# 提到朋友的名字，后面必须紧跟"玩"——不能只报朋友的名字不说想干什么。
+FRIEND_NAMES = {"边边", "大黄", "耶耶"}
+
+def enforce_friend_needs_play(words):
+    """检查关键词列表，只要出现朋友名字、后面没有紧跟着"玩"，就在朋友
+    名字后面插入一个"玩"（不是替换掉原来那个词，尽量保留随机挑出来的
+    其它词，允许因此变长）。get_weather_keywords() 的随机采样和
+    REMINDERS 里手写的固定列表都可能撞上这条规则，所以放在 _deliver_
+    reminder() 里统一在关键词最终确定之后调用一次，不分别处理两个来源。"""
+    result = []
+    for i, w in enumerate(words):
+        result.append(w)
+        if w in FRIEND_NAMES:
+            next_word = words[i + 1] if i + 1 < len(words) else None
+            if next_word != "玩":
+                result.append("玩")
+    return result
+
+# --- "想出去玩"提醒播报前的轻微左右摆头 ---
+# 幅度/节奏直接参考小开心（play_xiaokaixin_animation()/XIAOKAIXIN_*），
+# 只是把 pitch 轴的抬头换成 yaw 轴的左右摆动——落差同样是 120（小开心
+# 是 450-330=120），摆动相对当前 yaw 进行（不是绝对角度，因为这一步
+# 之前舵机可能已经因为 scan_for_face()/track_face_servo() 停在任意角度），
+# 摆完落回摆动前的原始 yaw，不会留在偏转的位置上。
+REMINDER_PLAY_SWING_YAW_AMPLITUDE = 120
+REMINDER_PLAY_SWING_SPEED = 300
+REMINDER_PLAY_SWING_CYCLES = 3
+REMINDER_PLAY_SWING_CYCLE_DELAY = 0.3
+
+def play_reminder_swing_animation():
+    status = get_status()
+    base_yaw = status.get("yaw", 0) if status else 0
+    half = REMINDER_PLAY_SWING_YAW_AMPLITUDE // 2
+    for _ in range(REMINDER_PLAY_SWING_CYCLES):
+        move_servo(yaw=base_yaw - half, speed=REMINDER_PLAY_SWING_SPEED, mute=True)
+        time.sleep(REMINDER_PLAY_SWING_CYCLE_DELAY)
+        move_servo(yaw=base_yaw + half, speed=REMINDER_PLAY_SWING_SPEED, mute=True)
+        time.sleep(REMINDER_PLAY_SWING_CYCLE_DELAY)
+    move_servo(yaw=base_yaw, speed=REMINDER_PLAY_SWING_SPEED, mute=True)
 
 ANGRY_LED_RGB = (255, 30, 0)           # 红灯颜色，没有实机验证过
 ANGRY_LED_BLINK_PERIOD_MS = 400        # 闪烁周期——固件 updateLed() 的 BLINK
@@ -3436,32 +3478,47 @@ class PuppyEngine:
                 break
 
     def _deliver_reminder(self, reminder):
-        """发出一条提醒：扫描确认人在场 → 切表情 + 念关键词 → 恢复开心 →
+        """发出一条提醒：扫描确认人在场 → 切表情/摆头 + 念关键词 → 收尾 →
         启动 10 分钟复查计时。人不在时直接放弃，不进复查——催促一个不在场
         的人没有意义。
 
-        关键词优先用天气现挑（只对 expression=="want_play" 的条目生效，
-        "想出去玩"这个主题才跟天气有关系；"想吃饭"这类跟天气无关，一直
-        用 REMINDERS 里写的固定词）——get_weather_keywords() 拿不到结果
-        （没配置 key、请求失败）时返回 None，直接落回 reminder["keywords"]
-        这个固定列表，不影响提醒照常发出。"""
+        want_play（"想出去玩"）和 want_eat（"想吃饭"）走两条不同的收尾：
+        - want_play：关键词优先用天气现挑（get_weather_keywords() 拿不到
+          结果时落回 reminder["keywords"] 固定列表），说之前先左右摆头
+          （play_reminder_swing_animation()），说完切到"玩"这个表情并
+          一直保持——不能调 enter_happy()，那个会直接把表情设回 happy
+          盖掉刚设的 play，所以这里手动做 enter_happy() 静默分支同款的
+          state/session_active 记账，只是表情换成 play。
+        - want_eat：跟之前一样，念完 REMINDERS 里写的固定关键词就
+          enter_happy()。"""
         label = reminder["label"]
         print(f"[REMINDER] {label}: 检查是否发出提醒...")
         if not self.scan_for_face():
             print(f"[REMINDER] {label}: 没找到人，不提醒")
             return
 
-        expr = REMINDER_EXPR_MAP.get(reminder["expression"], "happy")
-        set_expression(expr)
-        set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
-
-        keywords = reminder["keywords"]
         if reminder["expression"] == "want_play":
+            set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
+            keywords = reminder["keywords"]
             weather_keywords = get_weather_keywords(self.qweather_api_key, self.qweather_api_host)
             if weather_keywords:
                 keywords = weather_keywords
-        self.speak_keywords(keywords)
-        self.enter_happy()
+            keywords = enforce_friend_needs_play(keywords)
+
+            play_reminder_swing_animation()
+            self.speak_keywords(keywords)
+
+            self.session_active = True
+            self.state = State.HAPPY
+            self.state_enter_time = time.time()
+            set_expression("play")
+            set_led_mode("solid", *WARM_WHITE_RGB)
+        else:
+            expr = REMINDER_EXPR_MAP.get(reminder["expression"], "happy")
+            set_expression(expr)
+            set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
+            self.speak_keywords(reminder["keywords"])
+            self.enter_happy()
 
         print(f"[REMINDER] {label}: 提醒已发出，{REMINDER_RECHECK_SEC/60:.0f} 分钟后复查主人是否还在")
         self._reminder_recheck_target = time.time() + REMINDER_RECHECK_SEC
