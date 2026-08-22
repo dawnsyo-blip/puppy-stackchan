@@ -577,20 +577,24 @@ EXPRESSION_MAP = {
 REMINDERS = [
     {
         "hour": 10, "minute": 0,
-        "expression": "want_play",       # 占位，见下面 REMINDER_EXPR_MAP 的说明
-        "keywords": ["出去", "玩", "水"],
+        "expression": "want_drink",
         "label": "drink_water",
     },
     {
         "hour": 12, "minute": 0,
         "expression": "want_eat",
-        "keywords": ["吃饭", "时间", "饿"],
         "label": "eat_lunch",
     },
     {
         "hour": 15, "minute": 30,
         "expression": "want_play",
-        "keywords": ["出去", "走", "动"],
+        "keywords": ["出去", "走", "动"],   # get_weather_keywords() 失败时
+                                            # 的兜底——这条还会发天气 API
+                                            # 请求，会失败；want_drink/
+                                            # want_eat 的关键词生成是纯本地
+                                            # 计算，不会失败，不需要兜底，
+                                            # 这两条的 REMINDERS 条目就不用
+                                            # 再带 keywords 字段了。
         "label": "move_around",
     },
 ]
@@ -602,20 +606,21 @@ REMINDER_SAMPLE_INTERVAL_SEC = 60  # 复查期间每 60 秒采样一次人脸（
                                     # 触发 ESP32 堆碎片化重启的高频轮询阈值）
 REMINDER_PRESENCE_THRESHOLD = 0.7  # 采样中 ≥70% 检测到人脸 → 判定"一直在"
 
-# "want_eat" 专属表情还没设计，暂时借用 happy。"want_play" 曾经也走这张
-# 映射表（借用 excited），但"玩"这个表情后来正式设计完成并接入了固件
-# handleFace()（见 EXPRESSION_MAP 里的 "play"），_deliver_reminder() 现在
-# 对 want_play 直接调 set_expression("play")，不再查这张表——这里只留
-# want_eat 一条，等它也有专属表情了，同样只改这张表的值就行，不用到处找
-# 散落的硬编码。
+# "want_drink"/"want_eat" 专属表情还没设计，暂时都借用 happy。"want_play"
+# 曾经也走这张映射表（借用 excited），但"玩"这个表情后来正式设计完成并
+# 接入了固件 handleFace()（见 EXPRESSION_MAP 里的 "play"），_deliver_
+# reminder() 现在对 want_play 直接调 set_expression("play")，不再查这张
+# 表——这里只留 want_drink/want_eat 两条，等它们也有专属表情了，同样只改
+# 这张表的值就行，不用到处找散落的硬编码。
 REMINDER_EXPR_MAP = {
+    "want_drink": "happy",
     "want_eat": "happy",
 }
 
 # --- "想出去玩"提醒的天气感知关键词库 ---
-# 只用于 REMINDERS 里 expression=="want_play" 的条目（drink_water/
-# move_around 这两条，主题都是"想出去"）；expression=="want_eat" 的条目
-# （eat_lunch）跟天气无关，继续用它自己 REMINDERS 里写的固定 keywords。
+# 只用于 REMINDERS 里 expression=="want_play" 的条目（move_around 这一条，
+# 主题是"想出去"）。drink_water 原来也是 want_play，现在改成独立的
+# want_drink（见下面 get_drink_keywords()），不再共用这一套。
 #
 # 和风天气免费版账号实测没有 GeoAPI（城市名查 LocationID）权限，但直接用
 # 已知的 LocationID 查 /v7/weather/now 是通的，所以不查城市名，杭州的
@@ -698,16 +703,12 @@ WEATHER_SIGNATURE_WORD = {
     "other": None,
 }
 
-def get_weather_keywords(api_key, api_host, count=None):
-    """查一次杭州实时天气，按天气类型+气温挑一组随机关键词（AAC 风格，
-    表达"小狗想去外面玩什么"）。任何失败（没配置 key/host、网络错误、
-    响应格式不对）都返回 None，调用方退化成用 REMINDERS 里那条提醒自带
-    的固定关键词——跟 call_vision_llm() 是同一个"可选增强，不是硬依赖"
-    的设计，不能假设这里一定有结果。count 不传时在
-    [WEATHER_KEYWORD_COUNT_MIN, WEATHER_KEYWORD_COUNT_MAX] 之间随机挑，
-    不再固定 3 个。"""
-    if count is None:
-        count = random.randint(WEATHER_KEYWORD_COUNT_MIN, WEATHER_KEYWORD_COUNT_MAX)
+def _fetch_weather_now(api_key, api_host):
+    """查一次杭州实时天气，返回 (分类, 摄氏温度, 天气文字描述)；任何失败
+    （没配置 key/host、网络错误、响应格式不对）都返回 None。
+    get_weather_keywords()（想出去玩）和 get_drink_keywords()（想喝水）
+    都要用到同一份天气数据，抽出来一份，两边不用各自发一次请求、各自
+    重写一遍同样的错误处理。"""
     if not api_key or not api_host:
         return None
     try:
@@ -726,9 +727,25 @@ def get_weather_keywords(api_key, api_host, count=None):
         now = r.json()["now"]
         category = _classify_weather_icon(now["icon"])
         temp_c = float(now["temp"])
+        text = now.get("text", "?")
     except (json.JSONDecodeError, KeyError, ValueError) as e:
         print(f"  [天气] 响应格式不对: {e!r}")
         return None
+    return category, temp_c, text
+
+def get_weather_keywords(api_key, api_host, count=None):
+    """按天气类型+气温挑一组随机关键词（AAC 风格，表达"小狗想去外面玩
+    什么"）。天气查不到时返回 None，调用方退化成用 REMINDERS 里那条
+    提醒自带的固定关键词——跟 call_vision_llm() 是同一个"可选增强，不是
+    硬依赖"的设计，不能假设这里一定有结果。count 不传时在
+    [WEATHER_KEYWORD_COUNT_MIN, WEATHER_KEYWORD_COUNT_MAX] 之间随机挑，
+    不再固定 3 个。"""
+    if count is None:
+        count = random.randint(WEATHER_KEYWORD_COUNT_MIN, WEATHER_KEYWORD_COUNT_MAX)
+    fetched = _fetch_weather_now(api_key, api_host)
+    if fetched is None:
+        return None
+    category, temp_c, text = fetched
 
     pool = list(WEATHER_KEYWORD_POOLS.get(category, WEATHER_KEYWORD_POOLS["other"]))
     temp_word = None
@@ -755,7 +772,68 @@ def get_weather_keywords(api_key, api_host, count=None):
         result.extend(random.sample(pool, min(remaining, len(pool))))
     random.shuffle(result)  # 不然天气状况词会永远排在关键词列表第一个，显得死板
 
-    print(f"  [天气] {now.get('text', '?')} {temp_c}°C → 分类={category}，代表词={signature or '无'}")
+    print(f"  [天气] {text} {temp_c}°C → 分类={category}，代表词={signature or '无'}")
+    return result
+
+# --- "想喝水"提醒的关键词库 ---
+# "水"是每次都会说的必要词（用户原话"除了水这个必要的关键词"），剩下的
+# 名额从基础候选池（哪个天气/几点都适用）里随机抽；如果天气查得到，按
+# 气温再加几个候选——热天倾向"渴/冰/凉凉"，冷天倾向"暖/热乎"（跟
+# get_weather_keywords() 的"冷"/"暖"是同一个温度阈值，但这里用更具体的
+# "想喝口凉的/暖的"而不是单纯"冷"/"暖"，更贴近"想喝水"这个主题）。跟
+# get_weather_keywords() 不同的是，这个函数不依赖天气 API 也能正常工作
+# （天气查不到就只用基础候选池），因为"水"和基础候选词本身就无关天气，
+# 不会因为查不到天气就完全没有变化，所以不需要返回 None 走外层兜底。
+DRINK_KEYWORD_POOL = ["喝", "杯杯", "咕嘟"]
+DRINK_HOT_WORDS = ["渴", "冰", "凉凉"]
+DRINK_COLD_WORDS = ["暖", "热乎"]
+
+def get_drink_keywords(api_key, api_host, count=None):
+    if count is None:
+        count = random.randint(WEATHER_KEYWORD_COUNT_MIN, WEATHER_KEYWORD_COUNT_MAX)
+    pool = list(DRINK_KEYWORD_POOL)
+    fetched = _fetch_weather_now(api_key, api_host)
+    if fetched is not None:
+        category, temp_c, text = fetched
+        if temp_c >= WEATHER_HOT_TEMP_C:
+            pool.extend(DRINK_HOT_WORDS)
+        elif temp_c <= WEATHER_COLD_TEMP_C:
+            pool.extend(DRINK_COLD_WORDS)
+        print(f"  [天气] {text} {temp_c}°C（想喝水关键词参考这个气温）")
+    time_word = pick_time_of_day_word()
+    if time_word not in pool:
+        pool.append(time_word)
+
+    result = ["水"]
+    remaining = count - len(result)
+    if remaining > 0 and pool:
+        result.extend(random.sample(pool, min(remaining, len(pool))))
+    random.shuffle(result)
+    return result
+
+# --- "想吃饭"提醒的关键词库 ---
+# "饭饭"是每次都会说的必要词，其它词从跟吃相关的候选池里随机抽。故意
+# 不接天气/气温——食欲跟天气没有"想出去玩"/"想喝水"那么直接的关系，
+# 只保留时间段词这一个跟环境有关的变量。"肉肉"/"零食"/"香香"是用户
+# 给的例子，"肚肚"/"空"是从"饿"这个词拆出来的（见 CUTE_WORD_
+# SUBSTITUTIONS 的说明），直接当独立候选词用，不用再靠替换。"时间"
+# 保留了原来固定列表里的词。这几个词有没有实机验证过组合起来自不自然，
+# 用户反馈了再调。
+EAT_KEYWORD_POOL = ["时间", "肚肚", "空", "肉肉", "零食", "香香"]
+
+def get_eat_keywords(count=None):
+    if count is None:
+        count = random.randint(WEATHER_KEYWORD_COUNT_MIN, WEATHER_KEYWORD_COUNT_MAX)
+    pool = list(EAT_KEYWORD_POOL)
+    time_word = pick_time_of_day_word()
+    if time_word not in pool:
+        pool.append(time_word)
+
+    result = ["饭饭"]
+    remaining = count - len(result)
+    if remaining > 0 and pool:
+        result.extend(random.sample(pool, min(remaining, len(pool))))
+    random.shuffle(result)
     return result
 
 # 提到朋友的名字，后面必须紧跟"玩"——不能只报朋友的名字不说想干什么。
@@ -3563,25 +3641,31 @@ class PuppyEngine:
         启动 10 分钟复查计时。人不在时直接放弃，不进复查——催促一个不在场
         的人没有意义。
 
-        want_play（"想出去玩"）和 want_eat（"想吃饭"）走两条不同的收尾，
-        但关键词最终都会经过 apply_cute_substitutions()（"饭"/"吃饭"→
-        "饭饭"，"饿"→"肚肚"+"空"，见该函数说明）：
-        - want_play：关键词优先用天气现挑（get_weather_keywords() 拿不到
-          结果时落回 reminder["keywords"] 固定列表，长度也不再固定 3 个，
-          2~4 个都算正常，见 get_weather_keywords() 里的说明），说之前先
-          左右摆头（play_reminder_swing_animation()），说完切到"玩"这个
-          表情并一直保持——不能调 enter_happy()，那个会直接把表情设回
-          happy 盖掉刚设的 play，所以这里手动做 enter_happy() 静默分支
-          同款的 state/session_active 记账，只是表情换成 play。
-        - want_eat：跟之前一样，念完 REMINDERS 里写的固定关键词（经过
-          cute 替换）就 enter_happy()。"""
+        三种 expression 走两条不同的收尾，但关键词最终都会经过
+        apply_cute_substitutions()（"饭"/"吃饭"→"饭饭"，"饿"→"肚肚"+
+        "空"，见该函数说明——want_drink/want_eat 的关键词池已经直接用的
+        是替换后的词，这里对它们是空操作，只对 want_play 偶尔落回的
+        REMINDERS 固定兜底列表才可能真的有替换发生）：
+        - want_play（move_around）：关键词优先用天气现挑
+          （get_weather_keywords() 拿不到结果时落回 reminder["keywords"]
+          固定列表），说之前先左右摆头（play_reminder_swing_
+          animation()），说完切到"玩"这个表情并一直保持——不能调
+          enter_happy()，那个会直接把表情设回 happy 盖掉刚设的 play，
+          所以这里手动做 enter_happy() 静默分支同款的 state/
+          session_active 记账，只是表情换成 play。
+        - want_drink（drink_water）/want_eat（eat_lunch）：行为逻辑
+          完全一样，只是关键词来源不同（get_drink_keywords()/
+          get_eat_keywords()，各自的说明见函数定义），念完固定
+          enter_happy()——这两个纯本地计算，不发请求，不会失败，不需要
+          像 want_play 那样准备"生成失败就退回固定列表"的兜底。"""
         label = reminder["label"]
         print(f"[REMINDER] {label}: 检查是否发出提醒...")
         if not self.scan_for_face():
             print(f"[REMINDER] {label}: 没找到人，不提醒")
             return
 
-        if reminder["expression"] == "want_play":
+        expr_type = reminder["expression"]
+        if expr_type == "want_play":
             set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
             keywords = reminder["keywords"]
             weather_keywords = get_weather_keywords(self.qweather_api_key, self.qweather_api_host)
@@ -3599,10 +3683,16 @@ class PuppyEngine:
             set_expression("play")
             set_led_mode("solid", *WARM_WHITE_RGB)
         else:
-            expr = REMINDER_EXPR_MAP.get(reminder["expression"], "happy")
+            if expr_type == "want_drink":
+                keywords = get_drink_keywords(self.qweather_api_key, self.qweather_api_host)
+            else:  # want_eat
+                keywords = get_eat_keywords()
+            keywords = apply_cute_substitutions(keywords)
+
+            expr = REMINDER_EXPR_MAP.get(expr_type, "happy")
             set_expression(expr)
             set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
-            self.speak_keywords(apply_cute_substitutions(reminder["keywords"]))
+            self.speak_keywords(keywords)
             self.enter_happy()
 
         print(f"[REMINDER] {label}: 提醒已发出，{REMINDER_RECHECK_SEC/60:.0f} 分钟后复查主人是否还在")
