@@ -610,6 +610,91 @@ REMINDER_EXPR_MAP = {
     "want_eat":  "happy",
 }
 
+# --- "想出去玩"提醒的天气感知关键词库 ---
+# 只用于 REMINDERS 里 expression=="want_play" 的条目（drink_water/
+# move_around 这两条，主题都是"想出去"）；expression=="want_eat" 的条目
+# （eat_lunch）跟天气无关，继续用它自己 REMINDERS 里写的固定 keywords。
+#
+# 和风天气免费版账号实测没有 GeoAPI（城市名查 LocationID）权限，但直接用
+# 已知的 LocationID 查 /v7/weather/now 是通的，所以不查城市名，杭州的
+# LocationID 直接写死（本身不会变，没必要每次先查一遍）。
+WEATHER_LOCATION_ID = "101210101"      # 杭州
+WEATHER_API_TIMEOUT_SEC = 5
+WEATHER_COLD_TEMP_C = 5                # 低于这个温度，关键词池里会带上"冷"
+WEATHER_HOT_TEMP_C = 30                # 高于这个温度，关键词池里会带上"暖"
+WEATHER_KEYWORD_COUNT = 3              # 每次挑几个词，跟 REMINDERS 原来固定
+                                        # 列表的长度一致
+
+# 和风天气 icon 代码分类（官方文档 https://dev.qweather.com/docs/resource/icons/）：
+# 100/150=晴，101-103/151-153=多云/少云/晴间多云，104/154=阴，300-318=雨，
+# 400-499=雪，500+=雾霾沙尘。用区间粗分类，不需要精确到每一个具体代码。
+def _classify_weather_icon(icon_code):
+    try:
+        code = int(icon_code)
+    except (TypeError, ValueError):
+        return "other"
+    if code in (100, 150):
+        return "sunny"
+    if code in (101, 102, 103, 151, 152, 153):
+        return "cloudy"
+    if code in (104, 154):
+        return "overcast"
+    if 300 <= code <= 318:
+        return "rain"
+    if 400 <= code <= 499:
+        return "snow"
+    return "other"
+
+# 这几个池子是照用户给的例子（"雨天→外面/水/玩"、"晴天→玩/阳光/风"）加上
+# 他提供的完整词库手工分的，没有实机验证过挑出来的组合听着自不自然，用户
+# 反馈了再调。"边边"/"大黄"/"耶耶"（小狗在公园认识的朋友，人设见
+# SYSTEM_PROMPT）只放进适合"出去找朋友玩"的晴天/多云池子，雨天/雪天不放
+# ——下雨下雪应该不会有人带狗出门碰到朋友。
+WEATHER_KEYWORD_POOLS = {
+    "sunny":    ["玩", "阳光", "风", "草地", "花花", "虫虫", "外面", "边边", "大黄", "耶耶"],
+    "cloudy":   ["玩", "外面", "风", "草地", "边边", "大黄", "耶耶"],
+    "overcast": ["玩", "外面", "风", "草地"],
+    "rain":     ["外面", "水", "雨", "玩"],
+    "snow":     ["外面", "冷", "玩"],
+    "other":    ["玩", "外面"],
+}
+
+def get_weather_keywords(api_key, api_host, count=WEATHER_KEYWORD_COUNT):
+    """查一次杭州实时天气，按天气类型+气温挑一组随机关键词（AAC 风格，
+    表达"小狗想去外面玩什么"）。任何失败（没配置 key/host、网络错误、
+    响应格式不对）都返回 None，调用方退化成用 REMINDERS 里那条提醒自带
+    的固定关键词——跟 call_vision_llm() 是同一个"可选增强，不是硬依赖"
+    的设计，不能假设这里一定有结果。"""
+    if not api_key or not api_host:
+        return None
+    try:
+        r = requests.get(
+            f"https://{api_host}/v7/weather/now",
+            params={"location": WEATHER_LOCATION_ID, "key": api_key},
+            timeout=WEATHER_API_TIMEOUT_SEC,
+        )
+    except requests.exceptions.RequestException as e:
+        print(f"  [天气] 请求失败: {e}")
+        return None
+    if r.status_code != 200:
+        print(f"  [天气] API 返回 {r.status_code}: {r.text[:200]}")
+        return None
+    try:
+        now = r.json()["now"]
+        category = _classify_weather_icon(now["icon"])
+        temp_c = float(now["temp"])
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        print(f"  [天气] 响应格式不对: {e!r}")
+        return None
+
+    pool = list(WEATHER_KEYWORD_POOLS.get(category, WEATHER_KEYWORD_POOLS["other"]))
+    if temp_c <= WEATHER_COLD_TEMP_C:
+        pool.append("冷")
+    elif temp_c >= WEATHER_HOT_TEMP_C:
+        pool.append("暖")
+    print(f"  [天气] {now.get('text', '?')} {temp_c}°C → 分类={category}")
+    return random.sample(pool, min(count, len(pool)))
+
 ANGRY_LED_RGB = (255, 30, 0)           # 红灯颜色，没有实机验证过
 ANGRY_LED_BLINK_PERIOD_MS = 400        # 闪烁周期——固件 updateLed() 的 BLINK
                                         # 一个完整周期（亮+暗）就是 period_ms，
@@ -1820,6 +1905,16 @@ class PuppyEngine:
             print("[引擎] 没有 Qwen-VL API key，捉迷藏游戏会退化成只用颜色直方图判断")
         self.game_ref_hist = None
         self.game_ref_desc = None
+
+        # 定时提醒里"想出去玩"这类提醒的关键词：可选增强，没配置/请求失败
+        # 都会退化成 REMINDERS 里各条目自带的固定关键词，见 get_weather_
+        # keywords()。
+        self.qweather_api_key = load_env_key("QWEATHER_API_KEY")
+        self.qweather_api_host = load_env_key("QWEATHER_API_HOST")
+        if self.qweather_api_key and self.qweather_api_host:
+            print("[引擎] 和风天气 key 已从 .env 加载（提醒关键词会结合天气）")
+        else:
+            print("[引擎] 没有和风天气 key/host，提醒关键词会用固定文本，不结合天气")
         # animalese 字母库（172KB，读一次转成 numpy 数组，耗时可忽略）：在这里
         # 同步加载一次，保证第一次 speak_keywords() 调用时不用再付一次首次
         # 加载的延迟——不像 SenseVoice 模型/TTS 预热那样耗时到需要放后台线程。
@@ -3343,7 +3438,13 @@ class PuppyEngine:
     def _deliver_reminder(self, reminder):
         """发出一条提醒：扫描确认人在场 → 切表情 + 念关键词 → 恢复开心 →
         启动 10 分钟复查计时。人不在时直接放弃，不进复查——催促一个不在场
-        的人没有意义。"""
+        的人没有意义。
+
+        关键词优先用天气现挑（只对 expression=="want_play" 的条目生效，
+        "想出去玩"这个主题才跟天气有关系；"想吃饭"这类跟天气无关，一直
+        用 REMINDERS 里写的固定词）——get_weather_keywords() 拿不到结果
+        （没配置 key、请求失败）时返回 None，直接落回 reminder["keywords"]
+        这个固定列表，不影响提醒照常发出。"""
         label = reminder["label"]
         print(f"[REMINDER] {label}: 检查是否发出提醒...")
         if not self.scan_for_face():
@@ -3353,7 +3454,13 @@ class PuppyEngine:
         expr = REMINDER_EXPR_MAP.get(reminder["expression"], "happy")
         set_expression(expr)
         set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
-        self.speak_keywords(reminder["keywords"])
+
+        keywords = reminder["keywords"]
+        if reminder["expression"] == "want_play":
+            weather_keywords = get_weather_keywords(self.qweather_api_key, self.qweather_api_host)
+            if weather_keywords:
+                keywords = weather_keywords
+        self.speak_keywords(keywords)
         self.enter_happy()
 
         print(f"[REMINDER] {label}: 提醒已发出，{REMINDER_RECHECK_SEC/60:.0f} 分钟后复查主人是否还在")
