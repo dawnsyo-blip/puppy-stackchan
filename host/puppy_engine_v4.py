@@ -627,8 +627,11 @@ ANGRY_YAW_TURN = 200                   # 左转("哼，不理你")。用户在�
 ANGRY_YAW_SPEED = 300
 ANGRY_YAW_SETTLE_TOLERANCE = 30        # 判定"已经转到位"的容差，跟 enter_dead()
                                         # 的 DEAD_PITCH_UP_SETTLE_TOLERANCE 同一个值
-ANGRY_YAW_SETTLE_TIMEOUT_SEC = 1.5     # 等舵机转到位的最长时间，超时就按当前
-                                        # 角度继续，不会卡死
+ANGRY_YAW_SETTLE_TIMEOUT_SEC = 3.0     # 等舵机转到位的最长时间，超时就按当前
+                                        # 角度继续，不会卡死。直接拿真机测过：
+                                        # 200 多个单位的转动大概 1~2 秒才能进
+                                        # 容差范围，原来 1.5 秒偏紧，放宽一点
+                                        # 留余量。
 ANGRY_FORGIVE_HOLD_SEC = 3.0           # 原谅前保持生气表情的时长
 
 
@@ -3404,21 +3407,79 @@ class PuppyEngine:
         current = touch.get("double_tap_count", baseline)
         return current, current != baseline, touch.get("held_ms", 0)
 
+    def _angry_speak_keywords(self, keywords, last_double_tap):
+        """生气专属的"按钮按一下+关键词 TTS 同步播放"，跟 _game_speak_
+        keywords() 是同一个理由不能直接复用 speak_keywords()：那个内部调
+        self.wait_for_playback()，会走 handle_touch_trigger() 的全局手势
+        分发（双击→兴奋、碰屏幕→小开心），这两个都会跟生气状态自己的
+        "双击→原谅"判断打架。改成自己轮询 /status 的 playing 字段，用
+        _angry_double_tap_check() 代替 handle_touch_trigger()。
+
+        返回 (新的 last_double_tap baseline, 是否正常播完)——被打断时
+        （双击/长按）调用方应该直接去 _angry_forgive()，不用再等 1 秒/
+        转头了。"""
+        set_button("up")
+        time.sleep(BUTTON_PRESS_MS / 1000)
+        next_wav = tts_to_wav(keywords[0], "angry_kw_0") if keywords else None
+        for i in range(len(keywords)):
+            set_button("down")
+            time.sleep(BUTTON_PRESS_MS / 1000)
+            set_button("up")
+            wav_path = next_wav
+            if wav_path:
+                # 保持红色主题，不用其它状态惯用的暖白——生气播报期间还是
+                # 生气，不需要临时借用暖白灯。
+                set_led(*ANGRY_LED_RGB)
+                set_subtitle(keywords[i])
+                self.mic_stream.set_muted(True)
+                finished_ok = False
+                try:
+                    started = start_play(wav_path)
+                    if started:
+                        deadline = time.time() + PLAY_TIMEOUT
+                        while time.time() < deadline:
+                            last_double_tap, tapped, held_ms = self._angry_double_tap_check(last_double_tap)
+                            if tapped or held_ms >= PRIVACY_HOLD_SEC * 1000:
+                                stop_play()
+                                break
+                            status = get_status()
+                            if status is not None and not status.get("playing", False):
+                                finished_ok = True
+                                break
+                            time.sleep(0.1)
+                        else:
+                            stop_play()
+                finally:
+                    if finished_ok:
+                        time.sleep(MIC_UNMUTE_COOLDOWN_SEC)
+                    self.mic_stream.set_muted(False)
+                    set_subtitle("")
+                if started and not finished_ok:
+                    print("[REMINDER] 播报被双击/长按打断")
+                    set_button("off")
+                    return last_double_tap, False
+                set_led(off=True)
+            if i + 1 < len(keywords):
+                next_wav = tts_to_wav(keywords[i + 1], f"angry_kw_{i + 1}")
+            time.sleep(KEYWORD_GAP_SEC)
+        set_button("off")
+        set_led_mode("solid", *ANGRY_LED_RGB)
+        return last_double_tap, True
+
     def _play_angry_reminder(self):
         """复查确认主人仍在座位 → 生气催促序列：切表情+红灯闪烁→常亮 →
-        （不转头，原地）确认人脸还在 → 停顿 1 秒 → 左转"哼，不理你" →
-        全程保持生气表情，直到双击头顶原谅（长按也可以强制退出，兜底）→
-        回正 → 保持生气 3 秒 → 开心。同步阻塞方法，执行期间 tick() 停摆。
+        （不转头，原地）确认人脸还在 → 按钮播报"小狗 生气" → 停顿 1 秒 →
+        左转"哼，不理你" → 全程保持生气表情，直到双击头顶原谅（长按也可以
+        强制退出，兜底）→ 回正 → 保持生气 3 秒 → 开心。同步阻塞方法，执行
+        期间 tick() 停摆。
 
         表情从进入生气到原谅之前只切一次、不再变化——之前的版本里确认
         人脸这一步复用的是 scan_for_face()，它内部会把表情切成 curious、
         还会转头扫视好几个位置，等于生气表情播出来一半就被盖掉，转头的
         动作也跟"生气瞪着你不理你"的意图不符（实测反馈就是这个转头扫视
-        被用户看成了"舵机只有识别人脸的时候有运动"，后面真正的"左转不理
-        你"反而因为太快被双击打断而完全没看到）。现在改成不移动舵机、只
-        在当前角度用 detect_face_once() 轻量确认，找不到就原地等（跟
-        _game_check_abort()/双击一样可以随时被打断，不用等到转完头才能
-        原谅）。"""
+        被用户看成了"舵机只有识别人脸的时候有运动"）。现在改成不移动
+        舵机、只在当前角度用 detect_face_once() 轻量确认，找不到就原地等
+        （随时可以被双击/长按打断，不用等到转完头才能原谅）。"""
         print("[REMINDER] 主人还在! 生气催促...")
         self.state = State.ANGRY
         self.state_enter_time = time.time()
@@ -3453,12 +3514,26 @@ class PuppyEngine:
         self.last_face_seen_time = time.time()
         self.track_face_servo(face_x)
 
+        last_double_tap, spoke_ok = self._angry_speak_keywords(["小狗", "生气"], last_double_tap)
+        if not spoke_ok:
+            self._angry_forgive()
+            return
+
         time.sleep(ANGRY_FACE_FOUND_DELAY_SEC)
 
         status = get_status()
-        current_yaw = status.get("yaw", 450) if status else 450
+        # 明确把当前 pitch 也传回去，不能只传 yaw——firmware 的 handleServo()
+        # 对没传的参数不是"保持不变"，而是各自 fallback 成硬编码默认值
+        # （pitch 缺省会直接变成 450），这次调试才发现的：之前每次"只转
+        # yaw"的调用其实都在悄悄把 pitch 一起拽回 450，只是大多数时候 pitch
+        # 本来就已经在 450 附近所以没被注意到。这里显式带上当前 pitch，
+        # 保证这一步只有 yaw 在变，转头动作干净、不会跟"顺带把头抬正"的
+        # 竖直动作混在一起，看起来更不像"单纯在转"。
+        current_yaw = status.get("yaw", 0) if status else 0
+        current_pitch = status.get("pitch", 450) if status else 450
         target_yaw = max(min(current_yaw + ANGRY_YAW_TURN, 1280), -1280)
-        move_servo(yaw=target_yaw, speed=ANGRY_YAW_SPEED, mute=True)
+        print(f"[REMINDER] 左转：yaw {current_yaw} → {target_yaw}")
+        move_servo(yaw=target_yaw, pitch=current_pitch, speed=ANGRY_YAW_SPEED, mute=True)
 
         # 不能对着这个非阻塞的 move_servo() 盲等一个猜的固定时长就去开始
         # 监听双击——上一版就是这么写的，双击稍微快一点就会在舵机还没转到
@@ -3466,7 +3541,9 @@ class PuppyEngine:
         # 覆盖掉），物理上只看到舵机拐了个弯直接回正，"左转不理你"这一下
         # 完全看不出来（跟 enter_dead() 踩过的"抬头动画被截断"是同一个坑，
         # 见那边的说明）。轮询 /status 确认真的转到位了（有容差、有超时，
-        # 超时就按当前角度继续，不会卡死）再进入双击监听。
+        # 超时就按当前角度继续，不会卡死）再进入双击监听。实机测过这个
+        # 舵机转 200 多个单位大概需要 1~2 秒才能进入容差范围，之前 1.5 秒
+        # 的超时偏紧，放宽到 3 秒留够余量。
         deadline = time.time() + ANGRY_YAW_SETTLE_TIMEOUT_SEC
         settled = False
         while time.time() < deadline:
@@ -3475,8 +3552,8 @@ class PuppyEngine:
                 settled = True
                 break
             time.sleep(0.1)
-        if not settled:
-            print("[REMINDER] 等左转到位超时，按当前角度继续")
+        final_yaw = status.get("yaw", "?") if status else "?"
+        print(f"[REMINDER] 左转{'已到位' if settled else '等待超时，按当前角度继续'}，当前 yaw={final_yaw}")
 
         self._angry_wait_for_forgive(last_double_tap)
 
