@@ -624,8 +624,29 @@ WEATHER_LOCATION_ID = "101210101"      # 杭州
 WEATHER_API_TIMEOUT_SEC = 5
 WEATHER_COLD_TEMP_C = 5                # 低于这个温度，关键词池里会带上"冷"
 WEATHER_HOT_TEMP_C = 30                # 高于这个温度，关键词池里会带上"暖"
-WEATHER_KEYWORD_COUNT = 3              # 每次挑几个词，跟 REMINDERS 原来固定
-                                        # 列表的长度一致
+WEATHER_KEYWORD_COUNT_MIN = 2          # 每次挑几个词，2~4 之间随机——不再
+WEATHER_KEYWORD_COUNT_MAX = 4          # 固定 3 个，加了时间词以后凑不满
+                                        # 3 个/超过 3 个都应该是正常情况，
+                                        # 不用刻意凑数或者砍掉
+
+# 时间段描述词——按当前小时挑一个候选词，但只是"候选"，不保证一定会说出来
+# （跟气温词"冷"/"暖"同一个地位，都放进随机抽样的池子里，抽不抽得到看
+# 运气），不需要单独再搞一套"多少概率要不要加"的判断。"morning" 是用户
+# 原话给的例子，故意保留英文没有转成中文——animalese 合成链路本身就是把
+# 中文转拼音再逐字母合成，纯拉丁字母的词跳过转拼音那一步直接进合成，两种
+# 混着用不会出问题。
+TIME_OF_DAY_WORDS = {
+    "morning": (5, 10),    # 5:00-9:59
+    "亮亮":    (10, 18),    # 10:00-17:59，白天
+    "暗暗":    (18, 24),    # 18:00-23:59，晚上（跟下面 0-5 点合起来才是完整的"暗"）
+}
+
+def pick_time_of_day_word():
+    hour = datetime.now().hour
+    for word, (start, end) in TIME_OF_DAY_WORDS.items():
+        if start <= hour < end:
+            return word
+    return "暗暗"  # 0:00-4:59，深夜也算"暗"
 
 # 和风天气 icon 代码分类（官方文档 https://dev.qweather.com/docs/resource/icons/）：
 # 100/150=晴，101-103/151-153=多云/少云/晴间多云，104/154=阴，300-318=雨，
@@ -677,12 +698,16 @@ WEATHER_SIGNATURE_WORD = {
     "other": None,
 }
 
-def get_weather_keywords(api_key, api_host, count=WEATHER_KEYWORD_COUNT):
+def get_weather_keywords(api_key, api_host, count=None):
     """查一次杭州实时天气，按天气类型+气温挑一组随机关键词（AAC 风格，
     表达"小狗想去外面玩什么"）。任何失败（没配置 key/host、网络错误、
     响应格式不对）都返回 None，调用方退化成用 REMINDERS 里那条提醒自带
     的固定关键词——跟 call_vision_llm() 是同一个"可选增强，不是硬依赖"
-    的设计，不能假设这里一定有结果。"""
+    的设计，不能假设这里一定有结果。count 不传时在
+    [WEATHER_KEYWORD_COUNT_MIN, WEATHER_KEYWORD_COUNT_MAX] 之间随机挑，
+    不再固定 3 个。"""
+    if count is None:
+        count = random.randint(WEATHER_KEYWORD_COUNT_MIN, WEATHER_KEYWORD_COUNT_MAX)
     if not api_key or not api_host:
         return None
     try:
@@ -713,6 +738,11 @@ def get_weather_keywords(api_key, api_host, count=WEATHER_KEYWORD_COUNT):
         temp_word = "暖"
     if temp_word and temp_word not in pool:
         pool.append(temp_word)
+    # 时间段词跟气温词同一个地位，加进候选池子，抽不抽得到看随机结果，
+    # 不强制（用户原话"不一定每次都要说"）。
+    time_word = pick_time_of_day_word()
+    if time_word not in pool:
+        pool.append(time_word)
 
     # 天气状况词优先占一个名额，剩下的名额（包含气温词在内）才随机抽。
     result = []
@@ -744,6 +774,26 @@ def enforce_friend_needs_play(words):
             next_word = words[i + 1] if i + 1 < len(words) else None
             if next_word != "玩":
                 result.append("玩")
+    return result
+
+# 叠词/AAC 风格的用词替换——"饭"/"吃饭"说成"饭饭"，"饿"拆成"肚肚"+"空"
+# 两个词（不是叠词，是"肚子空了"这个意象拆成两个 AAC 词）。一个词可以换成
+# 多个词，所以用列表而不是字符串做 value。
+CUTE_WORD_SUBSTITUTIONS = {
+    "饭":  ["饭饭"],
+    "吃饭": ["饭饭"],
+    "饿":  ["肚肚", "空"],
+}
+
+def apply_cute_substitutions(words):
+    """按 CUTE_WORD_SUBSTITUTIONS 替换关键词列表里的词，命中的词换成
+    对应的一个或多个词，没命中的原样保留。放在 enforce_friend_needs_
+    play() 同一层，两者互不影响，谁先谁后都一样——REMINDERS 里手写的
+    固定列表（比如 eat_lunch 的"吃饭"/"饿"）和 get_weather_keywords()
+    的随机结果都会经过这一步。"""
+    result = []
+    for w in words:
+        result.extend(CUTE_WORD_SUBSTITUTIONS.get(w, [w]))
     return result
 
 # --- "想出去玩"提醒播报前的轻微左右摆头 ---
@@ -3513,15 +3563,18 @@ class PuppyEngine:
         启动 10 分钟复查计时。人不在时直接放弃，不进复查——催促一个不在场
         的人没有意义。
 
-        want_play（"想出去玩"）和 want_eat（"想吃饭"）走两条不同的收尾：
+        want_play（"想出去玩"）和 want_eat（"想吃饭"）走两条不同的收尾，
+        但关键词最终都会经过 apply_cute_substitutions()（"饭"/"吃饭"→
+        "饭饭"，"饿"→"肚肚"+"空"，见该函数说明）：
         - want_play：关键词优先用天气现挑（get_weather_keywords() 拿不到
-          结果时落回 reminder["keywords"] 固定列表），说之前先左右摆头
-          （play_reminder_swing_animation()），说完切到"玩"这个表情并
-          一直保持——不能调 enter_happy()，那个会直接把表情设回 happy
-          盖掉刚设的 play，所以这里手动做 enter_happy() 静默分支同款的
-          state/session_active 记账，只是表情换成 play。
-        - want_eat：跟之前一样，念完 REMINDERS 里写的固定关键词就
-          enter_happy()。"""
+          结果时落回 reminder["keywords"] 固定列表，长度也不再固定 3 个，
+          2~4 个都算正常，见 get_weather_keywords() 里的说明），说之前先
+          左右摆头（play_reminder_swing_animation()），说完切到"玩"这个
+          表情并一直保持——不能调 enter_happy()，那个会直接把表情设回
+          happy 盖掉刚设的 play，所以这里手动做 enter_happy() 静默分支
+          同款的 state/session_active 记账，只是表情换成 play。
+        - want_eat：跟之前一样，念完 REMINDERS 里写的固定关键词（经过
+          cute 替换）就 enter_happy()。"""
         label = reminder["label"]
         print(f"[REMINDER] {label}: 检查是否发出提醒...")
         if not self.scan_for_face():
@@ -3535,6 +3588,7 @@ class PuppyEngine:
             if weather_keywords:
                 keywords = weather_keywords
             keywords = enforce_friend_needs_play(keywords)
+            keywords = apply_cute_substitutions(keywords)
 
             play_reminder_swing_animation()
             self.speak_keywords(keywords)
@@ -3548,7 +3602,7 @@ class PuppyEngine:
             expr = REMINDER_EXPR_MAP.get(reminder["expression"], "happy")
             set_expression(expr)
             set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
-            self.speak_keywords(reminder["keywords"])
+            self.speak_keywords(apply_cute_substitutions(reminder["keywords"]))
             self.enter_happy()
 
         print(f"[REMINDER] {label}: 提醒已发出，{REMINDER_RECHECK_SEC/60:.0f} 分钟后复查主人是否还在")
