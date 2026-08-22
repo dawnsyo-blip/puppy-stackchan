@@ -568,6 +568,7 @@ EXPRESSION_MAP = {
     "dead":     "dead",
     "angry":    "angry",
     "play":     "play",
+    "eat":      "eat",
 }
 
 # --- 定时提醒 + 生气催促 ---
@@ -606,16 +607,14 @@ REMINDER_SAMPLE_INTERVAL_SEC = 60  # 复查期间每 60 秒采样一次人脸（
                                     # 触发 ESP32 堆碎片化重启的高频轮询阈值）
 REMINDER_PRESENCE_THRESHOLD = 0.7  # 采样中 ≥70% 检测到人脸 → 判定"一直在"
 
-# "want_drink"/"want_eat" 专属表情还没设计，暂时都借用 happy。"want_play"
-# 曾经也走这张映射表（借用 excited），但"玩"这个表情后来正式设计完成并
-# 接入了固件 handleFace()（见 EXPRESSION_MAP 里的 "play"），_deliver_
-# reminder() 现在对 want_play 直接调 set_expression("play")，不再查这张
-# 表——这里只留 want_drink/want_eat 两条，等它们也有专属表情了，同样只改
-# 这张表的值就行，不用到处找散落的硬编码。
-REMINDER_EXPR_MAP = {
-    "want_drink": "happy",
-    "want_eat": "happy",
-}
+# 三种提醒现在都直接 set_expression() 到各自专属表情（want_play→"play"，
+# want_drink/want_eat→"eat"，见 _deliver_reminder()），不再需要一张
+# "占位表情映射表"——REMINDER_EXPR_MAP 这个中间层已经没有调用点，删掉了。
+
+# 提醒开场的"委屈"过渡（时间到 → 摆头 + 委屈表情 + LED 呼吸灯，见
+# _deliver_reminder()），呼吸灯颜色沿用项目里"委屈"相关反应一贯用的暖白
+# （play_grieved_reaction() 也是暖白，只是那边是 blink 不是 breathe）。
+REMINDER_GRIEVED_LED_BREATHE_PERIOD_MS = 2000
 
 # --- "想出去玩"提醒的天气感知关键词库 ---
 # 只用于 REMINDERS 里 expression=="want_play" 的条目（move_around 这一条，
@@ -777,13 +776,15 @@ def get_weather_keywords(api_key, api_host, count=None):
 
 # --- "想喝水"提醒的关键词库 ---
 # "水"是每次都会说的必要词（用户原话"除了水这个必要的关键词"），剩下的
-# 名额从基础候选池（哪个天气/几点都适用）里随机抽；如果天气查得到，按
-# 气温再加几个候选——热天倾向"渴/冰/凉凉"，冷天倾向"暖/热乎"（跟
+# 名额从基础候选池（哪种天气都适用）里随机抽；如果天气查得到，按气温
+# 再加几个候选——热天倾向"渴/冰/凉凉"，冷天倾向"暖/热乎"（跟
 # get_weather_keywords() 的"冷"/"暖"是同一个温度阈值，但这里用更具体的
 # "想喝口凉的/暖的"而不是单纯"冷"/"暖"，更贴近"想喝水"这个主题）。跟
 # get_weather_keywords() 不同的是，这个函数不依赖天气 API 也能正常工作
 # （天气查不到就只用基础候选池），因为"水"和基础候选词本身就无关天气，
 # 不会因为查不到天气就完全没有变化，所以不需要返回 None 走外层兜底。
+# 故意不接时间段词（跟 get_eat_keywords()/get_weather_keywords() 不
+# 一样）——用户反馈想喝水这条不需要时间段变量，删掉了。
 DRINK_KEYWORD_POOL = ["喝", "杯杯", "咕嘟"]
 DRINK_HOT_WORDS = ["渴", "冰", "凉凉"]
 DRINK_COLD_WORDS = ["暖", "热乎"]
@@ -800,9 +801,6 @@ def get_drink_keywords(api_key, api_host, count=None):
         elif temp_c <= WEATHER_COLD_TEMP_C:
             pool.extend(DRINK_COLD_WORDS)
         print(f"  [天气] {text} {temp_c}°C（想喝水关键词参考这个气温）")
-    time_word = pick_time_of_day_word()
-    if time_word not in pool:
-        pool.append(time_word)
 
     result = ["水"]
     remaining = count - len(result)
@@ -874,12 +872,14 @@ def apply_cute_substitutions(words):
         result.extend(CUTE_WORD_SUBSTITUTIONS.get(w, [w]))
     return result
 
-# --- "想出去玩"提醒播报前的轻微左右摆头 ---
-# 幅度/节奏直接参考小开心（play_xiaokaixin_animation()/XIAOKAIXIN_*），
-# 只是把 pitch 轴的抬头换成 yaw 轴的左右摆动——落差同样是 120（小开心
-# 是 450-330=120），摆动相对当前 yaw 进行（不是绝对角度，因为这一步
-# 之前舵机可能已经因为 scan_for_face()/track_face_servo() 停在任意角度），
-# 摆完落回摆动前的原始 yaw，不会留在偏转的位置上。
+# --- 提醒播报前的轻微左右摆头 ---
+# 三条 REMINDERS 都会用到（想出去玩的天气播报前、想喝水/想吃饭的"委屈"
+# 过渡阶段，见 _deliver_reminder()）。幅度/节奏直接参考小开心
+# （play_xiaokaixin_animation()/XIAOKAIXIN_*），只是把 pitch 轴的抬头
+# 换成 yaw 轴的左右摆动——落差同样是 120（小开心是 450-330=120），摆动
+# 相对当前 yaw 进行（不是绝对角度，因为这一步之前舵机可能已经因为
+# scan_for_face()/track_face_servo() 停在任意角度），摆完落回摆动前的
+# 原始 yaw，不会留在偏转的位置上。
 REMINDER_PLAY_SWING_YAW_AMPLITUDE = 120
 REMINDER_PLAY_SWING_SPEED = 300
 REMINDER_PLAY_SWING_CYCLES = 3
@@ -3649,15 +3649,17 @@ class PuppyEngine:
         - want_play（move_around）：关键词优先用天气现挑
           （get_weather_keywords() 拿不到结果时落回 reminder["keywords"]
           固定列表），说之前先左右摆头（play_reminder_swing_
-          animation()），说完切到"玩"这个表情并一直保持——不能调
-          enter_happy()，那个会直接把表情设回 happy 盖掉刚设的 play，
-          所以这里手动做 enter_happy() 静默分支同款的 state/
-          session_active 记账，只是表情换成 play。
+          animation()），说完切到"玩"这个表情并一直保持。
         - want_drink（drink_water）/want_eat（eat_lunch）：行为逻辑
           完全一样，只是关键词来源不同（get_drink_keywords()/
-          get_eat_keywords()，各自的说明见函数定义），念完固定
-          enter_happy()——这两个纯本地计算，不发请求，不会失败，不需要
-          像 want_play 那样准备"生成失败就退回固定列表"的兜底。"""
+          get_eat_keywords()，各自的说明见函数定义）。时序是"委屈"
+          过渡（摆头 + 委屈表情 + LED 呼吸灯，表达"小狗还在惦记这件事"）
+          → 切"吃饭"表情念关键词 → 说完保持"吃饭"表情。
+        这两条分支说完都不调 enter_happy()——那个会直接把表情设回 happy
+        盖掉刚设的 play/eat，所以改成手动做 enter_happy() 静默分支同款
+        的 state/session_active 记账，只是表情换成对应的自定义表情，
+        一直保持到下面的 10 分钟复查触发 _play_angry_reminder()（会自己
+        切到 angry）或者主人提前离开（下次真正的状态切换会自然换掉）。"""
         label = reminder["label"]
         print(f"[REMINDER] {label}: 检查是否发出提醒...")
         if not self.scan_for_face():
@@ -3689,11 +3691,18 @@ class PuppyEngine:
                 keywords = get_eat_keywords()
             keywords = apply_cute_substitutions(keywords)
 
-            expr = REMINDER_EXPR_MAP.get(expr_type, "happy")
-            set_expression(expr)
+            set_expression("grieved")
+            set_led_mode("breathe", *WARM_WHITE_RGB, period_ms=REMINDER_GRIEVED_LED_BREATHE_PERIOD_MS)
+            play_reminder_swing_animation()
+
+            set_expression("eat")
             set_led_mode("blink", *WARM_WHITE_RGB, period_ms=SORRY_LED_PERIOD_MS)
             self.speak_keywords(keywords)
-            self.enter_happy()
+
+            self.session_active = True
+            self.state = State.HAPPY
+            self.state_enter_time = time.time()
+            set_led_mode("solid", *WARM_WHITE_RGB)
 
         print(f"[REMINDER] {label}: 提醒已发出，{REMINDER_RECHECK_SEC/60:.0f} 分钟后复查主人是否还在")
         self._reminder_recheck_target = time.time() + REMINDER_RECHECK_SEC
