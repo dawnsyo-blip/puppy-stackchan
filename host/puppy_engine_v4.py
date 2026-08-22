@@ -661,6 +661,22 @@ WEATHER_KEYWORD_POOLS = {
     "other":    ["玩", "外面"],
 }
 
+# 每种天气类型里"最能代表这个天气"的词——挑关键词时会优先保证选进最终
+# 结果，剩下的名额才轮到随机（气温词"冷"/"暖"也在随机名额里，优先级排在
+# 天气状况词之后）。cloudy/overcast 词库里没有能一眼看出"多云"/"阴"的
+# 专属词（可用的都是"玩"/"外面"这类什么天气都通用的词），没有强制。
+# 加这条是因为实测踩过一次：下大雨那天随机抽出来的是"玩/暖/外面"，完全
+# 没提到雨，天气感知形同虚设——根源是天气状况词和气温词混在同一个池子里
+# 平等抽样，运气不好就会漏掉真正代表这个天气的词。
+WEATHER_SIGNATURE_WORD = {
+    "sunny": "阳光",
+    "cloudy": None,
+    "overcast": None,
+    "rain": "雨",
+    "snow": "冷",   # 词库里没有专门的"雪"，用"冷"代表下雪天的体感
+    "other": None,
+}
+
 def get_weather_keywords(api_key, api_host, count=WEATHER_KEYWORD_COUNT):
     """查一次杭州实时天气，按天气类型+气温挑一组随机关键词（AAC 风格，
     表达"小狗想去外面玩什么"）。任何失败（没配置 key/host、网络错误、
@@ -690,12 +706,27 @@ def get_weather_keywords(api_key, api_host, count=WEATHER_KEYWORD_COUNT):
         return None
 
     pool = list(WEATHER_KEYWORD_POOLS.get(category, WEATHER_KEYWORD_POOLS["other"]))
+    temp_word = None
     if temp_c <= WEATHER_COLD_TEMP_C:
-        pool.append("冷")
+        temp_word = "冷"
     elif temp_c >= WEATHER_HOT_TEMP_C:
-        pool.append("暖")
-    print(f"  [天气] {now.get('text', '?')} {temp_c}°C → 分类={category}")
-    return random.sample(pool, min(count, len(pool)))
+        temp_word = "暖"
+    if temp_word and temp_word not in pool:
+        pool.append(temp_word)
+
+    # 天气状况词优先占一个名额，剩下的名额（包含气温词在内）才随机抽。
+    result = []
+    signature = WEATHER_SIGNATURE_WORD.get(category)
+    if signature and signature in pool:
+        result.append(signature)
+        pool.remove(signature)
+    remaining = count - len(result)
+    if remaining > 0:
+        result.extend(random.sample(pool, min(remaining, len(pool))))
+    random.shuffle(result)  # 不然天气状况词会永远排在关键词列表第一个，显得死板
+
+    print(f"  [天气] {now.get('text', '?')} {temp_c}°C → 分类={category}，代表词={signature or '无'}")
+    return result
 
 # 提到朋友的名字，后面必须紧跟"玩"——不能只报朋友的名字不说想干什么。
 FRIEND_NAMES = {"边边", "大黄", "耶耶"}
