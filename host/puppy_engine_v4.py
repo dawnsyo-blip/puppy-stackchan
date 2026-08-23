@@ -55,7 +55,7 @@ import math
 import urllib.request
 from pathlib import Path
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 import numpy as np
@@ -575,28 +575,23 @@ EXPRESSION_MAP = {
 # 小狗在指定时间主动提醒主人（喝水/吃饭/走动），提醒后如果 10 分钟内主人
 # 一直没离开座位，小狗表现出"生气"行为催促。只在 host 端实现，固件早就有
 # angry 表情 + LED/舵机/触摸/摄像头这些全部需要的能力，不用改固件。
+#
+# 吃饭是固定时间点（中午/傍晚各一次）；喝水/出去玩不再是固定时间点，改成
+# 从当天第一次成功发出的吃饭提醒开始，按 DYNAMIC_INTERVAL_MIN/MAX_SEC 随机
+# 间隔连续触发、每次随机二选一，直到 DYNAMIC_ACTIVE_HOUR_END 才停（见
+# _check_dynamic_reminder()）——不用固定时间点是因为"每隔1~1.5小时"这种
+# 持续节奏本身就跟"某个固定时刻"是两种不同的调度模型，硬塞进 REMINDERS
+# 这张固定时间表反而别扭。
 REMINDERS = [
     {
-        "hour": 10, "minute": 0,
-        "expression": "want_drink",
-        "label": "drink_water",
-    },
-    {
-        "hour": 12, "minute": 0,
+        "hour": 11, "minute": 30,
         "expression": "want_eat",
         "label": "eat_lunch",
     },
     {
-        "hour": 15, "minute": 30,
-        "expression": "want_play",
-        "keywords": ["出去", "走", "动"],   # get_weather_keywords() 失败时
-                                            # 的兜底——这条还会发天气 API
-                                            # 请求，会失败；want_drink/
-                                            # want_eat 的关键词生成是纯本地
-                                            # 计算，不会失败，不需要兜底，
-                                            # 这两条的 REMINDERS 条目就不用
-                                            # 再带 keywords 字段了。
-        "label": "move_around",
+        "hour": 17, "minute": 30,
+        "expression": "want_eat",
+        "label": "eat_dinner",
     },
 ]
 
@@ -606,6 +601,46 @@ REMINDER_RECHECK_SEC = 600         # 提醒发出后 10 分钟复查主人是否
 REMINDER_SAMPLE_INTERVAL_SEC = 60  # 复查期间每 60 秒采样一次人脸（远低于会
                                     # 触发 ESP32 堆碎片化重启的高频轮询阈值）
 REMINDER_PRESENCE_THRESHOLD = 0.7  # 采样中 ≥70% 检测到人脸 → 判定"一直在"
+
+# --- 喝水/出去玩的动态调度 ---
+# 不进 REMINDERS 固定时间表，靠 self._dynamic_next_time（下一次触发的
+# time.time() 时间戳）驱动，第一次赋值发生在 _deliver_reminder() 里某条
+# want_eat 成功发出之后（见该函数末尾），之后每次触发完（不管有没有真的
+# 找到人）都会重新排一次下一次的时间，形成持续的链条。
+#
+# 活跃时段限制在白天——晚上21点后/早上8点前不触发，避免深夜/临睡前还在
+# 提醒喝水遛弯；这个时间范围是没有实机验证过的默认猜测，具体几点合适要看
+# 实际作息反馈调整。落在活跃时段之外时不会攒着一开门就立刻触发，而是重新
+# 从活跃时段起点开始算一次随机间隔（见 _check_dynamic_reminder()），避免
+# "憋了一晚上早上8点整准时响"这种不像随机节奏的效果。
+DYNAMIC_ACTIVE_HOUR_START = 8
+DYNAMIC_ACTIVE_HOUR_END = 21
+DYNAMIC_INTERVAL_MIN_SEC = 3600     # 1 小时
+DYNAMIC_INTERVAL_MAX_SEC = 5400     # 1.5 小时
+
+# 喝水/出去玩各自的提醒模板，跟 REMINDERS 里的条目是同一种 dict 形状，
+# _deliver_reminder() 不关心调用方是固定时间表还是动态调度器传进来的。
+DYNAMIC_REMINDER_TEMPLATES = {
+    "drink_water": {
+        "expression": "want_drink",
+        "label": "drink_water",
+    },
+    "move_around": {
+        "expression": "want_play",
+        "keywords": ["出去", "走", "动"],   # get_weather_keywords() 失败时
+                                            # 的兜底，见旧 REMINDERS 条目里
+                                            # 同一条注释
+        "label": "move_around",
+    },
+}
+
+
+def _next_dynamic_delay():
+    return random.uniform(DYNAMIC_INTERVAL_MIN_SEC, DYNAMIC_INTERVAL_MAX_SEC)
+
+
+def _in_dynamic_active_hours(dt):
+    return DYNAMIC_ACTIVE_HOUR_START <= dt.hour < DYNAMIC_ACTIVE_HOUR_END
 
 # 三种提醒现在都直接 set_expression() 到各自专属表情（want_play→"play"，
 # want_drink/want_eat→"eat"，见 _deliver_reminder()），不再需要一张
@@ -2157,6 +2192,9 @@ class PuppyEngine:
         self._reminder_presence_samples: list[bool] = []
         self._reminder_last_sample_time: float = 0.0
         self._reminder_pending_label: str | None = None
+        # 喝水/出去玩动态链条的下一次触发时间戳，None = 链条还没开始（当天
+        # 还没有一条吃饭提醒成功发出过），见 _check_dynamic_reminder()。
+        self._dynamic_next_time: float | None = None
 
         print("[引擎] 小狗行为引擎 v4 启动！")
         print(f"[引擎] 当前状态: {self.state.value}")
@@ -2166,7 +2204,9 @@ class PuppyEngine:
         print("[引擎] 呼唤\"小狗小狗\" → 开心")
         print("[引擎] 说\"我们玩捉迷藏吧\" → 捉迷藏找物品游戏（游戏中长按头顶可中途退出）")
         print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应（隐私状态下忽略语音）")
-        print(f"[引擎] 定时提醒 {len(REMINDERS)} 条，发出后 {REMINDER_RECHECK_SEC/60:.0f} 分钟内主人一直在 → 生气催促（双击头顶原谅）")
+        print(f"[引擎] 固定时间提醒 {len(REMINDERS)} 条（吃饭），发出后 {REMINDER_RECHECK_SEC/60:.0f} 分钟内主人一直在 → 生气催促（双击头顶原谅）")
+        print(f"[引擎] 喝水/出去玩：吃饭提醒发出后开始，{DYNAMIC_INTERVAL_MIN_SEC/60:.0f}~{DYNAMIC_INTERVAL_MAX_SEC/60:.0f} 分钟随机间隔触发，"
+              f"{DYNAMIC_ACTIVE_HOUR_START}:00~{DYNAMIC_ACTIVE_HOUR_END}:00 活跃")
         print("[引擎] Ctrl+C 退出\n")
 
     # ---------- 状态转移 ----------
@@ -3636,6 +3676,36 @@ class PuppyEngine:
                 self._deliver_reminder(reminder)
                 break
 
+    def _check_dynamic_reminder(self):
+        """喝水/出去玩不是固定时间点，是从当天第一次吃饭提醒成功发出开始
+        （self._dynamic_next_time 被 _deliver_reminder() 设成非 None）按
+        DYNAMIC_INTERVAL_MIN/MAX_SEC 随机间隔连续触发的一条链——每次触发
+        （不管有没有真的找到人）都会重新排一次下一次时间，链条本身不会
+        断，只受活跃时段和"是否有其它提醒正在复查中"两个条件节流。跟
+        _check_reminders() 共用 self._reminder_recheck_target 这个互斥
+        （非 None 时跳过），避免吃饭/喝水/出去玩三条提醒的 10 分钟复查
+        窗口互相打断。"""
+        if self._dynamic_next_time is None or self._reminder_recheck_target is not None:
+            return
+
+        now = time.time()
+        if now < self._dynamic_next_time:
+            return
+
+        now_dt = datetime.now()
+        if not _in_dynamic_active_hours(now_dt):
+            next_dt = now_dt.replace(hour=DYNAMIC_ACTIVE_HOUR_START, minute=0,
+                                      second=0, microsecond=0)
+            if now_dt.hour >= DYNAMIC_ACTIVE_HOUR_END:
+                next_dt += timedelta(days=1)
+            self._dynamic_next_time = next_dt.timestamp() + _next_dynamic_delay()
+            return
+
+        kind = random.choice(list(DYNAMIC_REMINDER_TEMPLATES))
+        print(f"[REMINDER] 动态链条命中，本次随机选中: {kind}")
+        self._deliver_reminder(DYNAMIC_REMINDER_TEMPLATES[kind])
+        self._dynamic_next_time = time.time() + _next_dynamic_delay()
+
     def _deliver_reminder(self, reminder):
         """发出一条提醒：扫描确认人在场 → 切表情/摆头 + 念关键词 → 收尾 →
         启动 10 分钟复查计时。人不在时直接放弃，不进复查——催促一个不在场
@@ -3703,6 +3773,10 @@ class PuppyEngine:
             self.state = State.HAPPY
             self.state_enter_time = time.time()
             set_led_mode("solid", *WARM_WHITE_RGB)
+
+        if expr_type == "want_eat" and self._dynamic_next_time is None:
+            self._dynamic_next_time = time.time() + _next_dynamic_delay()
+            print(f"[REMINDER] {label}: 吃饭提醒已发出，喝水/出去玩的随机提醒链条从现在开始")
 
         print(f"[REMINDER] {label}: 提醒已发出，{REMINDER_RECHECK_SEC/60:.0f} 分钟后复查主人是否还在")
         self._reminder_recheck_target = time.time() + REMINDER_RECHECK_SEC
@@ -4122,6 +4196,7 @@ class PuppyEngine:
         self._reminder_recheck_tick()
         if self.state in (State.IDLE, State.HAPPY):
             self._check_reminders()
+            self._check_dynamic_reminder()
 
         # CURIOUS / THINKING 是瞬时状态：run_conversation_turn() 会同步跑完
         # 录音→识别→LLM→分支应对的整个过程才返回，tick() 观察不到这两个状态。
