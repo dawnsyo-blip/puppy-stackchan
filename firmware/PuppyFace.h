@@ -23,13 +23,14 @@
  *                         下垂 DEAD_EAR_DROOP_DEG；由碰屏幕后的手势扫描
  *                         窗口检测到"手指枪"触发，见 puppy_engine_v4.py）
  *   custom "angry"     → 生气（两条弯度不同的不对称眉毛：左眉上拱的弧线，
- *                         右眉是朝鼻子一侧压低的直线；设计中，还没接入
- *                         handleFace()/host）
+ *                         右眉是朝鼻子一侧压低的直线；由定时提醒发出后
+ *                         10 分钟主人仍在场触发，见 puppy_engine_v4.py
+ *                         的 _play_angry_reminder()）
  *   custom "eat"       → 吃饭（嘴巴下方一个口水巾，巾上一个骨头图案；
- *                         设计中，还没接入 handleFace()/host）
+ *                         由喝水/吃饭定时提醒触发，见 _deliver_reminder()）
  *   custom "play"      → 玩（右眼静态"<"、嘴巴下方挂一个小骨头吊牌+项链、
- *                         屏幕左上/右上角三朵循环下落又消失的花；设计中，
- *                         还没接入 handleFace()/host）
+ *                         屏幕左上/右上角三朵循环下落又消失的花；由"想出去
+ *                         玩"定时提醒触发，见 _deliver_reminder()）
  *
  * 表情切换时，尺寸类参数（耳朵长宽、鼻子/嘴巴大小、旋转角度）会用
  * FloatTransition 在 500ms 内线性插值过渡；开心/好奇/思考时耳朵左右

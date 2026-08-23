@@ -19,12 +19,14 @@
 - `firmware/config.h` — WiFi 配置（SSID: DAWN, 密码: 12121212）
 - `host/puppy_engine_v4.py` — 行为状态机（人脸检测、触摸、空闲计时、语音唤醒），当前最新版
 - `host/voice_test.py` — 语音链路独立测试（录音→STT→LLM→TTS→播放）
-- `表情映射v8.xlsx`（仓库根目录，不在 git 里）— 每个状态/动作的触发/退出条件、
+- `表情映射v9.xlsx`（仓库根目录，不在 git 里）— 每个状态/动作的触发/退出条件、
   表情、舵机、LED、声音规格表，是行为设计的权威参考。这份是跟当前代码同步过的
   （v6 跟代码对不上，改完存成 v7 删掉 v6；v7 只覆盖最早的10个基础状态，后来
   加的触摸手势"小开心"、捉迷藏游戏各阶段、`grieved`/`peekaboo` 两个新表情都
-  没跟进，改完存成 v8 并删掉了 v7），改状态机行为时应该先查这张表；如果代码
-  要改成跟表不一致的行为，应该同时更新表格，不要让两边再次脱节。
+  没跟进，改完存成 v8 并删掉了 v7；v8 又漏了"定时提醒 + 生气催促"整个功能
+  （`angry`/`eat`/`play` 三个表情、两条动作行），改完存成 v9 并删掉了 v8），
+  改状态机行为时应该先查这张表；如果代码要改成跟表不一致的行为，应该同时
+  更新表格，不要让两边再次脱节。
 
 ## HTTP API
 - `/face?expr=<表情>` — 切换表情（neutral/happy/sleepy/curious/sorry/thinking/excited/privacy/grieved/peekaboo）
@@ -406,7 +408,7 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   真正的完整状态切换才会恢复，中间可能是好几轮对话的时间。以后新增任何
   临时借用 LED（或者其它"应该跟随状态持续"的效果）的代码，都要问一句"用完
   之后谁负责把它还回去"。
-- **当前各状态的 LED 常驻效果**（跟`表情映射v8.xlsx`保持同步）：常态
+- **当前各状态的 LED 常驻效果**（跟`表情映射v9.xlsx`保持同步）：常态
   （IDLE）是完全关闭、不点亮（`play_idle_animation()` 用 `set_led(off=True)`）；
   开心（HAPPY）是暖白灯常亮（`set_led_mode("solid", *WARM_WHITE_RGB)`，不是
   之前的闪烁）。`setup()` 里 `M5StackChan.begin()` 之后立刻加了
@@ -1134,7 +1136,7 @@ Animation()` 这个固件函数也一并删掉（删掉触发源以后已经没�
   JITTER`），层与层之间插一个 yaw 回正的过渡点（不拍照）；转动速度随扫描
   进度从 `GAME_SCAN_SPEED_MIN`(150) 线性升到 `GAME_SCAN_SPEED_MAX`(450)，
   后者仍然低于项目里用过的最快值（`EXCITED_YAW_SPEED`=500）。
-- 这个功能已经补进了 `表情映射v8.xlsx`（"捉迷藏-看物品/倒计时/扫描搜索/
+- 这个功能已经补进了 `表情映射v9.xlsx`（"捉迷藏-看物品/倒计时/扫描搜索/
   找到/没找到"五个"游戏"类型的行，外加 `grieved`/`peekaboo` 两个"表情"类型
   的行），不再是只在 `CLAUDE.md` 里记录、表格脱节的状态。
 - **好奇（Doubt）表情跟随舵机 yaw 镜像歪头方向**（`doubtMirrorSign()`，
@@ -1158,6 +1160,123 @@ Animation()` 这个固件函数也一并删掉（删掉触发源以后已经没�
   交给后续 `tick()` 的被动检测接管。以后任何"游戏/动画结束后要不要重新
   找人脸"的收尾场景，如果紧跟在一段本身就该被看到、不该被打断的表情
   后面，都应该考虑这种轻量确认，而不是无脑复用 `_settle_happy()`。
+
+## 定时提醒 + 生气催促
+`puppy_engine_v4.py` 里的一个行为：小狗在指定时间主动提醒主人（喝水/吃饭/
+出去玩），提醒发出后如果 10 分钟内主人一直没离开，小狗会"生气"催促，直到
+被原谅。只在 host 端实现——固件早就有 `angry`/`eat`/`play` 这三个自定义
+表情（见 `PuppyFace.h` 头部注释）和 LED/舵机/触摸/摄像头这些全部需要的
+能力，不用改固件。
+
+- **两种调度方式并存**：`REMINDERS`（吃饭）是固定时间点，`eat_lunch`
+  11:30、`eat_dinner` 17:30，到点前后 `REMINDER_WINDOW_SEC`（2分钟）窗口
+  内算命中；`DYNAMIC_REMINDER_TEMPLATES`（喝水/出去玩）不进这张固定时间
+  表，而是从当天第一次成功发出的吃饭提醒开始（`self._dynamic_next_time`
+  被 `_deliver_reminder()` 设成非 None），按 `DYNAMIC_INTERVAL_MIN/
+  MAX_SEC`（1~1.5小时）随机间隔连续触发，每次触发时两者随机二选一，直到
+  `DYNAMIC_ACTIVE_HOUR_END`（21点）才停；超出 `DYNAMIC_ACTIVE_HOUR_
+  START/END`（8:00~21:00）活跃时段时不会攒着一开门就响一次凑数，而是
+  重新从时段起点算一次随机间隔。这两套调度共用同一个互斥：`self._
+  reminder_recheck_target` 非 None（有一条提醒正在 10 分钟复查中）时，
+  `_check_reminders()`/`_check_dynamic_reminder()` 都会跳过，避免三条
+  提醒的复查窗口互相打断。活跃时段范围是没有实机验证过的默认猜测，具体
+  几点合适要看实际作息反馈调整。
+
+- **`_deliver_reminder(reminder)` 是三条提醒共用的发出逻辑**：先
+  `scan_for_face()` 确认人在场，没找到直接放弃、不进复查（催促一个不在
+  场的人没有意义）。两条分支：
+  - `want_play`（想出去玩）：关键词优先用 `get_weather_keywords()`（和
+    风天气 QWeather 现挑，失败退回固定兜底 `["出去","走","动"]`）→ 好友
+    名字（边边/大黄/耶耶）后面强制补一个"玩"字（`enforce_friend_needs_
+    play()`）→ 摆头（`play_reminder_swing_animation()`，参数参考"小
+    开心"：振幅120，3次往复，速度300）→ 念关键词 → 切"玩(play)"表情并
+    保持。
+  - `want_drink`/`want_eat`（喝水/吃饭，两者走同一套时序）：先"委屈"
+    过渡（同款摆头 + `grieved` 表情 + LED 呼吸灯，表达"小狗还在惦记这件
+    事"）→ 切"吃饭(eat)"表情 + LED 闪烁 + 念关键词 → 说完保持"吃饭"
+    表情。
+  两条分支说完都**不调 `enter_happy()`**——那个会直接把表情设回 happy
+  盖掉刚设的 play/eat，所以手动复制它的静默切换记账（`session_active=
+  True`/`state=State.HAPPY`/`state_enter_time`），表情留在 play/eat 上，
+  一直保持到 10 分钟复查触发 `_play_angry_reminder()`（会自己切到
+  angry）或者主人提前离开。
+
+- **关键词库设计**：喝水必含"水"，候选池（喝/杯杯/咕嘟）按当前气温追加
+  （`get_drink_keywords()`，≥30℃追加渴/冰/凉凉，≤5℃追加暖/热乎，来自
+  同一个 `_fetch_weather_now()` 天气查询），不含时间段词（用户明确要求
+  删掉）；吃饭必含"饭饭"，候选池（时间/肚肚/空/肉肉/零食/香香）+可选
+  时间段词（`get_eat_keywords()`）。三条提醒的关键词最终都会过一遍
+  `apply_cute_substitutions()`（AAC 叠词替换："饭"/"吃饭"→"饭饭"，"饿"
+  →"肚肚"+"空"）。`pick_time_of_day_word()` 按当前小时挑一个候选词
+  （早上5-10点"morning"、10-18点"亮亮"、18-24点/0-5点"暗暗"），只是放
+  进随机抽样池子里的"候选"，不保证一定会说出来（跟气温词"冷"/"暖"同一
+  个地位）。每次挑词数量在 `WEATHER_KEYWORD_COUNT_MIN/MAX`（2~4个）之间
+  随机，不固定为3个。
+
+- **QWeather（和风天气）接入**：免费版账号是"API Host"子域名架构
+  （`https://{host}/v7/weather/now`），不是共享的 `devapi.qweather.com`
+  （那个域名会返回 `403 Invalid Host`）；免费版实测没有 GeoAPI（城市名
+  查 LocationID）权限，所以不查城市名，杭州的 LocationID 直接写死
+  （`WEATHER_LOCATION_ID = "101210101"`，本身不会变，没必要每次先查一
+  遍）。图标代码按范围粗分类：100/150=晴、101-103/151-153=多云、
+  104/154=阴、300-318=雨、400-499=雪、500+=雾霾沙尘等其它
+  （`_classify_weather_icon()`）。`WEATHER_SIGNATURE_WORD` 给部分分类
+  （晴"阳光"、雨"雨"、雪"冷"）保证一个"代表词"提前占好一个位置再随机
+  填剩下的、最后整体洗牌——不这样做的话 `random.sample()` 会把天气状况
+  词和气温词当成同等概率的候选，实测出现过大雨天小狗说"玩/暖/外面"完全
+  没提雨的情况。`get_drink_keywords()` 的气温词沿用同一个
+  `_fetch_weather_now()` 辅助函数，不重复写一遍请求/解析逻辑。天气 API
+  key 从 `.env` 的 `QWEATHER_API_KEY`/`QWEATHER_API_HOST` 读取，没配置
+  或调用失败统一返回 None，调用方（`get_weather_keywords()`）退化成
+  固定兜底文本，不影响可用性——跟捉迷藏游戏里 Qwen-VL 的"可选增强，不是
+  硬依赖"是同一个架构模式。
+
+- **生气（`_play_angry_reminder()`）序列**：切"生气(angry)"表情 + LED
+  闪红灯3次（`ANGRY_LED_BLINK_COUNT`，400ms周期）再常亮 → 静止拍照确认
+  正脸（轮询 `detect_face_once()`，**不用** `scan_for_face()`——那个会
+  转头扫描，会跟接下来"左转45°"这个动作混在一起、也会临时把表情切成
+  "curious"）→ 找到后 `track_face_servo()` 对齐一次、停 1 秒
+  （`ANGRY_FACE_FOUND_DELAY_SEC`）→ yaw 在当前角度基础上 `+
+  ANGRY_YAW_TURN`（200，约45°，"+"=向左转，这是本项目里少数几个已经用
+  大幅度实测确认过符号的方向）转动，**显式带上当前 pitch 一起传**——
+  固件 `handleServo()` 有个 bug：省略的参数不是保持当前角度，而是重置
+  成硬编码默认值（`pitch` 默认450、`yaw` 默认0），只传 yaw 会把 pitch
+  意外拉回450，这个 bug 目前只在生气转头这里显式绕开了（读当前 pitch
+  再原样传回去），项目里其它单独传 yaw 的调用（比如
+  `track_face_servo()`）理论上同样受影响，只是还没有具体症状触发去修。
+  转动本身是非阻塞的（`move_servo()`），之后轮询 `/status` 确认真的转
+  到位（容差 `ANGRY_YAW_SETTLE_TOLERANCE`=30，超时
+  `ANGRY_YAW_SETTLE_TIMEOUT_SEC`=3.0s 放弃等待、按当前角度继续）——
+  这个轮询是必须的，不能对着非阻塞调用盲等一个固定时长就去监听双击，
+  不然双击可能在转动真正播完之前就把它打断，视觉上转动几乎看不出来
+  （跟"装死"抬头动作踩过的坑是同一类问题）。原谅只认**头顶双击**（一次）
+  或**头顶长按**（阈值跟 `PRIVACY_HOLD_SEC` 一样，双击判定不到位时的
+  兜底）：`_angry_forgive()` 回正（`go_home()`）、保持3秒生气、
+  `mic_stream.take_utterance()` 把生气期间队列里堆积的语音直接丢弃
+  （避免"生气"结束后突然冒出一段旧语音被当成刚说的话处理），最后
+  `enter_happy()`。**整个序列是一次同步阻塞方法**（跟
+  `play_game_hide_seek()` 是同一种架构），执行期间 `tick()` 完全停摆，
+  触摸判断直接读 `get_touch()` 原始值（`_angry_double_tap_check()`），
+  不走 `self.check_touch()`/`handle_touch_trigger()` 那一整套——那套
+  是给正常 `tick()` 循环设计的，会顺带触发跟生气无关的副作用（碰屏幕→
+  小开心、双击→兴奋的全局手势分发等）。生气期间不播语音（不调
+  `speak_keywords()`），所以 `handle_touch_trigger()` 不需要加
+  `State.ANGRY` 分支——唯一可能在生气期间被调用的路径是
+  `wait_for_playback()` 内部的轮询，而生气序列完全不经过那条路径。
+  以后如果给生气加语音播报，要重新检查这一条是否还成立。
+
+- **`reminder_test_driver.py`**（不进 git，跟 `voice_test.py` 等测试
+  脚本同一惯例）可以跳过时间匹配/10分钟等待，直接手动触发某一条提醒或
+  生气序列，方便测试：
+  ```
+  python host/reminder_test_driver.py deliver eat_lunch
+  python host/reminder_test_driver.py deliver drink_water
+  python host/reminder_test_driver.py angry
+  ```
+  `deliver [label]` 先查 `REMINDERS`（固定时间表），查不到再查
+  `DYNAMIC_REMINDER_TEMPLATES`（动态调度模板），两边都直接喂给
+  `_deliver_reminder()`，绕开真正的调度逻辑，只测"发出这一条提醒"本身
+  的效果。
 
 ## 编译 / 烧录 / 验证流程
 本机的 `arduino-cli` 不在 PATH 里，可执行文件在
@@ -1253,3 +1372,59 @@ Animation()` 这个固件函数也一并删掉（删掉触发源以后已经没�
   `puppy_engine_v4.py` 里的某个函数验证行为，这次调试关机音效/摇晃检测时
   用过好几次这个手法）都要显式用这个路径调用，不能依赖 `python`/`python3`
   这些裸命令解析到正确的环境。
+- **`arduino-cli monitor` 有时会稳定返回空的串口捕获**（哪怕设备真的在
+  这段时间里重启/打印过内容），原因没有深挖清楚（疑似跟命令行工具对它
+  stdout 的重定向/后台化方式有关），遇到这种情况改用 PowerShell 原生的
+  `System.IO.Ports.SerialPort` 类更可靠，能确认稳定拿到真实数据（排查
+  固件是不是刷错、`/play` 连不上设备这两次都是靠它才拿到关键证据）。用
+  法要点：`ReadTimeout` 设一个不太长的值（比如500ms）配合 `try/catch`
+  轮询 `ReadLine()`，**必须同时捕获 `[System.TimeoutException]`（正常的
+  "这一轮没数据"）和 `[System.IO.IOException]`（端口被物理拔断/设备
+  重置导致端口关闭）**——只接 `TimeoutException` 的话，端口一旦在读取
+  中途关闭，会陷入一个疯狂抛异常的死循环，产出几 MB 的错误堆栈刷屏（真
+  实踩过一次）。用之前要确认没有 `arduino-cli monitor`/别的进程占着串口
+  （查一下有没有相关进程，`arduino-cli upload` 同理），这个类不会跟它们
+  抢，但两边同时开着谁都读不到完整数据。
+- **设备"开机行为看起来不对"时，先确认刷的到底是哪个 sketch**，不要想
+  当然是 `firmware.ino`。排查过一次"开机不显示 Starting/WiFi 这些进度
+  文字，一插电就直接是小狗表情"的问题，一开始以为是显示逻辑的 bug，最后
+  靠抓串口日志看到一行 `expr_preview.ino` 专属的调试字符串
+  （`[预览] 切到表情: neutral`，`firmware.ino` 里没有这行）才确认设备
+  当时烧的其实是 `expr_preview.ino`（为了快速设计新表情用的最小 sketch，
+  见"设计全新表情"一节）——不含 WiFi/HTTP，固件本身没有联网逻辑，自然
+  也没有开机进度文字。这类"行为对不上预期"的问题，花点时间先确认设备
+  当前实际运行的固件版本，比直接扎进代码逻辑排查更快。
+- **`/play` 突然没声音，且没有任何报错**（host 端 `start_play()` 返回
+  成功，`/status` 的 `playing` 字段却一直是 `false`，从没变过 `true`）
+  ——这是"设备连不上 host 本地那个音频 HTTP 服务器（`ensure_audio_
+  server()`，端口 `AUDIO_SERVER_PORT`=8090）"的固定症状，不是代码
+  bug，固定诊断方法：抓设备串口日志，看有没有一行 `[play] fetch
+  failed: url=... code=-1`（`playTaskFn()` 打的，`code=-1` 是 ESP32
+  HTTPClient 库的 `HTTPC_ERROR_CONNECTION_REFUSED`，但实际含义比字面
+  更宽，只要 `WiFiClient::connect()` 没成功都会归到这个码，不一定真的
+  是"连接被拒绝"），同时确认本机侧一切正常（`netstat` 看 8090 真的在
+  `LISTENING`；`curl` 自己的热点 IP 能拿到200）——如果两边都正常但设备
+  就是连不上，问题出在本机到热点这段网络路径上，已知会导致这个症状的
+  三个独立原因，按改动成本从低到高依次排查：
+  1. **Windows 移动热点（ICS）本身的状态问题**：连热点的设备访问外网
+     没问题，但"反过来连电脑自己开的端口"这条通路有时会莫名其妙断掉，
+     跟防火墙规则对不对没关系。关一次热点再开通常能重置这个状态，不
+     需要管理员权限，是成本最低的第一步尝试。
+  2. **Windows 防火墙没放行入站端口**：`netsh advfirewall firewall
+     add rule name="StackChan Audio Server" dir=in action=allow
+     protocol=TCP localport=8090 profile=any`，需要管理员权限，本项目
+     的 Claude Code 会话没有，只能请用户自己在管理员终端跑或者走
+     "Windows Defender 防火墙"GUI。
+  3. **第三方防火墙/安全软件**（比如本机装的火绒 Huorong，`HipsDaemon`/
+     `HipsTray` 进程）：它的网络防火墙是一套完全独立于 Windows 自带
+     防火墙的引擎，`netsh advfirewall`/`Get-NetFirewallRule` 这些工具
+     只能看到 Windows 自带防火墙那一层，看不到火绒自己的拦截逻辑；
+     `Get-CimInstance -Namespace root/SecurityCenter2 -ClassName
+     FirewallProduct` 也不一定能查到它（火绒不一定往这个 WMI 接口
+     注册，之前排查时就被漏掉过一次）。真要排查得让用户自己打开火绒
+     的"网络防火墙"→"联网记录"/"拦截日志"，搜 `python.exe` 或端口
+     `8090` 看有没有拦截记录，或者查"入站规则"/"程序规则"里
+     `python.exe` 是不是被设成了拒绝。
+  三个原因目前没办法只凭本机侧的命令行检查互相区分清楚（表现完全一
+  样），只能按上面的顺序依次尝试；确认是防火墙类问题（2/3）而不是
+  ICS（1）以后，规则一旦配置对了通常就长期有效，不会每次都要重新配。
