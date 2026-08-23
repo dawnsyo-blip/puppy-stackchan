@@ -19,14 +19,16 @@
 - `firmware/config.h` — WiFi 配置（SSID: DAWN, 密码: 12121212）
 - `host/puppy_engine_v4.py` — 行为状态机（人脸检测、触摸、空闲计时、语音唤醒），当前最新版
 - `host/voice_test.py` — 语音链路独立测试（录音→STT→LLM→TTS→播放）
-- `表情映射v9.xlsx`（仓库根目录，不在 git 里）— 每个状态/动作的触发/退出条件、
+- `表情映射v10.xlsx`（仓库根目录，不在 git 里）— 每个状态/动作的触发/退出条件、
   表情、舵机、LED、声音规格表，是行为设计的权威参考。这份是跟当前代码同步过的
   （v6 跟代码对不上，改完存成 v7 删掉 v6；v7 只覆盖最早的10个基础状态，后来
   加的触摸手势"小开心"、捉迷藏游戏各阶段、`grieved`/`peekaboo` 两个新表情都
   没跟进，改完存成 v8 并删掉了 v7；v8 又漏了"定时提醒 + 生气催促"整个功能
-  （`angry`/`eat`/`play` 三个表情、两条动作行），改完存成 v9 并删掉了 v8），
-  改状态机行为时应该先查这张表；如果代码要改成跟表不一致的行为，应该同时
-  更新表格，不要让两边再次脱节。
+  （`angry`/`eat`/`play` 三个表情、两条动作行），改完存成 v9 并删掉了 v8；
+  v9 又漏了"再见"手势（挥手/五指捏住再放开 → 委屈 → 隐私，见下面同名一节）
+  这个新增的手势扫描窗口触发路径，改完存成 v10 并删掉了 v9），改状态机行为
+  时应该先查这张表；如果代码要改成跟表不一致的行为，应该同时更新表格，不要
+  让两边再次脱节。
 
 ## HTTP API
 - `/face?expr=<表情>` — 切换表情（neutral/happy/sleepy/curious/sorry/thinking/excited/privacy/grieved/peekaboo）
@@ -408,7 +410,7 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   真正的完整状态切换才会恢复，中间可能是好几轮对话的时间。以后新增任何
   临时借用 LED（或者其它"应该跟随状态持续"的效果）的代码，都要问一句"用完
   之后谁负责把它还回去"。
-- **当前各状态的 LED 常驻效果**（跟`表情映射v9.xlsx`保持同步）：常态
+- **当前各状态的 LED 常驻效果**（跟`表情映射v10.xlsx`保持同步）：常态
   （IDLE）是完全关闭、不点亮（`play_idle_animation()` 用 `set_led(off=True)`）；
   开心（HAPPY）是暖白灯常亮（`set_led_mode("solid", *WARM_WHITE_RGB)`，不是
   之前的闪烁）。`setup()` 里 `M5StackChan.begin()` 之后立刻加了
@@ -973,6 +975,78 @@ host 端的触发逻辑接上，烧录真正的主固件——这两步不要在
   手型/光线条件下是否依然稳定，还可以继续观察调整，但核心链路已经
   确认可用，不再是原型验证阶段。
 
+## "再见"手势（挥手 / 五指捏住再放开）检测
+跟"手指枪"（上一节）共用同一个手势扫描窗口（碰屏幕"小开心"之后的
+`GESTURE_WINDOW_SEC` 窗口期）、同一次 `/camera` 拍照 + Hand Landmarker
+检测结果——`check_gesture()` 一次检测后两种手势的判定都跑一遍，不重复
+拍照/推理，谁先确认就处理谁，不会同一帧里两个都触发。识别到之后按要求
+先"委屈"过渡一下、再转入"隐私"：`enter_goodbye()` 播 `play_grieved_
+reaction()`（捉迷藏没找到目标那套现成的动作参数：微低头 + 暖白闪烁，只是
+表情换成 `grieved`），停留 `GOODBYE_GRIEVED_HOLD_SEC`(1.5s) 让这个过渡
+表情被看清，再 `transition(State.PRIVACY)`——那条路径本来就会播
+`play_privacy_animation()`（转隐私姿势）+ `_settle_privacy_mic()`（等
+舵机转到位、丢弃转动噪音可能误触发的语音），跟平常进隐私是同一条路径，
+没有另外重写一遍。
+
+判定逻辑是模块级函数 `classify_open_pinch_pose()`（`puppy_engine_v4.py`,
+跟 `host/gesture_test.py` 诊断脚本共用同一份实现，不要各自维护，见上面
+"手指枪"一节记过的同一条教训），同样用**距离比例**而不是绝对坐标差
+（原因见 `classify_finger_gun_pose()` 顶部的详细说明：绝对坐标差对手离
+摄像头的距离/画面里的旋转角度太敏感），同样没有实机验证过——先给一版
+能跑的默认值，等实机测过挥手/捏放的真实手感再调。
+
+- **两种触发方式，判定思路不一样**：
+  - **挥手**：`classify_open_pinch_pose()` 判定"张开手掌"（食指/中指/
+    无名指/小指四指的伸展比例都超过 `FINGER_SPREAD_OPEN_RATIO`，比手指枪
+    只要求食指一根更严格），`check_gesture()` 只在张开手掌的帧才把手掌
+    水平位置（`palm_x`，用 landmark 9 中指根部而不是指尖，指尖在挥手时
+    摆动幅度更大、更容易被单帧噪声带偏）计入 `self.wave_x_history`
+    （按 `WAVE_HISTORY_SEC` 滚动裁剪）。`_count_wave_swings()` 是经典的
+    "折线摆动计数"算法：从上一个极值点开始，水平位移超过振幅阈值（相对
+    当时手掌尺度 `hand_scale` 的比例 `WAVE_MIN_AMPLITUDE_RATIO`，不是
+    固定像素值，手离摄像头远近不同不需要重新调参数）才算移动到新的极值
+    点，方向跟上一段相反才计一次摆动，连续反向摆动够 `WAVE_MIN_SWINGS`
+    (2) 次才触发。只在"张开"的帧累积样本，是为了避免"五指捏住再放开"
+    手势本身的移动被误算成挥手的一次摆动。
+  - **五指捏住再放开**：`classify_open_pinch_pose()` 另外算一个"指尖
+    散开比例"——五个指尖（拇指4/食指8/中指12/无名指16/小指20）到它们
+    质心的平均距离，相对 `hand_scale` 的比例；小于 `PINCH_TIP_SPREAD_
+    RATIO`(0.35) 算"捏拢"，大于 `RELEASE_TIP_SPREAD_RATIO`(0.55) 算
+    "放开"——**两个阈值故意留出间隔，不用同一个阈值来回判**，不然手指
+    停在临界值附近会来回抖动着重复触发（跟游戏里`GAME_HIST_THRESHOLD`
+    这类"避免临界值抖动"的教训是同一个思路）。`check_gesture()` 用
+    `self.goodbye_pinch_since` 记"什么时候看到的捏拢"：非 0 表示"已经
+    捏拢、正在等放开"，在 `PINCH_RELEASE_TIMEOUT_SEC`(3s) 内看到"放开"
+    才算一次完整手势；超时还没放开，这次捏拢作废，要重新捏一次才算数,
+    不会无限期地等一个很久以前的捏拢。
+- **窗口关闭时两类手势的残留状态要一起清干净**：手指枪的连续帧计数
+  （`self.finger_gun_count`）之前已经在窗口自然过期时被清零，这次把
+  挥手历史（`self.wave_x_history`）和"已捏拢等放开"标记
+  （`self.goodbye_pinch_since`）也一起收进了新增的 `_reset_gesture_
+  scan_state()`，`check_gesture()` 检测成功主动关闭窗口、以及 `tick()`
+  里窗口自然过期这两条路径都改成调这一个方法，不再各自零散清理——道理
+  跟手指枪那次一样：不清干净会被下一次开窗口时的检测当成"本来就有"的
+  残留数据。
+- **用 Hand Landmarker 而不是 Gesture Recognizer**：虽然 Gesture
+  Recognizer 原生支持 `Open_Palm`（张开手掌），但那只是静态姿势，没有
+  "挥手"（时序上的来回摆动）这个手势本身，"五指捏住再放开"也不在预训练
+  的 7 种手势里；用同一个 Hand Landmarker 模型统一判定手指枪和"再见"两类
+  手势更省事，也不用额外加载第二个模型、多占一份内存/推理开销。
+- **`FINGER_SPREAD_OPEN_RATIO`/`PINCH_TIP_SPREAD_RATIO`/`RELEASE_TIP_
+  SPREAD_RATIO`/`WAVE_HISTORY_SEC`/`WAVE_MIN_SWINGS`/`WAVE_MIN_
+  AMPLITUDE_RATIO`/`PINCH_RELEASE_TIMEOUT_SEC`/`GOODBYE_GRIEVED_HOLD_
+  SEC` 全部没有实机验证过**，尤其是挥手判定——`GESTURE_POLL_SEC`(0.8s)
+  一帧，`WAVE_HISTORY_SEC`(6s) 窗口内大约只能采到 7~8 个样本，够不够
+  稳定捕捉到 2 次反向摆动需要实机测过挥手的真实节奏才知道；`host/
+  gesture_test.py` 诊断脚本已经同步加了"再见"判定的逐帧打印（张开/
+  捏拢/放开三个布尔量 + 指尖散开比例的实际数值），可以对着真实手势现场
+  看数值调阈值，跟手指枪那次同一个流程。这个功能目前只做到"逻辑实现
+  完成、单元测试验证过核心判定和摆动计数算法本身正确"，还没有过实机
+  端到端验证，不能当成已经确认可用。
+- 这个功能已经补进了 `表情映射v10.xlsx`（更新了"手势扫描窗口"行的触发/
+  打断条件，新增"再见（挥手/五指捏放）"一行），删掉了 v9，不再是只在
+  `CLAUDE.md` 里记录、表格脱节的状态。
+
 ## 开机自动找人
 `PuppyEngine.run()` 开头以前是 `play_idle_animation()`（回正、常态表情、
 关灯），纯被动等第一次 IDLE 状态下的 `check_face()` 才会看到人（最多要等
@@ -1144,7 +1218,7 @@ Animation()` 这个固件函数也一并删掉（删掉触发源以后已经没�
   JITTER`），层与层之间插一个 yaw 回正的过渡点（不拍照）；转动速度随扫描
   进度从 `GAME_SCAN_SPEED_MIN`(150) 线性升到 `GAME_SCAN_SPEED_MAX`(450)，
   后者仍然低于项目里用过的最快值（`EXCITED_YAW_SPEED`=500）。
-- 这个功能已经补进了 `表情映射v9.xlsx`（"捉迷藏-看物品/倒计时/扫描搜索/
+- 这个功能已经补进了 `表情映射v10.xlsx`（"捉迷藏-看物品/倒计时/扫描搜索/
   找到/没找到"五个"游戏"类型的行，外加 `grieved`/`peekaboo` 两个"表情"类型
   的行），不再是只在 `CLAUDE.md` 里记录、表格脱节的状态。
 - **好奇（Doubt）表情跟随舵机 yaw 镜像歪头方向**（`doubtMirrorSign()`，

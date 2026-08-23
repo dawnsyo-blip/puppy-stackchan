@@ -261,6 +261,36 @@ FINGER_GUN_THUMB_SPREAD_RATIO = 0.6  # 拇指指尖到食指根部的距离，�
 HAND_MODEL_PATH = str(Path(__file__).resolve().parent / "hand_landmarker.task")
 GESTURE_LED_BREATHE_PERIOD_MS = 2000  # 窗口期"等待手势"的柔和暖白呼吸灯周期
 
+# --- "再见"手势（挥手 / 五指捏住再放开）→ 委屈 → 隐私 ---
+# 跟"手指枪"共用同一个手势扫描窗口、同一次 /camera 拍照 + Hand Landmarker
+# 检测结果（check_gesture() 里一次检测后两种判定都跑一遍，不重复拍照/
+# 推理），判定逻辑在 classify_open_pinch_pose()，同样是"距离比例"而不是
+# 绝对坐标差（原因见 classify_finger_gun_pose() 顶部说明），同样没有实机
+# 验证过——先给一版能跑的默认值，等实机测过挥手/捏放的真实手感再调。
+FINGER_SPREAD_OPEN_RATIO = 1.15   # 食指/中指/无名指/小指四指的伸展比例都要
+                                   # 超过这个值才算"张开手掌"——比手指枪判定
+                                   # 单独一根食指用的 FINGER_EXTEND_RATIO(1.2)
+                                   # 略宽松一点，因为这里要求四指同时达标，
+                                   # 单指阈值定太高会让四指同时达标变得很苛刻
+PINCH_TIP_SPREAD_RATIO = 0.35     # 五个指尖（拇指/食指/中指/无名指/小指）到
+                                   # 它们质心的平均距离，相对手掌尺度的比例，
+                                   # 小于这个值算"五指捏拢"
+RELEASE_TIP_SPREAD_RATIO = 0.55   # 同一个比例，大于这个值算"（从捏拢）放开"。
+                                   # 故意比 PINCH_TIP_SPREAD_RATIO 留出间隔而
+                                   # 不用同一个阈值来回判——两个阈值挨得太近，
+                                   # 手指停在临界值附近会来回抖动着重复触发
+PINCH_RELEASE_TIMEOUT_SEC = 3.0   # 捏拢之后必须在这段时间内放开，否则这次
+                                   # "捏拢"作废，不再等，需要重新捏一次才算数
+WAVE_HISTORY_SEC = 6.0            # 挥手判定回看最近这么久、张开手掌时的手掌
+                                   # 水平位置——GESTURE_POLL_SEC=0.8s 一帧，
+                                   # 这个窗口内大约能采到 7~8 个样本
+WAVE_MIN_SWINGS = 2               # 水平方向至少要反向摆动这么多次才算"挥手"，
+                                   # 防止手掌只是举着不动、或单纯平移一次被误判
+WAVE_MIN_AMPLITUDE_RATIO = 0.5    # 每次摆动的水平位移，相对手掌尺度的最小
+                                   # 比例，太小的抖动/检测噪声不计入一次摆动
+GOODBYE_GRIEVED_HOLD_SEC = 1.5    # "再见"手势确认后，"委屈"表情停留多久再
+                                   # 转入隐私，给这个过渡表情留出被看清的时间
+
 # --- 抱歉(sorry)动画参数（数值参考表情映射v7.xlsx）---
 SORRY_PITCH = 200                # 微低头
 SORRY_YAW = 100                  # 微微偏转，避开视线
@@ -2038,6 +2068,58 @@ def classify_finger_gun_pose(lm):
     }
 
 
+def classify_open_pinch_pose(lm):
+    """判断一组 21 个 MediaPipe 手部关键点是"张开手掌"还是"五指捏拢"，给
+    "再见"手势的两种触发方式（挥手/五指捏住再放开）共用，跟
+    classify_finger_gun_pose() 是同一份职责划分：这里只负责单帧姿态判定，
+    跨帧的"挥手来回摆动"/"先捏后放"时序判断留给调用方（PuppyEngine.
+    check_gesture()）。同样用**比例**而不是绝对坐标差（原因见
+    classify_finger_gun_pose() 顶部的详细说明），手掌尺度 hand_scale 用
+    同一个定义（手腕到中指根部的距离）。
+
+      - "张开"：食指/中指/无名指/小指四根手指的伸展比例都超过
+        FINGER_SPREAD_OPEN_RATIO——比手指枪只判断食指单独一根更严格，要求
+        四指同时达标才算手掌张开。
+      - "捏拢"/"放开"：五个指尖（拇指4/食指8/中指12/无名指16/小指20）到
+        它们质心的平均距离，相对 hand_scale 的比例——小于
+        PINCH_TIP_SPREAD_RATIO 算捏拢，大于 RELEASE_TIP_SPREAD_RATIO 算
+        放开（两个阈值故意留出间隔，理由见常量定义处的注释）。
+      - 额外带回 palm_x（landmark 9，中指根部，比指尖更稳定）和
+        hand_scale，供调用方追踪挥手时手掌的水平位置/换算摆动幅度阈值。
+    """
+    wrist = lm[0]
+    palm = lm[9]
+    hand_scale = max(_landmark_dist(wrist, palm), 1e-6)
+
+    def extend_ratio(tip_idx, pip_idx):
+        return _landmark_dist(wrist, lm[tip_idx]) / max(_landmark_dist(wrist, lm[pip_idx]), 1e-6)
+
+    index_ratio = extend_ratio(8, 6)
+    middle_ratio = extend_ratio(12, 10)
+    ring_ratio = extend_ratio(16, 14)
+    pinky_ratio = extend_ratio(20, 18)
+    is_open = (
+        index_ratio > FINGER_SPREAD_OPEN_RATIO and middle_ratio > FINGER_SPREAD_OPEN_RATIO
+        and ring_ratio > FINGER_SPREAD_OPEN_RATIO and pinky_ratio > FINGER_SPREAD_OPEN_RATIO
+    )
+
+    tip_idxs = (4, 8, 12, 16, 20)
+    tips = [lm[i] for i in tip_idxs]
+    centroid_x = sum(t.x for t in tips) / len(tips)
+    centroid_y = sum(t.y for t in tips) / len(tips)
+    avg_tip_dist = sum(((t.x - centroid_x) ** 2 + (t.y - centroid_y) ** 2) ** 0.5 for t in tips) / len(tips)
+    tip_spread_ratio = avg_tip_dist / hand_scale
+    is_pinched = tip_spread_ratio < PINCH_TIP_SPREAD_RATIO
+    is_released = tip_spread_ratio > RELEASE_TIP_SPREAD_RATIO
+
+    return {
+        "is_open": is_open, "index_ratio": index_ratio, "middle_ratio": middle_ratio,
+        "ring_ratio": ring_ratio, "pinky_ratio": pinky_ratio,
+        "tip_spread_ratio": tip_spread_ratio, "is_pinched": is_pinched, "is_released": is_released,
+        "palm_x": palm.x, "hand_scale": hand_scale,
+    }
+
+
 # ╔══════════════════════════════════════════════╗
 # ║               行为引擎                        ║
 # ╚══════════════════════════════════════════════╝
@@ -2079,6 +2161,13 @@ class PuppyEngine:
         self.gesture_scan_until = 0.0
         self.last_gesture_check = 0
         self.finger_gun_count = 0
+        # "再见"手势（挥手/五指捏住再放开）状态，跟手指枪共用同一个扫描
+        # 窗口和同一次检测结果，见 check_gesture()。wave_x_history 是张开
+        # 手掌时手掌水平位置的滚动历史（(时间戳, x, 手掌尺度) 三元组），
+        # 用于挥手判定；goodbye_pinch_since 非 0 表示"已经捏拢、正在等
+        # 放开"，等到了或者超时（PINCH_RELEASE_TIMEOUT_SEC）都会清零。
+        self.wave_x_history = []
+        self.goodbye_pinch_since = 0.0
         self.last_face_seen_time = 0
 
         # 一次"来访"期间是否已经打过招呼——第一次进 HAPPY 播完整开心动画后
@@ -2444,6 +2533,20 @@ class PuppyEngine:
         set_led_mode("fade", *DEAD_LED_RGB, fade_ms=DEAD_LED_FADE_MS)
         self.transition(State.DEAD)
 
+    def enter_goodbye(self):
+        """手势扫描窗口检测到"再见"手势（挥手，或五指捏住再放开，见
+        check_gesture()）时触发。要求是"委屈"过渡一下再转入"隐私"——不是
+        直接 transition(State.PRIVACY)，先用 play_grieved_reaction() 播
+        一下"委屈"（复用捉迷藏没找到目标那套现成的动作参数：微低头 + 暖白
+        闪烁，只是表情换成 grieved），停留 GOODBYE_GRIEVED_HOLD_SEC 让这个
+        过渡表情能被看清，再走 transition(State.PRIVACY)——那条路径本来就
+        会播 play_privacy_animation()（转隐私姿势）+ _settle_privacy_mic()
+        （等舵机转到位、丢弃转动噪音可能误触发的语音），跟平常进隐私是
+        同一条路径，不需要在这里另外重写一遍。"""
+        play_grieved_reaction()
+        time.sleep(GOODBYE_GRIEVED_HOLD_SEC)
+        self.transition(State.PRIVACY)
+
     def _face_person_before_excited(self):
         """隐私状态下摄像头是关的，不知道人具体在哪——先回正（比停留在隐私
         姿势转开的角度好）。隐私姿势（PRIVACY_YAW=800）离回正角度很远，不能
@@ -2600,21 +2703,65 @@ class PuppyEngine:
         print(f"[追踪] 人脸位置={face_x:.2f}，yaw {current_yaw}→{new_yaw}")
         move_servo(yaw=new_yaw, speed=200)
 
+    def _reset_gesture_scan_state(self):
+        """清空手势扫描窗口累积的所有检测状态——手指枪的连续帧计数、"再见"
+        手势的挥手历史和"已捏拢等放开"标记。窗口关闭的两条路径（检测成功
+        主动关闭 / tick() 里自然过期）都要调用，不然残留状态会被下一次开
+        窗口的检测当成"本来就有"的数据，见 tick() 里对应分支的说明。"""
+        self.finger_gun_count = 0
+        self.wave_x_history = []
+        self.goodbye_pinch_since = 0.0
+
+    def _update_wave_history(self, now, palm_x, hand_scale):
+        """张开手掌的帧才会调用（见 check_gesture()）——只在手掌张开时累积
+        水平位置样本，捏拢/放开过程中的样本不计入，避免"五指捏放"手势的
+        手掌移动被误算成"挥手"的一次摆动。按时间窗裁剪，只留最近
+        WAVE_HISTORY_SEC 秒内的样本。"""
+        self.wave_x_history.append((now, palm_x, hand_scale))
+        cutoff = now - WAVE_HISTORY_SEC
+        self.wave_x_history = [s for s in self.wave_x_history if s[0] >= cutoff]
+
+    def _count_wave_swings(self):
+        """经典的"折线摆动计数"算法：从上一个极值点开始，水平位移超过
+        振幅阈值（相对当时手掌尺度的比例，见 WAVE_MIN_AMPLITUDE_RATIO）才
+        算移动到了一个新的极值点，方向跟上一段相反才计一次摆动——用手掌
+        尺度而不是固定像素阈值，手离摄像头远近不同也不需要重新调参数
+        （跟 classify_finger_gun_pose() 用比例不用绝对坐标差是同一个理由）。
+        样本太少（少于 3 个）时直接认为还没有足够数据判断，返回 0。"""
+        if len(self.wave_x_history) < 3:
+            return 0
+        xs = [s[1] for s in self.wave_x_history]
+        scales = [s[2] for s in self.wave_x_history]
+        swings = 0
+        direction = 0
+        last_extreme_x = xs[0]
+        for x, scale in zip(xs[1:], scales[1:]):
+            amp_threshold = scale * WAVE_MIN_AMPLITUDE_RATIO
+            diff = x - last_extreme_x
+            if abs(diff) >= amp_threshold:
+                new_direction = 1 if diff > 0 else -1
+                if direction != 0 and new_direction != direction:
+                    swings += 1
+                direction = new_direction
+                last_extreme_x = x
+        return swings
+
     def check_gesture(self):
-        """手势扫描窗口期内调用（见 tick()），拍一帧检测"手指枪"（finger
-        gun）手势。用 Hand Landmarker（不是 Gesture Recognizer——"手指枪"
-        不在预训练的 7 种手势里：Closed_Fist/Open_Palm/Pointing_Up/
-        Thumb_Down/Thumb_Up/Victory/ILoveYou），几何判定规则见模块级函数
-        classify_finger_gun_pose()（跟 host/gesture_test.py 诊断脚本共用
-        同一份实现，不要各自维护）。自己按 GESTURE_POLL_SEC 节流（跟
-        check_touch() 的 TOUCH_POLL_SEC 是同一个写法），调用方（tick()）
-        不需要关心频率，只要窗口开着就可以每个 tick 都调，不会因为节流而
-        漏调。连续 FINGER_GUN_CONFIRM_FRAMES 帧都命中才真正触发（防止单帧
-        误判），用 self.finger_gun_count 计数，没命中就归零；命中后立刻
-        关闭窗口（self.gesture_scan_until = 0）并调用 enter_dead()——计数器
-        本身在这里也清零，避免下次开窗口时残留这次用剩的计数，等窗口过期
-        没触发时的归零则交给 tick() 里窗口过期那个分支处理（见那边的说明）。
-        """
+        """手势扫描窗口期内调用（见 tick()），拍一帧、跑一次 Hand
+        Landmarker 检测，同一次检测结果拿来判断两类手势：
+          1. "手指枪"（finger gun）→ 装死，几何判定见模块级函数
+             classify_finger_gun_pose()。
+          2. "再见"（挥手，或五指捏住再放开）→ 委屈 → 隐私，几何判定见
+             classify_open_pinch_pose()。
+        两份判定逻辑都跟 host/gesture_test.py 诊断脚本共用，不要各自维护。
+        用 Hand Landmarker 而不是 Gesture Recognizer 是因为"手指枪"不在
+        预训练的 7 种手势里，"再见"的两种触发方式虽然 Gesture Recognizer
+        原生支持挥手（`Open_Palm` 只是静态张开手掌，没有"挥手"这个手势），
+        用同一个模型统一判定更省事，也不用额外加载第二个模型。
+
+        自己按 GESTURE_POLL_SEC 节流（跟 check_touch() 的 TOUCH_POLL_SEC
+        是同一个写法），调用方（tick()）不需要关心频率，只要窗口开着就可以
+        每个 tick 都调，不会因为节流而漏调。"""
         now = time.time()
         if now - self.last_gesture_check < GESTURE_POLL_SEC:
             return
@@ -2628,12 +2775,16 @@ class PuppyEngine:
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         results = self.hand_landmarker.detect(mp_img)
 
-        detected = False
-        if results.hand_landmarks:
-            result = classify_finger_gun_pose(results.hand_landmarks[0])
-            detected = result["is_gun"]
+        if not results.hand_landmarks:
+            self.finger_gun_count = 0
+            return
+        lm = results.hand_landmarks[0]
 
-        if detected:
+        # --- 手指枪 → 装死：连续 FINGER_GUN_CONFIRM_FRAMES 帧都命中才真正
+        #     触发（防止单帧误判），命中后立刻关闭窗口，不再往下判断"再见"
+        #     手势——两种手势不会在同一帧里都触发，谁先确认就处理谁。
+        gun_result = classify_finger_gun_pose(lm)
+        if gun_result["is_gun"]:
             self.finger_gun_count += 1
             print(f"[手势] 检测到手指枪（{self.finger_gun_count}/{FINGER_GUN_CONFIRM_FRAMES}）")
         else:
@@ -2642,8 +2793,43 @@ class PuppyEngine:
         if self.finger_gun_count >= FINGER_GUN_CONFIRM_FRAMES:
             print("[触发] 手指枪确认 → 装死")
             self.gesture_scan_until = 0.0
-            self.finger_gun_count = 0
+            self._reset_gesture_scan_state()
             self.enter_dead()
+            return
+
+        # --- "再见"手势：挥手 或 五指捏住再放开 → 委屈 → 隐私 ---
+        pose = classify_open_pinch_pose(lm)
+
+        # 挥手：只在手掌张开的帧累积水平位置历史，够多次反向摆动就算数。
+        if pose["is_open"]:
+            self._update_wave_history(now, pose["palm_x"], pose["hand_scale"])
+        wave_swings = self._count_wave_swings()
+        if wave_swings >= WAVE_MIN_SWINGS:
+            print(f"[手势] 检测到挥手（{wave_swings} 次摆动）")
+            print("[触发] 挥手确认 → 委屈 → 隐私")
+            self.gesture_scan_until = 0.0
+            self._reset_gesture_scan_state()
+            self.enter_goodbye()
+            return
+
+        # 五指捏住再放开：先记下"捏拢"的时刻，等到在超时时间内看到"放开"
+        # 才算一次完整手势；捏拢之后一直没放开、又超时了，这次作废，要
+        # 重新捏一次才算数（不会无限期地等一个很久以前的捏拢）。
+        if pose["is_pinched"]:
+            if self.goodbye_pinch_since == 0.0:
+                self.goodbye_pinch_since = now
+                print("[手势] 检测到五指捏拢，等待放开")
+        elif pose["is_released"] and self.goodbye_pinch_since != 0.0:
+            if now - self.goodbye_pinch_since <= PINCH_RELEASE_TIMEOUT_SEC:
+                print("[触发] 五指捏住再放开确认 → 委屈 → 隐私")
+                self.gesture_scan_until = 0.0
+                self._reset_gesture_scan_state()
+                self.enter_goodbye()
+                return
+            self.goodbye_pinch_since = 0.0
+        if (self.goodbye_pinch_since != 0.0
+                and now - self.goodbye_pinch_since > PINCH_RELEASE_TIMEOUT_SEC):
+            self.goodbye_pinch_since = 0.0
 
     def track_face_once(self):
         """CURIOUS/THINKING 状态下的轻量级人脸追踪：检测到人脸就用
@@ -4088,24 +4274,27 @@ class PuppyEngine:
         # --- 手势扫描窗口（碰屏幕"小开心"之后的互动期待期，见
         #     enter_xiaokaixin() 末尾设置 self.gesture_scan_until）---
         # 窗口期内每个 tick 都调 check_gesture()（自己按 GESTURE_POLL_SEC
-        # 节流，不会真的每 tick 都发请求），检测到手指枪就在里面直接触发
-        # enter_dead() 并关闭窗口。窗口期内故意不做人脸检测——不是为了省
-        # ESP32 负载（MediaPipe 推理在电脑端跑，ESP32 端不管拍的照片给谁用
-        # 开销都一样），而是人脸检测会触发 track_face_servo() 移动舵机，
-        # 画面跟着偏移会让手势检测的取景不稳定。
+        # 节流，不会真的每 tick 都发请求），检测到"手指枪"就直接触发
+        # enter_dead()，检测到"再见"手势（挥手，或五指捏住再放开）就直接
+        # 触发 enter_goodbye()，两种情况都会在 check_gesture() 内部关闭
+        # 窗口。窗口期内故意不做人脸检测——不是为了省 ESP32 负载
+        # （MediaPipe 推理在电脑端跑，ESP32 端不管拍的照片给谁用开销都
+        # 一样），而是人脸检测会触发 track_face_servo() 移动舵机，画面跟着
+        # 偏移会让手势检测的取景不稳定。
         gesture_window_active = time.time() < self.gesture_scan_until
         if gesture_window_active:
             self.check_gesture()
         elif self.gesture_scan_until != 0.0:
             # 窗口自然过期（不是被 check_gesture() 检测成功后主动关闭——那
             # 种情况 gesture_scan_until 已经在 check_gesture() 里被设成
-            # 0.0，不会再进这个分支，LED 交给 enter_dead() 自己的红灯动画
-            # 接管，不需要也不应该在这里覆盖）：清掉残留的确认帧计数，避免
-            # 留到下一次开窗口时被当成"本来就有"的确认帧数；LED 换回当前
-            # 状态本该有的常驻效果，还回去给 restore_state_led() 管。
+            # 0.0，不会再进这个分支，LED 交给 enter_dead()/enter_goodbye()
+            # 自己的动画接管，不需要也不应该在这里覆盖）：清掉残留的确认
+            # 状态（手指枪连续帧计数、挥手历史、"已捏拢等放开"标记），避免
+            # 留到下一次开窗口时被当成"本来就有"的数据；LED 换回当前状态
+            # 本该有的常驻效果，还回去给 restore_state_led() 管。
             # gesture_scan_until 归零标记"已经处理过"，避免每个 tick 都
             # 重复调 restore_state_led()。
-            self.finger_gun_count = 0
+            self._reset_gesture_scan_state()
             self.gesture_scan_until = 0.0
             self.restore_state_led()
 
