@@ -1253,13 +1253,24 @@ def play_happy_animation():
 def play_xiaokaixin_animation():
     """"小开心"：用开心的面部表情，但舵机动作是轻微小幅度抬头 3 次，不是
     "进入开心"时的完整摇头动画——碰屏幕、以及听到"小狗小狗"呼唤都会触发这个
-    反应，是一次性的动作，不是状态切换动画，所以不复用 play_happy_animation()。"""
+    反应，是一次性的动作，不是状态切换动画，所以不复用 play_happy_animation()。
+
+    只调 pitch、不传 yaw 会撞上"舵机噪音防误触发语音"一节记录的固件
+    handleServo() 的 bug：省略的参数不是保持当前角度，而是重置成硬编码
+    默认值（yaw 默认 0）——之前每次 move_servo() 都只传了 pitch，等于
+    这三次抬头循环里每一下都把 yaw 偷偷拉回 0，把人脸追踪好不容易转到
+    的角度抹掉，表现就是"小开心"一结束舵机就回正、不再朝着人，紧接着的
+    手势扫描窗口因此经常拍不到举着手指枪的那个人。修法跟"生气"序列的
+    转头动作一样：先读一次当前 yaw，之后每次 move_servo() 都显式带上，
+    把它钉住，不让固件的默认值悄悄覆盖。"""
     set_expression("happy")
     set_led_mode("solid", *WARM_WHITE_RGB)
+    status = get_status()
+    current_yaw = status.get("yaw", 0) if status else 0
     for _ in range(XIAOKAIXIN_CYCLES):
-        move_servo(pitch=XIAOKAIXIN_PITCH_UP, speed=XIAOKAIXIN_SPEED, mute=True)
+        move_servo(yaw=current_yaw, pitch=XIAOKAIXIN_PITCH_UP, speed=XIAOKAIXIN_SPEED, mute=True)
         time.sleep(XIAOKAIXIN_CYCLE_DELAY)
-        move_servo(pitch=XIAOKAIXIN_PITCH_DOWN, speed=XIAOKAIXIN_SPEED, mute=True)
+        move_servo(yaw=current_yaw, pitch=XIAOKAIXIN_PITCH_DOWN, speed=XIAOKAIXIN_SPEED, mute=True)
         time.sleep(XIAOKAIXIN_CYCLE_DELAY)
 
 def play_excited_animation():
