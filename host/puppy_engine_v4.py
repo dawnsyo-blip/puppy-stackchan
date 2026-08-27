@@ -155,16 +155,16 @@ HAPPY_CYCLES = 3
 HAPPY_CYCLE_DELAY = 0.4
 HAPPY_PITCH = 300
 
-# --- "小开心"动画参数：用开心表情，但舵机动作是轻微小幅度抬头，不是完整
+# --- "贴贴"动画参数：用开心表情，但舵机动作是轻微小幅度抬头，不是完整
 #     摇头动画——碰屏幕、以及听到"小狗小狗"呼唤都会触发这个动作（见
-#     enter_xiaokaixin()/play_xiaokaixin_animation()）---
-XIAOKAIXIN_PITCH_UP = 330      # 默认回正是 450，抬头幅度（第一版 400，反馈"可以调大一点"，
+#     enter_tietie()/play_tietie_animation()）---
+TIETIE_PITCH_UP = 330      # 默认回正是 450，抬头幅度（第一版 400，反馈"可以调大一点"，
                                 # 从偏移 50 加大到 120，仍然小于 HAPPY_PITCH(300) 偏移 150，
                                 # 保持"比完整开心动作小"这个既定关系，只是更明显一点）
-XIAOKAIXIN_PITCH_DOWN = 450
-XIAOKAIXIN_SPEED = 300
-XIAOKAIXIN_CYCLES = 3
-XIAOKAIXIN_CYCLE_DELAY = 0.3
+TIETIE_PITCH_DOWN = 450
+TIETIE_SPEED = 300
+TIETIE_CYCLES = 3
+TIETIE_CYCLE_DELAY = 0.3
 
 # --- 兴奋动画参数 ---
 EXCITED_YAW_RANGE = 800
@@ -238,7 +238,7 @@ DEAD_LED_BLINK_PERIOD_MS = 300
 DEAD_LED_BLINK_HOLD_SEC = 0.6    # 闪两下红灯保持的时长，之后切渐灭
 DEAD_LED_FADE_MS = 1500
 
-# --- 手势扫描窗口（碰屏幕"小开心"之后的互动期待期，检测"手指枪"触发装死）---
+# --- 手势扫描窗口（碰屏幕"贴贴"之后的互动期待期，检测"手指枪"触发装死）---
 GESTURE_WINDOW_SEC = 15.0        # 窗口持续时间
 GESTURE_POLL_SEC = 0.8           # 窗口期内摄像头轮询间隔——瓶颈是 /camera 本身
                                   # 的响应速度（200-500ms），不是 MediaPipe 推理
@@ -939,9 +939,9 @@ def apply_cute_substitutions(words):
 
 # --- 提醒播报前的轻微左右摆头 ---
 # 三条 REMINDERS 都会用到（想出去玩的天气播报前、想喝水/想吃饭的"委屈"
-# 过渡阶段，见 _deliver_reminder()）。幅度/节奏直接参考小开心
-# （play_xiaokaixin_animation()/XIAOKAIXIN_*），只是把 pitch 轴的抬头
-# 换成 yaw 轴的左右摆动——落差同样是 120（小开心是 450-330=120），摆动
+# 过渡阶段，见 _deliver_reminder()）。幅度/节奏直接参考贴贴
+# （play_tietie_animation()/TIETIE_*），只是把 pitch 轴的抬头
+# 换成 yaw 轴的左右摆动——落差同样是 120（贴贴是 450-330=120），摆动
 # 相对当前 yaw 进行（不是绝对角度，因为这一步之前舵机可能已经因为
 # scan_for_face()/track_face_servo() 停在任意角度），摆完落回摆动前的
 # 原始 yaw，不会留在偏转的位置上。
@@ -1144,7 +1144,7 @@ _session.trust_env = False
 # 成后台线程之后新增的 worker），发给设备的请求永远是排队串行的，一次只有
 # 一个在飞。**这是实测踩过的真坑，不是预防性加的**：check_face()/
 # retrack_face() 改成后台线程后，某次后台线程正在等 /camera 响应（这个
-# 请求本身可能要 1~2s）的同时，主线程恰好要给 play_xiaokaixin_animation()
+# 请求本身可能要 1~2s）的同时，主线程恰好要给 play_tietie_animation()
 # 发好几个 /servo 请求，其中两个直接 ConnectTimeoutError——不是"变慢"，是
 # 连 TCP 连接都建立不起来，说明设备的连接接受能力（WiFiServer 的 backlog）
 # 撑不住两个线程同时各开一条连接（哪怕其中一条是 keep-alive 空闲着）。加锁
@@ -1280,8 +1280,8 @@ def play_happy_animation():
     # 动画结束后回正，确保摄像头对准人
     move_servo(yaw=0, pitch=450, speed=300, mute=True)
 
-def play_xiaokaixin_animation():
-    """"小开心"：用开心的面部表情，但舵机动作是轻微小幅度抬头 3 次，不是
+def play_tietie_animation():
+    """"贴贴"：用开心的面部表情，但舵机动作是轻微小幅度抬头 3 次，不是
     "进入开心"时的完整摇头动画——碰屏幕、以及听到"小狗小狗"呼唤都会触发这个
     反应，是一次性的动作，不是状态切换动画，所以不复用 play_happy_animation()。
 
@@ -1289,7 +1289,7 @@ def play_xiaokaixin_animation():
     handleServo() 的 bug：省略的参数不是保持当前角度，而是重置成硬编码
     默认值（yaw 默认 0）——之前每次 move_servo() 都只传了 pitch，等于
     这三次抬头循环里每一下都把 yaw 偷偷拉回 0，把人脸追踪好不容易转到
-    的角度抹掉，表现就是"小开心"一结束舵机就回正、不再朝着人，紧接着的
+    的角度抹掉，表现就是"贴贴"一结束舵机就回正、不再朝着人，紧接着的
     手势扫描窗口因此经常拍不到举着手指枪的那个人。修法跟"生气"序列的
     转头动作一样：先读一次当前 yaw，之后每次 move_servo() 都显式带上，
     把它钉住，不让固件的默认值悄悄覆盖。"""
@@ -1297,11 +1297,11 @@ def play_xiaokaixin_animation():
     set_led_mode("solid", *WARM_WHITE_RGB)
     status = get_status()
     current_yaw = status.get("yaw", 0) if status else 0
-    for _ in range(XIAOKAIXIN_CYCLES):
-        move_servo(yaw=current_yaw, pitch=XIAOKAIXIN_PITCH_UP, speed=XIAOKAIXIN_SPEED, mute=True)
-        time.sleep(XIAOKAIXIN_CYCLE_DELAY)
-        move_servo(yaw=current_yaw, pitch=XIAOKAIXIN_PITCH_DOWN, speed=XIAOKAIXIN_SPEED, mute=True)
-        time.sleep(XIAOKAIXIN_CYCLE_DELAY)
+    for _ in range(TIETIE_CYCLES):
+        move_servo(yaw=current_yaw, pitch=TIETIE_PITCH_UP, speed=TIETIE_SPEED, mute=True)
+        time.sleep(TIETIE_CYCLE_DELAY)
+        move_servo(yaw=current_yaw, pitch=TIETIE_PITCH_DOWN, speed=TIETIE_SPEED, mute=True)
+        time.sleep(TIETIE_CYCLE_DELAY)
 
 def play_excited_animation():
     set_expression("excited")
@@ -2298,7 +2298,7 @@ class PuppyEngine:
 
         print("[引擎] 小狗行为引擎 v4 启动！")
         print(f"[引擎] 当前状态: {self.state.value}")
-        print("[引擎] 碰一下屏幕 → 小开心（摸头反应）")
+        print("[引擎] 碰一下屏幕 → 贴贴（摸头反应）")
         print("[引擎] 头顶双击 → 兴奋")
         print(f"[引擎] 头顶长按满 {PRIVACY_HOLD_SEC}s → 进/出隐私（隐私状态下头顶双击也能 → 兴奋，退出隐私）")
         print("[引擎] 呼唤\"小狗小狗\" → 开心")
@@ -2410,11 +2410,11 @@ class PuppyEngine:
         # 回开心，LED 可能还停在上一个状态的效果上，这里补一次常亮。
         set_led_mode("solid", *WARM_WHITE_RGB)
 
-    def enter_xiaokaixin(self, reason="摸头反应"):
-        """"小开心"：碰屏幕、或者听到"小狗小狗"呼唤，都走这里——两条触发
+    def enter_tietie(self, reason="摸头反应"):
+        """"贴贴"：碰屏幕、或者听到"小狗小狗"呼唤，都走这里——两条触发
         路径都不依赖 scan_for_face() 先找到人脸再进开心，用户正在碰屏幕/
         正在叫它，人显然就在设备正前方，不需要再转头确认一次。直接进 HAPPY
-        状态，播放 play_xiaokaixin_animation()（开心表情 + 轻微抬头 3 次，
+        状态，播放 play_tietie_animation()（开心表情 + 轻微抬头 3 次，
         跟 enter_happy() 的完整摇头动画是两个不同的动作），动作播完保持在
         开心表情/状态上。不设状态限制，跟头顶双击→兴奋一样，从任何状态
         触发都会执行。reason 只影响转移日志里的说明文字，方便区分是哪条
@@ -2425,11 +2425,11 @@ class PuppyEngine:
         self.state_enter_time = time.time()
         if old != State.HAPPY:
             print(f"[转移] {old.value} → 开心（{reason}）")
-        play_xiaokaixin_animation()
-        # "小开心"动画播完，开一个手势扫描窗口——期待接下来几秒用户可能会
+        play_tietie_animation()
+        # "贴贴"动画播完，开一个手势扫描窗口——期待接下来几秒用户可能会
         # 比"手指枪"手势逗小狗装死，见 check_gesture()/tick() 里的窗口机制。
         # 柔和的暖白呼吸灯给用户一个"小狗在等你比手势"的提示，覆盖掉
-        # play_xiaokaixin_animation() 刚设的开心常亮；窗口关闭时（自然过期
+        # play_tietie_animation() 刚设的开心常亮；窗口关闭时（自然过期
         # 或者检测成功触发装死）都会把 LED 换掉，见 tick() 里的处理。
         self.gesture_scan_until = time.time() + GESTURE_WINDOW_SEC
         set_led_mode("breathe", *WARM_WHITE_RGB, period_ms=GESTURE_LED_BREATHE_PERIOD_MS)
@@ -2609,11 +2609,11 @@ class PuppyEngine:
         stop_play()
 
         if is_screen_trigger:
-            print("[触发] 触碰屏幕 → 小开心（摸头反应）")
-            # 不需要在这里另外点一次触摸反馈灯——enter_xiaokaixin() 播放的
-            # play_xiaokaixin_animation() 里已经会把 LED 设成暖白常亮，效果跟触摸
+            print("[触发] 触碰屏幕 → 贴贴（摸头反应）")
+            # 不需要在这里另外点一次触摸反馈灯——enter_tietie() 播放的
+            # play_tietie_animation() 里已经会把 LED 设成暖白常亮，效果跟触摸
             # 反馈灯完全一样，重复调一次没有任何可观察的区别。
-            self.enter_xiaokaixin()
+            self.enter_tietie()
         elif touch["double_tap"]:
             print("[触发] 头顶双击 → 兴奋！")
             if self.state == State.EXCITED:
@@ -2847,7 +2847,7 @@ class PuppyEngine:
         """带连续确认的人脸检测——只负责决定"这个 tick 要不要发起一次检测"，
         真正的拍照+推理丢给后台线程做（见 _check_face_worker()）。
 
-        **这是为了修复"碰屏幕→小开心"延迟明显（实测 ~2s）的问题**：
+        **这是为了修复"碰屏幕→贴贴"延迟明显（实测 ~2s）的问题**：
         detect_face_once() 单次耗时可达 1~2s（/camera 下载一张 JPEG +
         mediapipe 推理），之前是在 tick() 里同步阻塞调用的——tick() 内触摸
         检查虽然排在人脸检查前面、优先处理，但这防不住"用户碰屏幕的那一刻，
@@ -2900,7 +2900,7 @@ class PuppyEngine:
         前方时看起来像在甩头。现在只做增量微调，跟随更平滑。
 
         跟 check_face() 同样的原因（见那边的说明）改成后台线程发起，不在
-        tick() 里同步阻塞——HAPPY 状态下摸屏幕触发"小开心"同样会撞上这个
+        tick() 里同步阻塞——HAPPY 状态下摸屏幕触发"贴贴"同样会撞上这个
         问题，这里不改的话，开心状态下碰屏幕依然会有 ~2s 延迟。跟
         check_face() 共用同一个 _face_worker_busy 忙碌标记：两者分属不同
         状态（IDLE/SLEEPY/SORRY 用 check_face，HAPPY 用 retrack_face），
@@ -3216,7 +3216,7 @@ class PuppyEngine:
             # "小狗小狗"是在叫名字，不是在提问——不走 LLM 意图分类（会被
             # SYSTEM_PROMPT 的四路分支之一误吞、走成复杂回应念一串关键词），
             # 直接进完整的"开心"（跟被动检测到人脸/碰屏幕扫描找到人是同一个
-            # enter_happy()，会播完整摇头动画，不是"小开心"那个轻微抬头的反应
+            # enter_happy()，会播完整摇头动画，不是"贴贴"那个轻微抬头的反应
             # 动作）。不需要像 _settle_happy() 那样再看 track_ok 决定要不要重新
             # 扫描——用户显然就在附近正对着它说话，不需要摄像头再确认一次。
             if is_calling_puppy(user_text):
@@ -3426,7 +3426,7 @@ class PuppyEngine:
     # 秒"是同一种模式，不是新引入的阻塞。self.state 全程停在 GAME_HIDE_SEEK，
     # 不经过 transition() 的常规状态分发表（那张表是给"进入即播放一次性动画"
     # 的状态设计的，游戏内部每个子阶段的表情/LED/舵机都要自己精细控制，见
-    # enter_xiaokaixin() 已经有的先例：直接改 self.state 而不是调
+    # enter_tietie() 已经有的先例：直接改 self.state 而不是调
     # transition()）；只有找到/超时结尾复用 EXCITED/SORRY 的标准动画（走
     # transition()），游戏彻底结束时用 _game_settle_after_result() 收尾——
     # 专门写了这个轻量版本而不是复用对话结束用的 _settle_happy()，因为
@@ -3439,9 +3439,9 @@ class PuppyEngine:
     # 风格，不用整句 TTS 旁白——理由跟对话回应必须用关键词表达是同一个：
     # 这是小狗表达自己的统一方式，游戏流程也不应该破例说整句话。
     #
-    # 游戏进行中不接受碰屏幕/双击这些正常状态下的触摸手势（那些是"小开心"/
+    # 游戏进行中不接受碰屏幕/双击这些正常状态下的触摸手势（那些是"贴贴"/
     # "兴奋"的触发器，游戏语境下含义会冲突——比如用户摸屏幕很可能只是想
-    # 确认"我藏好了"，不是想要小开心反应），只保留长按头顶这一个"中止游戏"
+    # 确认"我藏好了"，不是想要贴贴反应），只保留长按头顶这一个"中止游戏"
     # 信号，所以不走 self.check_touch()/handle_touch_trigger() 那一整套手势
     # 分发，改成 _game_check_abort() 直接读原始 /touch。
 
@@ -3521,7 +3521,7 @@ class PuppyEngine:
         """游戏版的 speak_keywords()：同一套"按钮按一下+关键词 TTS 同步播放"
         机制（按钮从隐藏出现、每个词播放前按一下、全部念完按钮消失），但不
         能直接复用 speak_keywords()——那个内部调用 self.wait_for_playback()，
-        会走 handle_touch_trigger() 的完整手势分发（碰屏幕→小开心等），游戏
+        会走 handle_touch_trigger() 的完整手势分发（碰屏幕→贴贴等），游戏
         进行中触发这些会跟游戏状态冲突。led_rgb 让调用方可以换成绿色（"正在
         看"）而不是默认的暖白，别的行为跟 speak_keywords() 一致。返回 False
         表示中途被长按中止，调用方应该直接 return（_game_abort() 已经在
@@ -4030,7 +4030,7 @@ class PuppyEngine:
         """生气专属的"按钮按一下+关键词 TTS 同步播放"，跟 _game_speak_
         keywords() 是同一个理由不能直接复用 speak_keywords()：那个内部调
         self.wait_for_playback()，会走 handle_touch_trigger() 的全局手势
-        分发（双击→兴奋、碰屏幕→小开心），这两个都会跟生气状态自己的
+        分发（双击→兴奋、碰屏幕→贴贴），这两个都会跟生气状态自己的
         "双击→原谅"判断打架。改成自己轮询 /status 的 playing 字段，用
         _angry_double_tap_check() 代替 handle_touch_trigger()。
 
@@ -4271,8 +4271,8 @@ class PuppyEngine:
             if self.check_voice_wake():
                 return
 
-        # --- 手势扫描窗口（碰屏幕"小开心"之后的互动期待期，见
-        #     enter_xiaokaixin() 末尾设置 self.gesture_scan_until）---
+        # --- 手势扫描窗口（碰屏幕"贴贴"之后的互动期待期，见
+        #     enter_tietie() 末尾设置 self.gesture_scan_until）---
         # 窗口期内每个 tick 都调 check_gesture()（自己按 GESTURE_POLL_SEC
         # 节流，不会真的每 tick 都发请求），检测到"手指枪"就直接触发
         # enter_dead()，检测到"再见"手势（挥手，或五指捏住再放开）就直接
