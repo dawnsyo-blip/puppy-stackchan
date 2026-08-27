@@ -8,6 +8,10 @@ __pycache__/
 # API keys / secrets — see .env.example for the required variable names
 .env
 
+# 内部开发笔记，只留本地参考——含 WiFi 密码等不该公开的内容，也不是外部
+# 使用者需要看的东西（见 README.md）
+CLAUDE.md
+
 # 个人参考资料/设计文档，不是仓库内容（见 CLAUDE.md）：捉迷藏/表情设计的
 # 权威参考表格、项目路线图笔记、下载的教程 PDF
 *.xlsx
