@@ -4,3 +4,30 @@ firmware/config.h
 *.wav
 __pycache__/
 .DS_Store
+
+# API keys / secrets — see .env.example for the required variable names
+.env
+
+# 个人参考资料/设计文档，不是仓库内容（见 CLAUDE.md）：捉迷藏/表情设计的
+# 权威参考表格、项目路线图笔记、下载的教程 PDF
+*.xlsx
+project_roadmap.md
+*.pdf
+
+# MediaPipe 模型文件是本地依赖，不提交（体积大，且能重新下载，见 CLAUDE.md
+# "手指枪手势检测"一节）
+host/hand_landmarker.task
+
+# 已被 puppy_engine_v4.py 取代的旧版本，只是本地留存，不进仓库
+host/puppy_engine.py
+host/puppy_engine_v2.py
+host/puppy_engine_v3.py
+
+# 独立诊断/测试脚本——按 CLAUDE.md 里记录的既定惯例，这些脚本只在本机验证
+# 用，不进仓库（跟 voice_test.py 那次的惯例一致）
+host/voice_test.py
+host/gesture_test.py
+host/reminder_test_driver.py
+host/animalese_test.py
+host/test_hardware.py
+host/stackchan_watch.py
