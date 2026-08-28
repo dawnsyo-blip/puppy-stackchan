@@ -24,7 +24,9 @@ The computer and StackChan talk over the same WiFi hotspot; StackChan exposes a 
 
 The behavior engine is built around a dozen or so states — **Idle, Happy, Excited, Sleepy, Privacy, Curious, Thinking, Sorry, Dizzy, Play Dead, Angry, Hide-and-Seek** — each triggered by a different kind of input (face tracking, voice conversation, touch gestures, shake detection, scheduled reminders, ...), and each with its own expression, servo motion, and LED pattern.
 
-The full state-transition map is maintained as a [Mermaid](https://mermaid.js.org/) diagram covering every trigger/transition branch not spelled out below. That diagram is closely tied to internal implementation details (state names, field names, etc.), so for now it's kept in the local working copy only and isn't published with this repo.
+The full state-transition map is maintained as a [Mermaid](https://mermaid.js.org/) diagram, covering every voice/vision/touch/time-triggered branch not spelled out below:
+
+![State machine diagram](docs/state_machine_en.svg)
 
 Two of the more fun behaviors:
 
