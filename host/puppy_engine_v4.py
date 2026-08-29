@@ -2145,11 +2145,16 @@ def classify_finger_gun_pose(lm):
         相对距离，手在画面里怎么平移/旋转都不影响，比直接比较 y 坐标
         （隐含假设"手是竖直朝上举着的"）稳健得多。
       - 食指：伸展比例 > FINGER_EXTEND_RATIO 判定为伸直。
-      - 中指/无名指/小指：伸展比例 < FINGER_CURL_RATIO 判定为弯曲，
-        三根里**至少两根**弯曲就算数，不要求三根全部弯曲——无名指、小指
-        天生比中指更难独立弯曲（肌腱互相牵连），实测数据也证实很多人
-        自然摆出的手指枪这两根手指弯曲程度不如中指，要求三根全弯太苛刻，
-        容易把真实的手指枪判定成"不是"。
+      - 中指/无名指/小指：伸展比例 < FINGER_CURL_RATIO 判定为弯曲。
+        **中指必须弯曲，无名指/小指里至少一根弯曲就算数**——这三根手指
+        的"至少两根弯"不是随便挑的"三选二"：无名指、小指天生比中指更难
+        独立弯曲（肌腱互相牵连），实测数据也证实很多人自然摆出的手指枪
+        这两根手指弯曲程度不如中指，要求两根都弯太苛刻，容易把真实的
+        手指枪判定成"不是"；但这不代表中指本身可以不弯——如果中指也
+        允许不弯，"食指+中指一起伸直、无名指+小指弯曲"（比如"耶"的
+        剪刀手/胜利手势）会因为无名指+小指凑够 2 根弯曲，被误判成
+        手指枪（这是实机测试暴露出来的真实误报，不是假设）。所以中指
+        是硬性要求，无名指/小指只挑一根即可，不是三选二那么宽松。
       - 拇指：拇指指尖(4)到食指根部(5)的距离，换算成相对 `hand_scale`
         的比例，大于 FINGER_GUN_THUMB_SPREAD_RATIO 判定为张开（不是贴着
         手掌）。
@@ -2180,7 +2185,9 @@ def classify_finger_gun_pose(lm):
         "ring_curled": ring_curled, "ring_ratio": ring_ratio,
         "pinky_curled": pinky_curled, "pinky_ratio": pinky_ratio,
         "curled_count": curled_count,
-        "is_gun": index_straight and thumb_spread and curled_count >= 2,
+        # 中指必须弯，无名指/小指只要有一根弯就行——不是"三根里任意两根"，
+        # 见上面文档字符串里"剪刀手会被误判"那段实测教训。
+        "is_gun": index_straight and thumb_spread and middle_curled and (ring_curled or pinky_curled),
     }
 
 
