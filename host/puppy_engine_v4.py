@@ -455,6 +455,22 @@ GAME_LOCATION_DESC_PROMPT = (
 # malloc()+高频轮询的组合拳，不是单纯"轮询快"本身的问题），提高到 5Hz 左右
 # 不会重蹈那次覆辙。
 TOUCH_POLL_SEC = 0.2
+SCREEN_TAP_DEBOUNCE_SEC = 1.0    # 单次物理点按屏幕，固件的 screen_tap_count
+                                  # 有时会连续涨好几次（实机日志见过同一次碰
+                                  # 屏幕在三个相邻 tick 里各被判定成一次"新的"
+                                  # 点击，各自都会触发一次完整的"贴贴"动画，
+                                  # 三次连播加起来就是用户反馈的"碰屏幕→贴贴
+                                  # 之间有 3~5 秒延迟"——不是延迟，是贴贴动画
+                                  # 被连续重放了两三遍）。计数器设计本身是为了
+                                  # 让"轮询慢也不会漏事件"，但没法区分"这是
+                                  # 三次独立的点击"还是"同一次点击被触摸传感器
+                                  # 弹跳成了三次计数"，所以在这之上再加一层
+                                  # 基于时间的冷却：距离上一次真正触发"贴贴"
+                                  # 不到这个时长，就算 screen_tap_count 又变了
+                                  # 也不重新触发。1.0s 远大于日志里观察到的
+                                  # 弹跳间隔（约 0.2~0.4s，几个 tick 之隔），
+                                  # 但又不会明显影响用户想连续拍两下的正常
+                                  # 使用（连续拍两下本来间隔通常也不会短于 1s）。
 
 # --- 语音唤醒 ---
 # 方案演进：最早是 /volume 轮询 + /record 间歇录音（方案A），根本问题是
@@ -2326,6 +2342,10 @@ class PuppyEngine:
         # 校准基线，不当成事件触发。
         self.last_double_tap_count = None
         self.last_screen_tap_count = None
+        # 屏幕点击的冷却时间戳，见 SCREEN_TAP_DEBOUNCE_SEC 定义处的说明——
+        # 防止触摸传感器把同一次物理点按弹跳成 screen_tap_count 连续多次
+        # 递增，导致"贴贴"动画被连续重放好几遍。0.0 表示还没触发过。
+        self.last_screen_tap_trigger_time = 0.0
 
         # "晕"状态：摇晃/拿起信号消失后，不立刻转"兴奋"，要在"晕"表情上
         # 再停留 DIZZY_LINGER_SEC 秒——None 表示信号还在（或者还没进过一次
@@ -3223,6 +3243,16 @@ class PuppyEngine:
         screen_tap = screen_tap_count != self.last_screen_tap_count
         self.last_double_tap_count = double_tap_count
         self.last_screen_tap_count = screen_tap_count
+        if screen_tap:
+            # 计数器变了不代表这是一次独立的新点击——见 SCREEN_TAP_
+            # DEBOUNCE_SEC 定义处的说明，同一次物理点按有时会被触摸传感器
+            # 弹跳成好几次计数递增，冷却时间内的这些额外递增直接吞掉，不
+            # 当成新的一次点击（但计数基线上面已经更新过了，不会遗留到
+            # 冷却结束后被误判成"刚刚发生"）。
+            if now - self.last_screen_tap_trigger_time < SCREEN_TAP_DEBOUNCE_SEC:
+                screen_tap = False
+            else:
+                self.last_screen_tap_trigger_time = now
 
         pressed = held_ms > 0
         if pressed and not self.touch_pressed:
