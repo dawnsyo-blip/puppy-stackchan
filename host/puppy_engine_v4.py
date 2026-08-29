@@ -111,6 +111,17 @@ MAIN_LOOP_INTERVAL_SEC = 0.2    # 主循环 tick() 间隔——原来是 0.5s，
                                  # INTERVAL_SEC 内部节流（这两个值没变），
                                  # tick() 只是"有资格检查"的时机变密了，实际
                                  # 发不发请求还是那两个值说了算。
+API_SLOW_WARN_SEC = 0.8         # api_get()——所有设备请求的唯一入口——单次
+                                  # 总耗时（含排队等 _device_lock 的时间）
+                                  # 超过这个值就打印警告，覆盖 /camera、
+                                  # /servo、/status、/face、/led、/touch
+                                  # 等全部接口。跟 CAMERA_SLOW_WARN_SEC 同一
+                                  # 个量级——之前分别给 /camera 的网络耗时、
+                                  # 解码+推理耗时单独加过计时，排查"触摸→
+                                  # 贴贴延迟"时那几次慢 tick 却都没触发这两
+                                  # 处警告，说明卡住的是某个没被单独测过的
+                                  # 请求（很可能是 /servo 或 /status）在排队
+                                  # 等锁，所以在这个唯一入口上兜底测一次。
 FACE_INFER_SLOW_WARN_SEC = 0.3   # detect_face_once() 里解码+MediaPipe 推理
                                   # 这一段单独超过这个值就打印警告——这段不受
                                   # FACE_BG_TIMEOUT_SEC 约束（那个只管网络
@@ -1281,7 +1292,18 @@ _device_lock = threading.Lock()
 
 def api_get(endpoint, timeout=None, _retry=True):
     """GET 请求失败（连不上/超时）时不要立刻重试——先等 API_RETRY_DELAY_SEC，
-    重试一次；再失败就放弃，返回 None。避免在设备已经吃紧时连续拍请求。"""
+    重试一次；再失败就放弃，返回 None。避免在设备已经吃紧时连续拍请求。
+
+    **这是所有设备请求的唯一入口，加计时诊断放在这里能一次性覆盖 /camera、
+    /servo、/status、/face、/led、/touch 等全部接口**——之前分别给
+    capture_frame_with_bytes()（网络）和 detect_face_once()/check_gesture()
+    （解码+推理）单独加过计时，排查"触摸→贴贴延迟"时那几次 tick 却全部
+    没有触发这两处警告，说明真正卡住的不是这两类，而是某个别的请求（比如
+    play_tietie_animation() 内部连续发的好几个 /servo，或者 get_status()）
+    在排队等这把 `_device_lock`。计时从函数一开始就算，把排队等锁的时间也
+    算进去——这才是调用方真正感受到的耗时，跟锁内部发生的网络请求耗时
+    是两回事，都要看得到。"""
+    t0 = time.time()
     try:
         with _device_lock:
             return _session.get(f"{BASE_URL}{endpoint}", timeout=timeout or TIMEOUT)
@@ -1291,6 +1313,11 @@ def api_get(endpoint, timeout=None, _retry=True):
             time.sleep(API_RETRY_DELAY_SEC)
             return api_get(endpoint, timeout=timeout, _retry=False)
         return None
+    finally:
+        elapsed = time.time() - t0
+        if elapsed > API_SLOW_WARN_SEC:
+            print(f"[请求] {endpoint} 这次总耗时 {elapsed:.2f}s（含排队等锁），"
+                  f"明显超过正常水平")
 
 def set_expression(key):
     api_get(f"/face?expr={EXPRESSION_MAP.get(key, 'neutral')}")
