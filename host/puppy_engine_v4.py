@@ -274,7 +274,7 @@ FINGER_GUN_THUMB_SPREAD_RATIO = 0.6  # 拇指指尖到食指根部的距离，�
                                   # （手腕到中指根部的距离）的比例，大于这个值
                                   # 才算张开
 HAND_MODEL_PATH = str(Path(__file__).resolve().parent / "hand_landmarker.task")
-GESTURE_LED_BREATHE_PERIOD_MS = 2000  # 窗口期"等待手势"的柔和暖白呼吸灯周期
+GESTURE_LED_BREATHE_PERIOD_MS = 2000  # 窗口期"等待手势"的绿色呼吸灯周期
 
 # --- "再见"手势（挥手 / 五指捏住再放开）→ 委屈 → 隐私 ---
 # 跟"手指枪"共用同一个手势扫描窗口、同一次 /camera 拍照 + Hand Landmarker
@@ -2511,11 +2511,14 @@ class PuppyEngine:
         play_tietie_animation()
         # "贴贴"动画播完，开一个手势扫描窗口——期待接下来几秒用户可能会
         # 比"手指枪"手势逗小狗装死，见 check_gesture()/tick() 里的窗口机制。
-        # 柔和的暖白呼吸灯给用户一个"小狗在等你比手势"的提示，覆盖掉
-        # play_tietie_animation() 刚设的开心常亮；窗口关闭时（自然过期
-        # 或者检测成功触发装死）都会把 LED 换掉，见 tick() 里的处理。
+        # 绿色呼吸灯给用户一个更直接的"小狗正在识别手势"的反馈（原来是暖白，
+        # 跟"开心"常亮的暖白色调太接近，不容易一眼看出状态已经变了；改用
+        # THINKING_GREEN_RGB，跟"好奇/思考"复用同一个已验证的绿色，语义上
+        # 也贴切——都是"正在识别中"）；覆盖掉 play_tietie_animation() 刚设的
+        # 开心常亮，窗口关闭时（自然过期或者检测成功触发装死/委屈）都会把
+        # LED 换掉，见 tick() 里的处理。
         self.gesture_scan_until = time.time() + GESTURE_WINDOW_SEC
-        set_led_mode("breathe", *WARM_WHITE_RGB, period_ms=GESTURE_LED_BREATHE_PERIOD_MS)
+        set_led_mode("breathe", *THINKING_GREEN_RGB, period_ms=GESTURE_LED_BREATHE_PERIOD_MS)
 
     def restore_state_led(self):
         """把 LED 恢复成当前状态本该有的常驻效果——任何"临时借用" LED 的地方
