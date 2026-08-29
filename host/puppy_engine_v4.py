@@ -2919,13 +2919,25 @@ class PuppyEngine:
 
         自己按 GESTURE_POLL_SEC 节流（跟 check_touch() 的 TOUCH_POLL_SEC
         是同一个写法），调用方（tick()）不需要关心频率，只要窗口开着就可以
-        每个 tick 都调，不会因为节流而漏调。"""
+        每个 tick 都调，不会因为节流而漏调。
+
+        **拍照用短超时+不重试（FACE_BG_TIMEOUT_SEC，不是默认 TIMEOUT(5s)+
+        重试）**：这个方法是直接在主线程 tick() 里同步调用的，不是像
+        check_face()/retrack_face() 那样放进了后台线程——用户反馈"碰屏幕
+        →贴贴之间有 3~5 秒延迟"，排查发现正是这里：只要某一次 `/camera`
+        请求慢一点甚至失败，tick() 就会跟着卡住最多 5 秒（失败还要再等
+        API_RETRY_DELAY_SEC 重试一次，最坏能到 10 秒+），这段时间里任何
+        触摸检测都要陪着等。跟"定时提醒"一节 `_check_presence_monitoring()`
+        采样、以及 `_check_face_worker()`/`_retrack_face_worker()` 是同一类
+        "低优先级、错过一次无所谓"的场景——下面 `img is None` 分支本来就
+        把拍照失败当成"这一帧不是手指枪"处理，不是致命错误，没有理由用
+        给"阻塞等待、必须等到结果"路径设计的默认超时。"""
         now = time.time()
         if now - self.last_gesture_check < GESTURE_POLL_SEC:
             return
         self.last_gesture_check = now
 
-        img = capture_frame()
+        img = capture_frame(timeout=FACE_BG_TIMEOUT_SEC, _retry=False)
         if img is None:
             # 拍照失败当成"这一帧不是手指枪"计入滑动窗口，不整个清空——
             # 跟下面判定逻辑的滑动窗口是同一个道理，偶尔一帧的意外（拍照
