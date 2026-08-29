@@ -54,6 +54,7 @@ import io
 import math
 import urllib.request
 from pathlib import Path
+from collections import deque
 from enum import Enum
 from datetime import datetime, timedelta
 from urllib.parse import quote
@@ -258,7 +259,18 @@ GESTURE_WINDOW_SEC = 15.0        # 窗口持续时间
 GESTURE_POLL_SEC = 0.8           # 窗口期内摄像头轮询间隔——瓶颈是 /camera 本身
                                   # 的响应速度（200-500ms），不是 MediaPipe 推理
                                   # 速度（20-50ms），这个间隔留了余量，不会请求堆积
-FINGER_GUN_CONFIRM_FRAMES = 2    # 连续多少帧判定成立才真正触发，防止单帧误判
+FINGER_GUN_CONFIRM_HITS = 2      # 最近 FINGER_GUN_WINDOW_FRAMES 帧里至少命中
+                                  # 这么多次才真正触发，防止单帧误判
+FINGER_GUN_WINDOW_FRAMES = 3     # 滑动窗口大小——原来是"必须连续命中"，用
+                                  # host/gesture_test.py 实机测过才发现这个
+                                  # 要求太脆：即使全程稳定比着手指枪，单帧
+                                  # landmark 抖动也会让某一帧偶尔判不中（比如
+                                  # 食指伸展比例卡在阈值附近来回跳），"连续"
+                                  # 要求会因为这一次孤立的漏判把已经攒的进度
+                                  # 清零，变成要重新连中 FINGER_GUN_CONFIRM_
+                                  # HITS 次才行。改成"最近几帧里累计命中够
+                                  # 次数"（窗口 3 帧、要求命中 2 帧），能容忍
+                                  # 中间偶尔漏判一帧，不需要要求帧帧都对。
 # 手指枪判定用的都是"距离比例"而不是绝对坐标差（原因见 classify_finger_
 # gun_pose() 顶部的详细说明：绝对坐标差被实测证明对手离摄像头的距离/画面
 # 里的旋转角度太敏感，同一个手势换个距离/角度判定结果会飘）。这几个比例
@@ -2237,7 +2249,10 @@ class PuppyEngine:
         self.hand_landmarker = vision.HandLandmarker.create_from_options(hand_opts)
         self.gesture_scan_until = 0.0
         self.last_gesture_check = 0
-        self.finger_gun_count = 0
+        # 最近 FINGER_GUN_WINDOW_FRAMES 帧里"是不是手指枪"的滑动窗口
+        # （见 FINGER_GUN_WINDOW_FRAMES 常量定义处的说明），命中次数够
+        # FINGER_GUN_CONFIRM_HITS 就触发，不要求连续。
+        self.finger_gun_history = deque(maxlen=FINGER_GUN_WINDOW_FRAMES)
         # "再见"手势（挥手/五指捏住再放开）状态，跟手指枪共用同一个扫描
         # 窗口和同一次检测结果，见 check_gesture()。wave_x_history 是张开
         # 手掌时手掌水平位置的滚动历史（(时间戳, x, 手掌尺度) 三元组），
@@ -2795,11 +2810,11 @@ class PuppyEngine:
         move_servo(yaw=new_yaw, speed=200)
 
     def _reset_gesture_scan_state(self):
-        """清空手势扫描窗口累积的所有检测状态——手指枪的连续帧计数、"再见"
+        """清空手势扫描窗口累积的所有检测状态——手指枪的滑动窗口历史、"再见"
         手势的挥手历史和"已捏拢等放开"标记。窗口关闭的两条路径（检测成功
         主动关闭 / tick() 里自然过期）都要调用，不然残留状态会被下一次开
         窗口的检测当成"本来就有"的数据，见 tick() 里对应分支的说明。"""
-        self.finger_gun_count = 0
+        self.finger_gun_history.clear()
         self.wave_x_history = []
         self.goodbye_pinch_since = 0.0
 
@@ -2851,8 +2866,8 @@ class PuppyEngine:
         用同一个模型统一判定更省事，也不用额外加载第二个模型。
 
         **手指枪优先于"再见"，不是两个独立判定各走各的**：只要这一帧看起来
-        像手指枪（哪怕还没攒够 FINGER_GUN_CONFIRM_FRAMES 帧确认），这一帧
-        就不再判断"再见"。这不是预防性设计，是用 host/gesture_test.py 实机
+        像手指枪（哪怕滑动窗口里累计命中次数还没到 FINGER_GUN_CONFIRM_HITS），
+        这一帧就不再判断"再见"。这不是预防性设计，是用 host/gesture_test.py 实机
         测出来的真实冲突：从放松的手摆成手指枪的过程会自然经过"指尖先聚拢
         再散开"（其余手指攥起的瞬间指尖靠拢，随后食指伸出、跟攥起的那几根
         拉开距离，指尖又散开），这个过渡形状会依次满足"再见"里"五指捏拢"
@@ -2871,27 +2886,35 @@ class PuppyEngine:
 
         img = capture_frame()
         if img is None:
-            self.finger_gun_count = 0
+            # 拍照失败当成"这一帧不是手指枪"计入滑动窗口，不整个清空——
+            # 跟下面判定逻辑的滑动窗口是同一个道理，偶尔一帧的意外（拍照
+            # 失败/没检测到手）不该让已经攒的进度全部作废。
+            self.finger_gun_history.append(False)
             return
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         results = self.hand_landmarker.detect(mp_img)
 
         if not results.hand_landmarks:
-            self.finger_gun_count = 0
+            self.finger_gun_history.append(False)
             return
         lm = results.hand_landmarks[0]
 
-        # --- 手指枪 → 装死：连续 FINGER_GUN_CONFIRM_FRAMES 帧都命中才真正
-        #     触发（防止单帧误判）。
+        # --- 手指枪 → 装死：最近 FINGER_GUN_WINDOW_FRAMES 帧里命中够
+        #     FINGER_GUN_CONFIRM_HITS 次才真正触发（防止单帧误判）。原来
+        #     要求"连续"命中，host/gesture_test.py 实机测过才发现这个要求
+        #     太脆——即使全程稳定比着手指枪，单帧 landmark 抖动也会让某一
+        #     帧偶尔判不中（比如食指伸展比例卡在阈值附近来回跳），"连续"
+        #     要求会因为这一次孤立的漏判把已经攒的进度清零。改成滑动窗口
+        #     累计命中次数，能容忍中间偶尔漏判一帧。
         gun_result = classify_finger_gun_pose(lm)
+        self.finger_gun_history.append(gun_result["is_gun"])
+        hit_count = sum(self.finger_gun_history)
         if gun_result["is_gun"]:
-            self.finger_gun_count += 1
-            print(f"[手势] 检测到手指枪（{self.finger_gun_count}/{FINGER_GUN_CONFIRM_FRAMES}）")
-        else:
-            self.finger_gun_count = 0
+            print(f"[手势] 检测到手指枪（最近{len(self.finger_gun_history)}帧命中"
+                  f"{hit_count}/{FINGER_GUN_CONFIRM_HITS}）")
 
-        if self.finger_gun_count >= FINGER_GUN_CONFIRM_FRAMES:
+        if hit_count >= FINGER_GUN_CONFIRM_HITS:
             print("[触发] 手指枪确认 → 装死")
             self.gesture_scan_until = 0.0
             self._reset_gesture_scan_state()
@@ -2899,7 +2922,7 @@ class PuppyEngine:
             return
 
         # **这一帧只要像手指枪，就不再往下判断"再见"，即使还没攒够
-        # FINGER_GUN_CONFIRM_FRAMES 帧确认**——用 host/gesture_test.py 实机
+        # FINGER_GUN_CONFIRM_HITS 次确认**——用 host/gesture_test.py 实机
         # 测过才发现的真实冲突：从放松的手摆成手指枪，中间会经过"手指先
         # 聚拢再散开"这个过渡（其余手指攥起来的瞬间指尖会先靠拢，随后食指
         # 伸出、跟攥起的那几根拉开距离，指尖整体的散开程度又变大）——这个
