@@ -2736,13 +2736,24 @@ class PuppyEngine:
 
         装死状态下收得比隐私更紧：碰屏幕、头顶长按都直接忽略（跟隐私共用
         的 `and self.state != State.PRIVACY`/长按分支的 `and` 条件里都
-        补一个排除 DEAD），只认头顶双击——双击本来就是不分状态的全局触发，
-        不需要专门加分支，落进下面 `elif touch["double_tap"]:` 那一支，
-        自然会调 enter_excited_from_touch()（见那个方法里对 DEAD 状态的
-        额外处理：先转回正对人脸，因为装死时头是低垂朝下的）。"""
+        补一个排除 DEAD），改成**只要碰到头顶（不要求双击）就退出装死**。
+        原来只认头顶双击，实测反馈双击判定不总能可靠触发、而且双击本身要
+        等两次点按的窗口，退出装死这个反应不需要双击的"确认"语义（不像
+        隐私退出还需要区分"只是碰一下"和"真的要出来"），改成任何一次触摸
+        头顶都算数，响应更快也更可靠。`is_dead_touch` 只看
+        `self.state == State.DEAD and touch["held_ms"] > 0`，不需要额外的
+        "已经触发过"标记去防抖——一旦触发就会调 `enter_excited_from_touch()`
+        把状态切离 DEAD，下一次检查时 `self.state == State.DEAD` 天然为
+        假，不会重复触发（这点跟长按判断隐私不一样：长按是在同一个状态里
+        持续满足阈值，必须靠 `privacy_hold_fired` 这个标记防抖；这里触发
+        条件本身就绑定着"还没离开 DEAD"，状态一变条件自动失效）。双击仍然
+        是全局触发，如果这次触摸恰好也构成双击，会走 `elif touch["double_
+        tap"]:` 那一支，效果一样（都是调 `enter_excited_from_touch()`），
+        不算冲突，只是同一个目的地的另一条路径。"""
         is_screen_trigger = touch["screen_tap"] and self.state not in (State.PRIVACY, State.DEAD)
+        is_dead_touch = self.state == State.DEAD and touch["held_ms"] > 0
         is_trigger = (
-            is_screen_trigger or touch["double_tap"]
+            is_screen_trigger or touch["double_tap"] or is_dead_touch
             or (touch["held_ms"] >= PRIVACY_HOLD_SEC * 1000 and not self.privacy_hold_fired
                 and self.state != State.DEAD)
         )
@@ -2783,6 +2794,9 @@ class PuppyEngine:
                 # 不是真的有过渡动画或者触摸延迟，是这次多余的确认闪光本身
                 # 制造出的错觉。
                 self.enter_excited_from_touch()
+        elif is_dead_touch:
+            print("[触发] 装死状态下触摸头顶 → 兴奋")
+            self.enter_excited_from_touch()
         else:
             self.privacy_hold_fired = True
             if self.state == State.PRIVACY:
@@ -3220,7 +3234,15 @@ class PuppyEngine:
             # 每帧都会按当前 g_ledMode 重算颜色，如果当前状态本来就是呼吸/
             # 闪烁/渐暗这类持续模式，一次性设色马上就会被下一帧的模式覆盖掉，
             # 必须用 mode 参数真正切换掉当前模式才压得住。
-            set_led_mode("solid", *WARM_WHITE_RGB)
+            # **装死状态下不点这一下**：这个按下沿的下一步就是
+            # handle_touch_trigger() 判定 is_dead_touch 为真、立刻调
+            # enter_excited_from_touch()（切成彩虹快闪），点完暖白灯马上又
+            # 被覆盖，跟"装死→兴奋之间会先变成开心"那次教训是同一个模式
+            # （暖白正好是开心的招牌配色，紧跟着真正的状态切换会造成"先开心
+            # 一下再兴奋"的错觉）——装死本身不需要"按对了在等"这种反馈，
+            # 触摸头顶就是立刻退出，不存在需要等待确认的中间态。
+            if self.state != State.DEAD:
+                set_led_mode("solid", *WARM_WHITE_RGB)
         if not pressed and self.touch_pressed:
             print("[触摸] 松开")
             self.record_interaction()
