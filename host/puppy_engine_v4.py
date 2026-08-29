@@ -2093,7 +2093,17 @@ class MicStream:
 
 
 def _landmark_dist(a, b):
-    return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
+    """三维距离，不是只看画面里的 x/y——手指枪本来就是"朝前指"的手势，
+    枪管（食指）天然容易正对着摄像头的光轴指过去，这个方向上的伸展会被
+    2D 投影严重压扁：食指明明伸得笔直，但因为主要在"纵深"方向上伸展、
+    在画面平面上的水平/垂直位移很小，wrist→指尖 的 2D 距离会显著小于
+    真实的 3D 长度，实测下来 index_ratio 经常卡在 0.8~1.15、摸不到
+    FINGER_EXTEND_RATIO(1.2) 的门槛，而且不是偶尔一帧的抖动，是连续
+    一整段测试期间稳定地测不准——是系统性的投影偏差，不是噪声。
+    MediaPipe Hand Landmarker 的每个关键点自带 z（以手腕为原点的相对
+    深度，跟 x/y 同一个量纲），加上这一维就是真正的手部关键点间 3D
+    距离，不再受"手指恰好指向镜头"这个角度的影响。"""
+    return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2) ** 0.5
 
 
 def classify_finger_gun_pose(lm):
@@ -2192,11 +2202,18 @@ def classify_open_pinch_pose(lm):
         and ring_ratio > FINGER_SPREAD_OPEN_RATIO and pinky_ratio > FINGER_SPREAD_OPEN_RATIO
     )
 
+    # 质心距离也算上 z——跟 _landmark_dist() 改成 3D 距离是同一个理由，
+    # 指尖聚拢/散开同样可能主要发生在朝向摄像头的纵深方向上（比如手整体
+    # 前后运动时指尖投影位置变化很小），只看 x/y 会漏掉这部分变化。
     tip_idxs = (4, 8, 12, 16, 20)
     tips = [lm[i] for i in tip_idxs]
     centroid_x = sum(t.x for t in tips) / len(tips)
     centroid_y = sum(t.y for t in tips) / len(tips)
-    avg_tip_dist = sum(((t.x - centroid_x) ** 2 + (t.y - centroid_y) ** 2) ** 0.5 for t in tips) / len(tips)
+    centroid_z = sum(t.z for t in tips) / len(tips)
+    avg_tip_dist = sum(
+        ((t.x - centroid_x) ** 2 + (t.y - centroid_y) ** 2 + (t.z - centroid_z) ** 2) ** 0.5
+        for t in tips
+    ) / len(tips)
     tip_spread_ratio = avg_tip_dist / hand_scale
     is_pinched = tip_spread_ratio < PINCH_TIP_SPREAD_RATIO
     is_released = tip_spread_ratio > RELEASE_TIP_SPREAD_RATIO
