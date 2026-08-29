@@ -71,6 +71,9 @@ from scipy.signal import resample_poly
 # ║            可调参数（调参改这里）             ║
 # ╚══════════════════════════════════════════════╝
 
+# 电脑和 StackChan 都改接手机热点后，这两个值要跟着换：BASE_URL 换成 StackChan
+# 开机屏幕上打印出来的实际 IP（固件已改成 DHCP，不再是固定的 .100）；
+# COMPUTER_IP 换成电脑在手机热点这个网络上的 IP（连上后用 ipconfig 查）。
 BASE_URL = "http://192.168.137.100"
 COMPUTER_IP = "192.168.137.1"   # 电脑在热点网络上的 IP（StackChan 用它来下载要播放的音频，
                                  # 也是 /stream 推流要连过来的地址）
@@ -183,6 +186,18 @@ SLEEPY_SPEED = 50
 PRIVACY_YAW = 800
 PRIVACY_PITCH = 100
 PRIVACY_SPEED = 150
+
+# --- 隐私→兴奋过渡（_face_person_before_excited()）---
+# 双击头顶退出隐私时，需要先转回正对前方才能拍照定位人脸——PRIVACY_YAW=800
+# 离正前方很远，转回来这段时间是用户能感觉到的等待，要尽量压缩：转速改用
+# EXCITED_YAW_SPEED（兴奋动画同款已验证转速），比原来 go_home() 走的固件
+# 默认归位速度快；settle 超时也跟着从原来的 3.0s 收紧——转速已经提上去了，
+# 不需要再留那么多余量。拍照定位改用短超时+不重试（FACE_BG_TIMEOUT_SEC，
+# 跟后台人脸检测 _check_face_worker() 同一套参数），不用默认 TIMEOUT(5s)+
+# 重试那一套给"阻塞等待、必须等到结果"路径设计的参数——这里等的是用户能
+# 看见的一次手势反馈，找不到人脸就直接跳过微调进兴奋，没必要死等。
+FACE_PERSON_SETTLE_TOLERANCE = 30
+FACE_PERSON_SETTLE_TIMEOUT_SEC = 1.2
 
 # --- LED（对照表情映射v7.xlsx）---
 # 固件的 /led 现在支持 mode 参数（solid/blink/breathe/rainbow/fade），呼吸/
@@ -1090,10 +1105,16 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"人"
   的词，各占 keywords 数组里的一项）。你说的每一句话，不管是简单回应还是
   复杂回应，都只能通过关键词表达，不能输出完整语句——这是这只小狗表达
   自己的唯一方式，类似 AAC（辅助沟通）设备，不是在写一句正常的话。
-  错误示范（发生过，绝对不要这样）：
+  错误示范一（发生过，绝对不要这样）：
   {"type": "qa_complex", "keywords": ["今天天气很好，还伴有微风"]}
   ——这是把整句话原样塞进了 keywords 数组的一项里，等于完全没有拆分成
   关键词，念出来会变成小狗说了一整句完整的话。
+  错误示范二（也发生过，同样绝对不要这样）：
+  {"type": "qa_complex", "keywords": ["外面 好 风"]}
+  ——第二步说的"空格分隔"只是给你自己压缩时用的中间步骤，最终写进
+  keywords 数组时必须已经按空格拆成三个独立的项 ["外面","好","风"]；
+  把这个中间形式原样整个塞进数组的一项里，会导致这三个词被当成一个词
+  连在一起一次性说完，而不是分开、一个一个地说。
 - 优先从下面的词库里选，但不局限于词库，需要时可以用词库外的词（权重从高
   到低排列）：
   需求词（权重最高）：外面、出门、玩、水、零食、飞盘、球球、拔河、罐罐、
@@ -1717,21 +1738,38 @@ def ask_llm(user_text, api_key):
 
 def sanitize_keywords(keywords):
     """qa_complex 的关键词是 AAC 按钮式的短词/短语，SYSTEM_PROMPT 明确要求
-    每个 1-3 个字、绝对不能是完整句子——但 LLM 不是每次都遵守，偶尔会把没
-    拆开的一整句话直接塞进 keywords 数组的某一项里。这种违规在 host 端解析
-    JSON 时完全合法（就是个正常的字符串数组），不会被 ask_llm() 的异常处理
-    拦下来，一路传到 speak_keywords()，把这一项当成"一个关键词"合成语音
-    播放——表现出来就是"小狗突然说了一整句完整的话"而不是关键词风格的短促
-    回应。这里做最后一道防线：超过 KEYWORD_MAX_CHARS 的直接丢弃，不做
-    截断（截断出来的半截句子听起来更奇怪，不如跳过这一个，用剩下合规的
-    关键词照常回应）；如果全部超长（比如就一个词、还刚好是句子），保留
-    第一个并截断，总比什么都不说要好。"""
-    cleaned = [kw for kw in keywords if kw and len(kw) <= KEYWORD_MAX_CHARS]
+    每个 1-3 个字、绝对不能是完整句子——但 LLM 不是每次都遵守。有两种不同的
+    违规，分别处理：
+
+    ①一整句话直接塞进 keywords 数组的某一项里（没有任何拆分）。这种违规在
+    host 端解析 JSON 时完全合法（就是个正常的字符串数组），不会被 ask_llm()
+    的异常处理拦下来，一路传到 speak_keywords()，把这一项当成"一个关键词"
+    合成语音播放——表现出来就是"小狗突然说了一整句完整的话"。这里做最后
+    一道防线：超过 KEYWORD_MAX_CHARS 的直接丢弃，不做截断（截断出来的半截
+    句子听起来更奇怪，不如跳过这一个，用剩下合规的关键词照常回应）；如果
+    全部超长（比如就一个词、还刚好是句子），保留第一个并截断，总比什么都
+    不说要好。
+
+    ②SYSTEM_PROMPT 第 6 条要求 LLM 先把回答压缩成"2-4 个关键词（空格分隔）"
+    的中间形式，再拆成 JSON 数组——LLM 有时会漏掉"拆"这一步，直接把这个
+    空格分隔的中间形式整个塞进数组的一项里（比如 ["外面 好 风"] 而不是
+    ["外面","好","风"]）。这种情况每一项本身字符数通常不超过
+    KEYWORD_MAX_CHARS，不会被①的超长检查拦下来，结果是这几个词被合成成
+    一整段连续语音一次性播完，按钮却只按一次——用户听起来像"所有关键词一次
+    性说出来"，跟"每念一个词按钮按一下"的设计脱节。关键词本身不应该含空格
+    （空格只在压缩阶段的中间形式里出现），所以先按空格把每一项展开成多项，
+    再套用①的长度过滤——不管 LLM 有没有老老实实完成"拆"这一步，出来的
+    每一项都只会是一个词。"""
+    expanded = []
+    for kw in keywords:
+        if kw:
+            expanded.extend(kw.split())
+    cleaned = [kw for kw in expanded if kw and len(kw) <= KEYWORD_MAX_CHARS]
     if cleaned:
         return cleaned
-    if keywords and keywords[0]:
-        print(f"[对话] 关键词全部超长（疑似 LLM 没拆句子），截断保底: {keywords[0][:KEYWORD_MAX_CHARS]}")
-        return [keywords[0][:KEYWORD_MAX_CHARS]]
+    if expanded and expanded[0]:
+        print(f"[对话] 关键词全部超长（疑似 LLM 没拆句子），截断保底: {expanded[0][:KEYWORD_MAX_CHARS]}")
+        return [expanded[0][:KEYWORD_MAX_CHARS]]
     return []
 
 
@@ -2593,23 +2631,28 @@ class PuppyEngine:
         self.transition(State.PRIVACY)
 
     def _face_person_before_excited(self):
-        """隐私状态下摄像头是关的，不知道人具体在哪——先回正（比停留在隐私
-        姿势转开的角度好）。隐私姿势（PRIVACY_YAW=800）离回正角度很远，不能
-        瞎猜一个固定时长就去拍照确认人脸，跟 _settle_privacy_mic() 一样直接
-        轮询 /status 确认舵机真的转到位了（有限等待，超时就按当前角度继续，
-        不会卡死）。到位后拍一帧确认人脸位置，找到的话再用 track_face_
-        servo() 微调一次朝向人脸。"""
-        go_home()
-        deadline = time.time() + 3.0
+        """隐私状态下摄像头是关的，不知道人具体在哪——先转回正对前方（比
+        停留在隐私姿势转开的角度好），再拍照定位人脸、用 track_face_servo()
+        朝人脸方向微调，这一步做完才真正进兴奋（顺序：转正→定位→兴奋）。
+        隐私姿势（PRIVACY_YAW=800）离正前方很远，不能瞎猜一个固定时长就去
+        拍照，跟 _settle_privacy_mic() 一样直接轮询 /status 确认舵机真的
+        转到位了；但这整段是双击之后用户能感觉到的等待时间，要尽量压缩——
+        转速用 EXCITED_YAW_SPEED（而不是 go_home() 那个转速不可控的固件
+        默认归位）转得更快，settle 超时也跟着收紧（FACE_PERSON_SETTLE_
+        TIMEOUT_SEC），拍照定位改用短超时+不重试（FACE_BG_TIMEOUT_SEC，
+        跟后台人脸检测同一套参数）而不是默认的 5 秒+重试，没找到人脸就直接
+        跳过微调进兴奋，不会为了等一次检测拖慢整个手势反馈。"""
+        move_servo(yaw=0, pitch=450, speed=EXCITED_YAW_SPEED, mute=True)
+        deadline = time.time() + FACE_PERSON_SETTLE_TIMEOUT_SEC
         while time.time() < deadline:
             status = get_status()
             if status:
-                yaw_ok = abs(status.get("yaw", 0) - 0) <= 30
-                pitch_ok = abs(status.get("pitch", 0) - 450) <= 30
+                yaw_ok = abs(status.get("yaw", 0) - 0) <= FACE_PERSON_SETTLE_TOLERANCE
+                pitch_ok = abs(status.get("pitch", 0) - 450) <= FACE_PERSON_SETTLE_TOLERANCE
                 if yaw_ok and pitch_ok:
                     break
-            time.sleep(0.15)
-        found, face_x = self.detect_face_once()
+            time.sleep(0.1)
+        found, face_x = self.detect_face_once(timeout=FACE_BG_TIMEOUT_SEC, _retry=False)
         if found:
             self.face_detected = True
             self.face_confirm_count = FACE_CONFIRM_FRAMES
