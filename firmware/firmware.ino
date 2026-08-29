@@ -1441,12 +1441,16 @@ void setup() {
   M5StackChan.Display().setCursor(10, 10);
   M5StackChan.Display().println("Starting up...");
 
-  // WiFi with static IP
+#ifdef USE_STATIC_IP
+  // 静态 IP:只在 config.h 定义了 USE_STATIC_IP 时启用(比如接回电脑自己开的
+  // 热点、子网已知固定的场景)。手机热点的网关/子网因机型而异且不一定能提前
+  // 知道,默认走 DHCP,开机屏幕会打印实际分配到的 IP。
   IPAddress staticIP(STATIC_IP);
   IPAddress gateway(GATEWAY_IP);
   IPAddress subnet(SUBNET_MASK);
   IPAddress dnsIP(DNS_IP);
   WiFi.config(staticIP, gateway, subnet, dnsIP);
+#endif
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   WiFi.setSleep(false);
   M5StackChan.Display().print("WiFi");
