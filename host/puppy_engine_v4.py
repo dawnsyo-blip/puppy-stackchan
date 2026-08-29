@@ -111,6 +111,11 @@ MAIN_LOOP_INTERVAL_SEC = 0.2    # 主循环 tick() 间隔——原来是 0.5s，
                                  # INTERVAL_SEC 内部节流（这两个值没变），
                                  # tick() 只是"有资格检查"的时机变密了，实际
                                  # 发不发请求还是那两个值说了算。
+CAMERA_SLOW_WARN_SEC = 0.8       # 单次 /camera 请求（含排队等待锁的时间）
+                                  # 超过这个值就打印警告——独立用 curl 连续
+                                  # 测过 /camera，稳定在 ~0.5s，这里留了
+                                  # 三成左右的余量再报警，避免正常波动也
+                                  # 天天刷屏。
 SLOW_TICK_WARN_SEC = 1.0        # 单次 tick() 实际耗时超过这个值就打印警告——
                                  # 排查"触摸反应慢"时，光看 `[循环] tick #N`
                                  # 的编号完全看不出真实耗时（编号只是数数，不
@@ -1371,8 +1376,23 @@ def capture_frame_with_bytes(timeout=None, _retry=True):
 
     timeout/_retry 透传给 api_get()——后台人脸检测线程（见 check_face()/
     retrack_face() 的 _check_face_worker()/_retrack_face_worker()）会传一个
-    短得多的超时、且不重试，理由见那两个函数旁边的说明。"""
+    短得多的超时、且不重试，理由见那两个函数旁边的说明。
+
+    **打印本次请求的真实耗时（超过 CAMERA_SLOW_WARN_SEC 才打印，不是每次都
+    打印）**：排查"触摸响应慢"时发现单独用 curl 连续测 `/camera` 稳定在
+    500ms 左右，但完整引擎跑起来之后同一个接口偶尔要 1.5s+甚至超时——两者
+    矛盾，说明变慢的不是设备/网络本身，而是多个请求（人脸追踪的两个后台
+    线程、手势扫描）共用同一把 `_device_lock` 排队等待的结果。这里的计时
+    从进入这个函数开始算，会把排队等待的时间也算进去（因为锁是在
+    `api_get()` 内部才获取的，调用方等的其实是"排队+真正的网络耗时"这个
+    合计），这样才能看出到底是网络请求本身变慢了，还是好几个请求排队排
+    出来的。"""
+    t0 = time.time()
     r = api_get("/camera", timeout=timeout, _retry=_retry)
+    elapsed = time.time() - t0
+    if elapsed > CAMERA_SLOW_WARN_SEC:
+        print(f"[相机] /camera 这次实际耗时 {elapsed:.2f}s（含排队等待），"
+              f"明显超过正常的 ~0.5s")
     if r and r.status_code == 200:
         arr = np.frombuffer(r.content, np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR), r.content
