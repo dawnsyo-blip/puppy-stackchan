@@ -111,6 +111,17 @@ MAIN_LOOP_INTERVAL_SEC = 0.2    # 主循环 tick() 间隔——原来是 0.5s，
                                  # INTERVAL_SEC 内部节流（这两个值没变），
                                  # tick() 只是"有资格检查"的时机变密了，实际
                                  # 发不发请求还是那两个值说了算。
+SLOW_TICK_WARN_SEC = 1.0        # 单次 tick() 实际耗时超过这个值就打印警告——
+                                 # 排查"触摸反应慢"时，光看 `[循环] tick #N`
+                                 # 的编号完全看不出真实耗时（编号只是数数，不
+                                 # 代表每次间隔都接近 MAIN_LOOP_INTERVAL_SEC），
+                                 # 之前排查"碰屏幕→贴贴延迟"几轮都卡在"到底是
+                                 # 哪个环节慢"这个问题上，run() 里其实早就在算
+                                 # 每次 tick() 的真实耗时（用来决定还要不要
+                                 # 补睡），只是从来没有打印出来。1.0s 远大于
+                                 # 正常 tick()（不涉及任何设备请求时几乎是 0，
+                                 # 涉及一次 HTTP 请求时通常几十到几百毫秒），
+                                 # 只有真的有什么阻塞了才会触发。
 
 # --- 计时器（秒） ---
 IDLE_TO_SLEEPY_SEC = 180
@@ -4763,6 +4774,9 @@ class PuppyEngine:
                 # 完整间隔"还欠的那部分，tick() 已经耗时超过一个间隔就不再
                 # 补睡。
                 elapsed = time.time() - tick_start
+                if elapsed > SLOW_TICK_WARN_SEC:
+                    print(f"[主循环] tick #{self.tick_count} 耗时 {elapsed:.2f}s，"
+                          f"明显超过正常水平")
                 time.sleep(max(0.0, MAIN_LOOP_INTERVAL_SEC - elapsed))
 
         except KeyboardInterrupt:
