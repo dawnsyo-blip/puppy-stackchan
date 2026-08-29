@@ -2942,6 +2942,7 @@ class PuppyEngine:
             # 拍照失败当成"这一帧不是手指枪"计入滑动窗口，不整个清空——
             # 跟下面判定逻辑的滑动窗口是同一个道理，偶尔一帧的意外（拍照
             # 失败/没检测到手）不该让已经攒的进度全部作废。
+            print("[手势] 拍照失败/超时，这一帧跳过")
             self.finger_gun_history.append(False)
             return
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -2949,6 +2950,7 @@ class PuppyEngine:
         results = self.hand_landmarker.detect(mp_img)
 
         if not results.hand_landmarks:
+            print("[手势] 这一帧没检测到手")
             self.finger_gun_history.append(False)
             return
         lm = results.hand_landmarks[0]
@@ -2966,6 +2968,18 @@ class PuppyEngine:
         if gun_result["is_gun"]:
             print(f"[手势] 检测到手指枪（最近{len(self.finger_gun_history)}帧命中"
                   f"{hit_count}/{FINGER_GUN_CONFIRM_HITS}）")
+        else:
+            # 检测到手、但不构成手指枪——之前完全不打印这种情况，只有真正
+            # 命中才有日志，实机排查"为什么迟迟不触发"时完全看不出是"手
+            # 根本没在窗口期内举起来"还是"举了但判定没过"。精简版的判定
+            # 明细，跟 host/gesture_test.py 诊断脚本同一批字段，但压缩成
+            # 一行，避免每 GESTURE_POLL_SEC 就刷一大段。
+            print(f"[手势] 未命中：食指={gun_result['index_straight']}"
+                  f"({gun_result['index_ratio']:.2f}) "
+                  f"拇指={gun_result['thumb_spread']}"
+                  f"({gun_result['thumb_spread_ratio']:.2f}) "
+                  f"中指弯={gun_result['middle_curled']}"
+                  f"({gun_result['middle_ratio']:.2f})")
 
         if hit_count >= FINGER_GUN_CONFIRM_HITS:
             print("[触发] 手指枪确认 → 装死")
