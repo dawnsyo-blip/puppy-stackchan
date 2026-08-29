@@ -111,6 +111,11 @@ MAIN_LOOP_INTERVAL_SEC = 0.2    # 主循环 tick() 间隔——原来是 0.5s，
                                  # INTERVAL_SEC 内部节流（这两个值没变），
                                  # tick() 只是"有资格检查"的时机变密了，实际
                                  # 发不发请求还是那两个值说了算。
+FACE_INFER_SLOW_WARN_SEC = 0.3   # detect_face_once() 里解码+MediaPipe 推理
+                                  # 这一段单独超过这个值就打印警告——这段不受
+                                  # FACE_BG_TIMEOUT_SEC 约束（那个只管网络
+                                  # 请求），文档里记过 MediaPipe 推理正常在
+                                  # 20~50ms 量级，这里留了 6~15 倍余量。
 CAMERA_SLOW_WARN_SEC = 0.8       # 单次 /camera 请求（含排队等待锁的时间）
                                   # 超过这个值就打印警告——独立用 curl 连续
                                   # 测过 /camera，稳定在 ~0.5s，这里留了
@@ -2892,9 +2897,21 @@ class PuppyEngine:
             if img is None:
                 return False, None
             h, w = img.shape[:2]
+            # 解码+推理这段单独计时——FACE_BG_TIMEOUT_SEC 只限制了上面
+            # capture_frame() 的网络请求，完全不覆盖这里的 cv2 解码和
+            # MediaPipe 推理；如果这段时间主机 CPU 恰好在忙别的事（比如
+            # 语音识别、其它后台线程），这里也可能变慢，而且不会被任何
+            # 超时打断——单独测出这段耗时，才能分清楚一次慢检测到底是
+            # 网络慢（capture_frame_with_bytes() 那边已经有计时）还是
+            # 推理慢。
+            t0 = time.time()
             rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             results = self.face_detector.detect(mp_img)
+            infer_elapsed = time.time() - t0
+            if infer_elapsed > FACE_INFER_SLOW_WARN_SEC:
+                print(f"[人脸] 解码+推理这次耗时 {infer_elapsed:.2f}s，"
+                      f"明显超过正常的 ~50ms")
             if not results.detections:
                 return False, None
             bbox = results.detections[0].bounding_box
@@ -3010,9 +3027,16 @@ class PuppyEngine:
             print("[手势] 拍照失败/超时，这一帧跳过")
             self.finger_gun_history.append(False)
             return
+        # 解码+推理单独计时，跟 detect_face_once() 里的 FACE_INFER_SLOW_
+        # WARN_SEC 是同一个理由——这段不受 FACE_BG_TIMEOUT_SEC 约束。
+        t0 = time.time()
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         results = self.hand_landmarker.detect(mp_img)
+        infer_elapsed = time.time() - t0
+        if infer_elapsed > FACE_INFER_SLOW_WARN_SEC:
+            print(f"[手势] 解码+推理这次耗时 {infer_elapsed:.2f}s，"
+                  f"明显超过正常的 ~50ms")
 
         if not results.hand_landmarks:
             print("[手势] 这一帧没检测到手")
