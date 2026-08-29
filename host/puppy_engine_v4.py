@@ -1262,10 +1262,13 @@ SYSTEM_PROMPT = """你是一只比格犬，名字叫"小狗"，你叫主人"人"
 # ║              API 辅助函数                     ║
 # ╚══════════════════════════════════════════════╝
 
-# 复用一个 Session：StackChan 的 WebServer 没有主动发 "Connection: close"，
-# 支持 HTTP keep-alive。之前每次 requests.get() 都会新开一个 TCP 连接，
-# 对 ESP32 本来就紧张的 WiFi/LWIP 连接资源是额外压力；用同一个 Session 让
-# urllib3 复用连接，减少设备侧频繁建连/拆连的开销。
+# 用同一个 Session（主要图 requests 的连接池管理/配置复用方便），但
+# **每次请求都显式带 `Connection: close`**（见 api_get() 里的说明）——
+# 原本这里是想让 urllib3 复用 TCP 连接、减少设备侧频繁建连/拆连的开销，
+# 但实测排查"/touch 单次耗时 3 秒"这个谜团时怀疑是复用的连接偶尔"假死"
+# 导致的，改成每次都显式关闭连接、不复用，用一点点握手开销换掉这个更大
+# 的不确定性。如果以后有办法确认这条假设是错的（比如按连接分别打日志、
+# 确认从来没有真的复用出问题），可以考虑改回来，但目前没有把握。
 _session = requests.Session()
 # trust_env=False：不读环境变量/系统代理设置（本机跑着一个本地沙盒代理，
 # HTTP_PROXY/HTTPS_PROXY 指向 127.0.0.1，requests 默认会自动用它）。StackChan
@@ -1306,7 +1309,20 @@ def api_get(endpoint, timeout=None, _retry=True):
     t0 = time.time()
     try:
         with _device_lock:
-            return _session.get(f"{BASE_URL}{endpoint}", timeout=timeout or TIMEOUT)
+            # Connection: close——排查"/touch 单次耗时 3 秒"这次实测出的
+            # 谜团时加的：`/touch` 在固件那边是零堆分配的极简实现，正常该是
+            # 几十毫秒级，不可能自己算出 3 秒，而且好几次数值都惊人地一致
+            # （2.95~3.06s），不像是随机抖动，更像是撞上了某个固定的网络层
+            # 超时/重传时间。怀疑是 `_session` 复用的 HTTP keep-alive 连接
+            # 偶尔"假死"——连接池以为这条 TCP 连接还活着，实际设备那边已经
+            # 断开或者丢了包，客户端要等一次底层超时才会发现、重新建连。
+            # 显式声明每次请求用完就关闭连接，不给连接池复用的机会写入一条
+            # 可能已经死掉的连接——用一点点"每次都要重新握手"的开销，换掉
+            # "偶尔卡在一条坏连接上好几秒"这个更大的不确定性。这跟 `_session`
+            # 本身要不要保留是两回事：Session 对象还留着（cookie/配置这些
+            # 场景用不上但无害），只是不再让 TCP 连接跨请求复用。
+            return _session.get(f"{BASE_URL}{endpoint}", timeout=timeout or TIMEOUT,
+                                 headers={"Connection": "close"})
     except requests.exceptions.RequestException as e:
         print(f"  [请求失败] {endpoint}: {e}")
         if _retry:
