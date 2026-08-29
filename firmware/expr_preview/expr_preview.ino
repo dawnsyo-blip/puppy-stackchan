@@ -1,26 +1,27 @@
 /*
- * expr_preview.ino — 新表情快速预览（独立最小 sketch）
+ * expr_preview.ino — 表情预览（独立最小 sketch）
  * ======================================================
- * 只用来快速看新表情的视觉效果，不含 WiFi/HTTP/摄像头/麦克风——只有屏幕
- * 渲染，编译和烧录都比完整版 firmware.ino 快很多，方便反复调整 PuppyFace.h
- * 里的参数、重新烧录查看，不用碰、也不会影响正在跑的主固件。目前列表里是
- * 三个新设计中的表情："生气"（angry，不对称眉毛）、"吃饭"（eat，口水巾+
- * 骨头图案）、"玩"（play，右眼"<"+骨头吊牌+右耳蝴蝶）——都已经在
- * PuppyFace.h/handleFace() 里接好，但还没接入 host 端状态机的任何触发场景。
- * 之前迭代过的"委屈"/peekaboo/晕/装死都已经正式接入主固件+host，不再需要
- * 放在这个预览列表里反复看，已经从这里删掉（对应的 PuppyFace.h 代码本身
- * 没有删，只是不在这个预览脚本的循环列表里）。
+ * 不含 WiFi/HTTP/摄像头/麦克风——只有屏幕渲染，编译和烧录都比完整版
+ * firmware.ino 快很多。有两个用途：①设计新表情时反复调整 PuppyFace.h
+ * 里的参数、重新烧录查看效果；②列出当前所有已定型的表情，方便逐个拍照
+ * 留存（比如放进 GitHub README 当参考图），不用碰、也不会影响正在跑的
+ * 主固件。
+ *
+ * 当前列表是 handleFace()（firmware.ino）里已经接好的全部 15 个表情，
+ * 跟 PuppyFace.h 头部注释的"表情"清单保持一致：内置枚举 5 个（neutral/
+ * happy/sleepy/doubt/sad）+ 自定义字符串 10 个（thinking/excited/
+ * privacy/grieved/peekaboo/dizzy/dead/angry/eat/play）。以后
+ * PuppyFace.h 里新增表情，记得回来把这个列表也补上，不要只更新
+ * handleFace() 那边——这里是"看全部表情长什么样"的唯一入口，跟
+ * handleFace() 脱节的话会漏掉新表情的参考图。
  *
  * PuppyFace.h 直接引用主固件那一份（#include "../PuppyFace.h"），不是复制
  * 一份改——确认视觉效果满意后，改动本来就已经在正确的地方，不需要"搬"过去，
  * 直接编译烧录主固件 firmware.ino 就行。
  *
- * 用法：烧录后打开串口（115200），每按一次回车切到下一个表情，常态 →
- * 生气 → 吃饭 → 玩 → 循环，不受打字内容影响，只看有没有收到换行符。
- * 屏幕上方会印当前是哪个方便对照；同时也会打印到串口。
- *
- * 视觉效果确认满意后，下一步是去 host 端 puppy_engine_v4.py 里决定什么
- * 场景触发这三个表情（handleFace() 已经接好了 /face?expr=angry/eat/play）。
+ * 用法：烧录后打开串口（115200），每按一次回车切到下一个表情，按上面
+ * 列表的顺序循环，不受打字内容影响，只看有没有收到换行符。屏幕上方会印
+ * 当前是第几个/哪个表情方便对照拍照；同时也会打印到串口。
  */
 
 #include <M5StackChan.h>
@@ -52,28 +53,46 @@ void drawSubtitle(M5Canvas *spi, uint16_t fg) {}
 Avatar avatar;
 Expression baseExpr = Expression::Neutral;
 
-const char* EXPR_NAMES[] = {"neutral", "angry", "eat", "play"};
-const int NUM_EXPR = 4;
+const char* EXPR_NAMES[] = {
+  "neutral", "happy", "sleepy", "doubt", "sad",
+  "thinking", "excited", "privacy", "grieved", "peekaboo",
+  "dizzy", "dead", "angry", "eat", "play"
+};
+const int NUM_EXPR = 15;
 int exprIdx = 0;
 
+// 跟 handleFace()（firmware.ino）同一套映射：内置枚举 5 个直接
+// setExpression()，其余全部是 g_customExpr 字符串扩展表情。
 void applyExpr(const char* name) {
   g_customExpr = "";
-  if (strcmp(name, "angry") == 0 || strcmp(name, "eat") == 0 || strcmp(name, "play") == 0) {
+  if (strcmp(name, "neutral") == 0) {
     avatar.setExpression(Expression::Neutral);
     baseExpr = Expression::Neutral;
-    g_customExpr = name;
+  } else if (strcmp(name, "happy") == 0) {
+    avatar.setExpression(Expression::Happy);
+    baseExpr = Expression::Happy;
+  } else if (strcmp(name, "sleepy") == 0) {
+    avatar.setExpression(Expression::Sleepy);
+    baseExpr = Expression::Sleepy;
+  } else if (strcmp(name, "doubt") == 0) {
+    avatar.setExpression(Expression::Doubt);
+    baseExpr = Expression::Doubt;
+  } else if (strcmp(name, "sad") == 0) {
+    avatar.setExpression(Expression::Sad);
+    baseExpr = Expression::Sad;
   } else {
     avatar.setExpression(Expression::Neutral);
     baseExpr = Expression::Neutral;
+    g_customExpr = name;
   }
 
   M5StackChan.Display().fillRect(0, 0, 320, 20, TFT_BLACK);
   M5StackChan.Display().setCursor(4, 2);
   M5StackChan.Display().setTextSize(1);
   M5StackChan.Display().setTextColor(TFT_WHITE, TFT_BLACK);
-  M5StackChan.Display().printf("expr: %s", name);
+  M5StackChan.Display().printf("expr %d/%d: %s", exprIdx + 1, NUM_EXPR, name);
 
-  Serial.printf("[预览] 切到表情: %s\n", name);
+  Serial.printf("[预览] 切到表情 %d/%d: %s\n", exprIdx + 1, NUM_EXPR, name);
 }
 
 void setup() {

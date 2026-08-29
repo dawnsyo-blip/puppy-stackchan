@@ -602,16 +602,18 @@ EXPRESSION_MAP = {
 }
 
 # --- 定时提醒 + 生气催促 ---
-# 小狗在指定时间主动提醒主人（喝水/吃饭/走动），提醒后如果 10 分钟内主人
-# 一直没离开座位，小狗表现出"生气"行为催促。只在 host 端实现，固件早就有
-# angry 表情 + LED/舵机/触摸/摄像头这些全部需要的能力，不用改固件。
+# 小狗在指定时间主动提醒主人（喝水/吃饭/走动），提醒后如果在场监测窗口内
+# 主人一直没离开座位，小狗表现出"生气"行为催促。只在 host 端实现，固件
+# 早就有 angry 表情 + LED/舵机/触摸/摄像头这些全部需要的能力，不用改固件。
 #
-# 吃饭是固定时间点（中午/傍晚各一次）；喝水/出去玩不再是固定时间点，改成
-# 从当天第一次成功发出的吃饭提醒开始，按 DYNAMIC_INTERVAL_MIN/MAX_SEC 随机
-# 间隔连续触发、每次随机二选一，直到 DYNAMIC_ACTIVE_HOUR_END 才停（见
-# _check_dynamic_reminder()）——不用固定时间点是因为"每隔1~1.5小时"这种
-# 持续节奏本身就跟"某个固定时刻"是两种不同的调度模型，硬塞进 REMINDERS
-# 这张固定时间表反而别扭。
+# 吃饭是固定时间点（中午/傍晚各一次），提醒完就结束，不进在场监测、不会
+# 催促生气。喝水/出去玩是完全独立的另一条链，跟吃饭提醒没有依赖关系——
+# 引擎启动时就直接排好下一次触发时间，按 DYNAMIC_INTERVAL_MIN/MAX_SEC
+# 随机间隔连续触发、每次按天气二选一，直到 DYNAMIC_ACTIVE_HOUR_END 才停
+# （见 _check_dynamic_reminder()）——不用固定时间点是因为"每隔1~1.5小时"
+# 这种持续节奏本身就跟"某个固定时刻"是两种不同的调度模型，硬塞进
+# REMINDERS 这张固定时间表反而别扭。这条链发出提醒后会启动在场监测窗口，
+# 是唯一可能触发"生气"的路径。
 REMINDERS = [
     {
         "hour": 11, "minute": 30,
@@ -627,23 +629,52 @@ REMINDERS = [
 
 REMINDER_WINDOW_SEC = 120          # 到达设定时间前后 2 分钟内算命中
 REMINDER_COOLDOWN_SEC = 600        # 同一条提醒触发后 10 分钟内不再重复
-REMINDER_RECHECK_SEC = 600         # 提醒发出后 10 分钟复查主人是否还在
-REMINDER_SAMPLE_INTERVAL_SEC = 60  # 复查期间每 60 秒采样一次人脸（远低于会
-                                    # 触发 ESP32 堆碎片化重启的高频轮询阈值）
-REMINDER_PRESENCE_THRESHOLD = 0.7  # 采样中 ≥70% 检测到人脸 → 判定"一直在"
+
+# --- 提醒后的在场监测窗口 ---
+# 提醒发出后不是"过了固定时长就无条件生气"，而是持续采样人脸、按窗口结束
+# 时的在场率决定要不要生气——主人中途离开过（比如去接了杯水又回来坐下）
+# 就不该被催促。窗口用采样次数而不是时间戳判断结束（见
+# _check_presence_monitoring()），样本数攒够就结束。
+PRESENCE_SAMPLE_INTERVAL_SEC = 30  # 采样间隔（秒）。不要调得更短——参考
+                                    # FACE_BG_TIMEOUT_SEC 旁边记的教训，请求
+                                    # 太频繁会把 ESP32 打崩（堆碎片化重启）。
+PRESENCE_WINDOW_SAMPLES = 20       # 总采样次数（30s × 20 = 600s = 10 分钟）
+PRESENCE_ANGRY_THRESHOLD = 0.70    # 在场率严格大于此值才触发生气（14/20=
+                                    # 0.70 不算，15/20=0.75 才算）
+PRESENCE_WINDOW_MAX_SEC = 1800     # 窗口的硬性兜底时长（30 分钟）。正常情况
+                                    # 下窗口靠攒够 PRESENCE_WINDOW_SAMPLES 个
+                                    # 样本结束；但 PRIVACY 状态下不采样（见
+                                    # _check_presence_monitoring()），如果
+                                    # 主人长时间待在 PRIVACY 里，样本会一直
+                                    # 攒不够，窗口就卡住不结束——
+                                    # self._reminder_recheck_target 会一直
+                                    # 非 None，导致 _check_reminders()/
+                                    # _check_dynamic_reminder() 互斥挡住后续
+                                    # 所有新提醒。这个兜底保证不管样本够不够，
+                                    # 最多等这么久窗口也会强制结束（用现有
+                                    # 样本，哪怕是 0 个，算一次在场率）。取
+                                    # 30 分钟是给 PRIVACY 这类中断留够缓冲，
+                                    # 比理想的 10 分钟窗口宽松不少，但仍然
+                                    # 远好于"无限期卡住"。
 
 # --- 喝水/出去玩的动态调度 ---
 # 不进 REMINDERS 固定时间表，靠 self._dynamic_next_time（下一次触发的
-# time.time() 时间戳）驱动，第一次赋值发生在 _deliver_reminder() 里某条
-# want_eat 成功发出之后（见该函数末尾），之后每次触发完（不管有没有真的
-# 找到人）都会重新排一次下一次的时间，形成持续的链条。
+# time.time() 时间戳）驱动，在引擎启动时（`__init__()`）就直接排好第一次
+# 触发时间，按 DYNAMIC_INTERVAL_MIN/MAX_SEC 随机间隔连续触发一条独立的链，
+# 每次触发完（不管有没有真的找到人）都会重新排一次下一次的时间。
 #
-# 活跃时段限制在白天——晚上21点后/早上8点前不触发，避免深夜/临睡前还在
-# 提醒喝水遛弯；这个时间范围是没有实机验证过的默认猜测，具体几点合适要看
-# 实际作息反馈调整。落在活跃时段之外时不会攒着一开门就立刻触发，而是重新
+# 这条链跟吃饭提醒（REMINDERS）之间没有依赖关系——早期版本要求当天第一次
+# 吃饭提醒成功发出之后才开始这条链，现在按状态机设计（见
+# 表情映射v11.xlsx/CLAUDE.md 里的状态图）把两者拆成完全并行、互不依赖的
+# 两条时间触发路径，只共用同一个"是否有提醒正在监测中"的互斥
+# （`self._reminder_recheck_target`）。
+#
+# 活跃时段收紧到下午/傍晚——13点前（含上午、深夜、凌晨）不触发，21点后也
+# 不触发；这个时间范围是没有实机验证过的默认猜测，具体几点合适要看实际
+# 作息反馈调整。落在活跃时段之外时不会攒着一开门就立刻触发，而是重新
 # 从活跃时段起点开始算一次随机间隔（见 _check_dynamic_reminder()），避免
-# "憋了一晚上早上8点整准时响"这种不像随机节奏的效果。
-DYNAMIC_ACTIVE_HOUR_START = 8
+# "憋了一晚上13点整准时响"这种不像随机节奏的效果。
+DYNAMIC_ACTIVE_HOUR_START = 13
 DYNAMIC_ACTIVE_HOUR_END = 21
 DYNAMIC_INTERVAL_MIN_SEC = 3600     # 1 小时
 DYNAMIC_INTERVAL_MAX_SEC = 5400     # 1.5 小时
@@ -736,6 +767,14 @@ def _classify_weather_icon(icon_code):
     if 400 <= code <= 499:
         return "snow"
     return "other"
+
+# 喝水/出去玩动态提醒二选一的依据：晴/多云/阴天算适合外出，雨/雪/"other"
+# （雾霾沙尘等，见上面 _classify_weather_icon() 的分类注释）算不适合。跟
+# WEATHER_KEYWORD_POOLS 是两套独立的判断——那边是"选中出去玩之后，用什么
+# 词描述这次出去玩"，这里是"到底该提醒出去玩还是提醒喝水"这个更前置的
+# 二选一决策，见 _check_dynamic_reminder()。
+def _weather_suitable_for_outdoor(category):
+    return category not in ("rain", "snow", "other")
 
 # 这几个池子是照用户给的例子（"雨天→外面/水/玩"、"晴天→玩/阳光/风"）加上
 # 他提供的完整词库手工分的，没有实机验证过挑出来的组合听着自不自然，用户
@@ -2289,12 +2328,16 @@ class PuppyEngine:
         # 提醒的复查窗口撞在一起互相覆盖。
         self._reminder_cooldowns: dict[str, float] = {}
         self._reminder_recheck_target: float | None = None
-        self._reminder_presence_samples: list[bool] = []
-        self._reminder_last_sample_time: float = 0.0
+        self._presence_samples: list[bool] = []
+        self._presence_last_sample_time: float = 0.0
+        self._presence_window_start: float = 0.0
         self._reminder_pending_label: str | None = None
-        # 喝水/出去玩动态链条的下一次触发时间戳，None = 链条还没开始（当天
-        # 还没有一条吃饭提醒成功发出过），见 _check_dynamic_reminder()。
-        self._dynamic_next_time: float | None = None
+        # 喝水/出去玩动态链条的下一次触发时间戳——跟吃饭提醒没有依赖关系，
+        # 引擎启动时就直接排好第一次触发时间，之后每次触发完都会重新排
+        # 下一次，见 _check_dynamic_reminder()。落在活跃时段之外时，
+        # _check_dynamic_reminder() 会在真正到点检查时自动重新计算成活跃
+        # 时段起点，这里不需要预先判断当前是不是活跃时段。
+        self._dynamic_next_time: float | None = time.time() + _next_dynamic_delay()
 
         print("[引擎] 小狗行为引擎 v4 启动！")
         print(f"[引擎] 当前状态: {self.state.value}")
@@ -2304,9 +2347,11 @@ class PuppyEngine:
         print("[引擎] 呼唤\"小狗小狗\" → 开心")
         print("[引擎] 说\"我们玩捉迷藏吧\" → 捉迷藏找物品游戏（游戏中长按头顶可中途退出）")
         print(f"[引擎] 持续流式监听 (rms >= {STREAM_RMS_THRESHOLD}) → 扫描找人 → 开心 → 思考 → 回应（隐私状态下忽略语音）")
-        print(f"[引擎] 固定时间提醒 {len(REMINDERS)} 条（吃饭），发出后 {REMINDER_RECHECK_SEC/60:.0f} 分钟内主人一直在 → 生气催促（双击头顶原谅）")
-        print(f"[引擎] 喝水/出去玩：吃饭提醒发出后开始，{DYNAMIC_INTERVAL_MIN_SEC/60:.0f}~{DYNAMIC_INTERVAL_MAX_SEC/60:.0f} 分钟随机间隔触发，"
-              f"{DYNAMIC_ACTIVE_HOUR_START}:00~{DYNAMIC_ACTIVE_HOUR_END}:00 活跃")
+        _presence_window_min = PRESENCE_WINDOW_SAMPLES * PRESENCE_SAMPLE_INTERVAL_SEC / 60
+        print(f"[引擎] 固定时间提醒 {len(REMINDERS)} 条（吃饭），不进在场监测，不会生气")
+        print(f"[引擎] 喝水/出去玩：跟吃饭提醒独立，{DYNAMIC_INTERVAL_MIN_SEC/60:.0f}~{DYNAMIC_INTERVAL_MAX_SEC/60:.0f} 分钟随机间隔触发，"
+              f"{DYNAMIC_ACTIVE_HOUR_START}:00~{DYNAMIC_ACTIVE_HOUR_END}:00 活跃，按天气二选一，"
+              f"发出后约 {_presence_window_min:.0f} 分钟在场监测窗口内在场率 > {PRESENCE_ANGRY_THRESHOLD:.0%} → 生气催促（双击头顶原谅）")
         print("[引擎] Ctrl+C 退出\n")
 
     # ---------- 状态转移 ----------
@@ -3833,8 +3878,9 @@ class PuppyEngine:
             self.state_enter_time = time.time()
 
     # ---------- 定时提醒 + 生气催促 ----------
-    # 小狗在指定时间主动提醒主人，提醒后如果 REMINDER_RECHECK_SEC 内主人一直
-    # 没离开座位，就生气催促（_play_angry_reminder()）。发出提醒本身
+    # 小狗在指定时间主动提醒主人，提醒后进入在场监测窗口（见
+    # _check_presence_monitoring()），如果主人一直没离开座位，就生气催促
+    # （_play_angry_reminder()）。发出提醒本身
     # （_deliver_reminder()）是一次同步动作，跟 run_conversation_turn() 占住
     # tick() 几秒是同一种模式，不需要单独的状态；生气催促序列本身则是一个
     # 完整的同步阻塞方法（跟 play_game_hide_seek() 是同一种架构），执行期间
@@ -3874,14 +3920,18 @@ class PuppyEngine:
                 break
 
     def _check_dynamic_reminder(self):
-        """喝水/出去玩不是固定时间点，是从当天第一次吃饭提醒成功发出开始
-        （self._dynamic_next_time 被 _deliver_reminder() 设成非 None）按
-        DYNAMIC_INTERVAL_MIN/MAX_SEC 随机间隔连续触发的一条链——每次触发
-        （不管有没有真的找到人）都会重新排一次下一次时间，链条本身不会
-        断，只受活跃时段和"是否有其它提醒正在复查中"两个条件节流。跟
+        """喝水/出去玩是一条独立的链，跟吃饭提醒（REMINDERS）没有依赖关系
+        ——引擎启动时就直接排好了 self._dynamic_next_time，按
+        DYNAMIC_INTERVAL_MIN/MAX_SEC 随机间隔连续触发，每次触发（不管有
+        没有真的找到人）都会重新排一次下一次时间，链条本身不会断，只受
+        活跃时段和"是否有其它提醒正在监测中"两个条件节流。跟
         _check_reminders() 共用 self._reminder_recheck_target 这个互斥
-        （非 None 时跳过），避免吃饭/喝水/出去玩三条提醒的 10 分钟复查
-        窗口互相打断。"""
+        （非 None 时跳过），避免吃饭/喝水/出去玩三条提醒的在场监测窗口
+        互相打断。
+
+        喝水/出去玩二选一按天气决定，不再是硬币式的随机——晴/多云/阴天
+        （适合外出）选"出去玩"，雨/雪/天气查不到（不适合外出，查不到时
+        保守当作不适合）选"喝水"。见 _weather_suitable_for_outdoor()。"""
         if self._dynamic_next_time is None or self._reminder_recheck_target is not None:
             return
 
@@ -3898,15 +3948,21 @@ class PuppyEngine:
             self._dynamic_next_time = next_dt.timestamp() + _next_dynamic_delay()
             return
 
-        kind = random.choice(list(DYNAMIC_REMINDER_TEMPLATES))
-        print(f"[REMINDER] 动态链条命中，本次随机选中: {kind}")
+        weather = _fetch_weather_now(self.qweather_api_key, self.qweather_api_host)
+        if weather is not None and _weather_suitable_for_outdoor(weather[0]):
+            kind = "move_around"
+            print(f"[REMINDER] 动态链条命中，天气={weather[0]}（适合外出）→ 选中: {kind}")
+        else:
+            kind = "drink_water"
+            reason = f"天气={weather[0]}（不适合外出）" if weather is not None else "天气查不到"
+            print(f"[REMINDER] 动态链条命中，{reason} → 选中: {kind}")
         self._deliver_reminder(DYNAMIC_REMINDER_TEMPLATES[kind])
         self._dynamic_next_time = time.time() + _next_dynamic_delay()
 
     def _deliver_reminder(self, reminder):
         """发出一条提醒：扫描确认人在场 → 切表情/摆头 + 念关键词 → 收尾 →
-        启动 10 分钟复查计时。人不在时直接放弃，不进复查——催促一个不在场
-        的人没有意义。
+        （除了 want_eat）启动在场监测窗口。人不在时直接放弃，不进监测——
+        催促一个不在场的人没有意义。
 
         三种 expression 走两条不同的收尾，但关键词最终都会经过
         apply_cute_substitutions()（"饭"/"吃饭"→"饭饭"，"饿"→"肚肚"+
@@ -3924,9 +3980,13 @@ class PuppyEngine:
           → 切"吃饭"表情念关键词 → 说完保持"吃饭"表情。
         这两条分支说完都不调 enter_happy()——那个会直接把表情设回 happy
         盖掉刚设的 play/eat，所以改成手动做 enter_happy() 静默分支同款
-        的 state/session_active 记账，只是表情换成对应的自定义表情，
-        一直保持到下面的 10 分钟复查触发 _play_angry_reminder()（会自己
-        切到 angry）或者主人提前离开（下次真正的状态切换会自然换掉）。"""
+        的 state/session_active 记账，只是表情换成对应的自定义表情。
+
+        **只有 want_play/want_drink 会启动在场监测窗口，want_eat 不会**
+        ——按状态机设计，吃饭提醒是个终态，不会因为"吃太久"而生气，只有
+        喝水/出去玩这两条提醒催促了之后人还不走才会生气。表情/LED 保持
+        到主人下次真正的状态切换自然换掉，不需要 _play_angry_reminder()
+        兜底收尾。"""
         label = reminder["label"]
         print(f"[REMINDER] {label}: 检查是否发出提醒...")
         if not self.scan_for_face():
@@ -3971,47 +4031,89 @@ class PuppyEngine:
             self.state_enter_time = time.time()
             set_led_mode("solid", *WARM_WHITE_RGB)
 
-        if expr_type == "want_eat" and self._dynamic_next_time is None:
-            self._dynamic_next_time = time.time() + _next_dynamic_delay()
-            print(f"[REMINDER] {label}: 吃饭提醒已发出，喝水/出去玩的随机提醒链条从现在开始")
+        if expr_type == "want_eat":
+            print(f"[REMINDER] {label}: 提醒已发出，吃饭不进在场监测")
+            return
 
-        print(f"[REMINDER] {label}: 提醒已发出，{REMINDER_RECHECK_SEC/60:.0f} 分钟后复查主人是否还在")
-        self._reminder_recheck_target = time.time() + REMINDER_RECHECK_SEC
-        self._reminder_presence_samples = []
-        self._reminder_last_sample_time = time.time()
+        _presence_window_min = PRESENCE_WINDOW_SAMPLES * PRESENCE_SAMPLE_INTERVAL_SEC / 60
+        print(f"[REMINDER] {label}: 提醒已发出，开始在场监测窗口（每 {PRESENCE_SAMPLE_INTERVAL_SEC}s "
+              f"采样一次，共 {PRESENCE_WINDOW_SAMPLES} 次，约 {_presence_window_min:.0f} 分钟）")
+        # 只作为"有一条提醒正在监测中"的互斥标记（非 None 时 _check_reminders()/
+        # _check_dynamic_reminder() 都不会再发新提醒），窗口本身何时结束交给
+        # _check_presence_monitoring() 按采样次数判断，不再靠比较这个时间戳。
+        self._reminder_recheck_target = time.time()
+        self._presence_samples = []
+        self._presence_last_sample_time = time.time()
+        self._presence_window_start = time.time()
         self._reminder_pending_label = label
 
-    def _reminder_recheck_tick(self):
-        """10 分钟复查：每隔 REMINDER_SAMPLE_INTERVAL_SEC 采样一次人脸在不
-        在，时间到了按采样比例判定"主人是否一直在场"。PRIVACY 状态下不
-        采样（跟 tick() 里 PRIVACY 分支故意不做人脸检测是同一个理由——
-        不该在隐私状态下无端拍照），跳过的这一轮既不算"在"也不算"不
-        在"，单纯不计入样本。"""
+    def _check_presence_monitoring(self):
+        """在场监测窗口：提醒发出后，每 PRESENCE_SAMPLE_INTERVAL_SEC 采样一次
+        人脸在不在，攒够 PRESENCE_WINDOW_SAMPLES 次样本后按在场率判定"主人是
+        否一直在场"，决定要不要生气催促。跟旧版"过了固定时长就无条件生气"
+        的区别是这里用采样次数而不是时间戳判断窗口结束——主人中途离开过
+        （在场率不够）就视为已经处理过这条提醒，静默交还给 tick() 的常规
+        状态管理，不催促。
+
+        采样用短超时+不重试（跟 _check_face_worker()/_retrack_face_worker()
+        这两个后台检测同一套参数），因为这是个"低优先级、错过一次无所谓"
+        的背景任务，30 秒后自然会有下一次采样补上，不值得为了这一次多等
+        默认的 5 秒+重试。detect_face_once() 内部的 api_get() 已经会吞掉
+        请求异常返回 None/False，理论上不会往外抛异常，这里仍然包一层
+        try/except 兜底，避免任何意外异常打断整个监测窗口。
+
+        PRIVACY 状态下不采样（跟 tick() 里 PRIVACY 分支故意不做人脸检测是
+        同一个理由——不该在隐私状态下无端拍照），跳过的这一轮既不算"在"
+        也不算"不在"，单纯不计入样本、也不推进窗口。
+
+        兜底：如果长时间待在 PRIVACY（或者别的原因导致一直采不到样），样本
+        数可能永远攒不够 PRESENCE_WINDOW_SAMPLES，窗口会卡住不结束——
+        self._reminder_recheck_target 就会一直非 None，把 _check_reminders()/
+        _check_dynamic_reminder() 的互斥永久锁住，后续所有新提醒都发不出来。
+        所以窗口结束的条件是"样本攒够 **或者** 窗口已经开了超过
+        PRESENCE_WINDOW_MAX_SEC"，用现有样本（哪怕是 0 个）收尾，保证监测
+        窗口最终一定会关闭。"""
         if self._reminder_recheck_target is None:
             return
 
         now = time.time()
         if (self.state != State.PRIVACY
-                and now - self._reminder_last_sample_time >= REMINDER_SAMPLE_INTERVAL_SEC):
-            found, _ = self.detect_face_once()
-            self._reminder_presence_samples.append(found)
-            self._reminder_last_sample_time = now
+                and now - self._presence_last_sample_time >= PRESENCE_SAMPLE_INTERVAL_SEC):
+            self._presence_last_sample_time = now
+            try:
+                found, _ = self.detect_face_once(timeout=FACE_BG_TIMEOUT_SEC, _retry=False)
+            except Exception as e:
+                print(f"[Presence] 采样失败，跳过: {e}")
+            else:
+                self._presence_samples.append(found)
+                total = len(self._presence_samples)
+                running = sum(self._presence_samples)
+                print(f"[Presence] Sample {total}/{PRESENCE_WINDOW_SAMPLES}: face={found}  "
+                      f"(running: {running}/{total} = {running / total:.0%})")
 
-        if now < self._reminder_recheck_target:
+        window_timed_out = now - self._presence_window_start >= PRESENCE_WINDOW_MAX_SEC
+        if len(self._presence_samples) < PRESENCE_WINDOW_SAMPLES and not window_timed_out:
             return
 
-        samples = self._reminder_presence_samples
-        ratio = (sum(samples) / len(samples)) if samples else 0.0
+        samples = self._presence_samples
+        total = len(samples)
+        detected = sum(samples)
+        ratio = (detected / total) if total else 0.0
         label = self._reminder_pending_label
         self._reminder_recheck_target = None
-        self._reminder_presence_samples = []
+        self._presence_samples = []
         self._reminder_pending_label = None
 
-        if ratio >= REMINDER_PRESENCE_THRESHOLD:
+        timeout_note = "（样本不足，窗口超时兜底结束）" if window_timed_out else ""
+        if ratio > PRESENCE_ANGRY_THRESHOLD:
+            print(f"[Presence] Window complete: {detected}/{total} = {ratio:.0%}{timeout_note} — "
+                  f"above threshold, triggering angry")
             print(f"[REMINDER] {label}: 主人一直在场（在场率 {ratio:.0%}），生气催促！")
             self._play_angry_reminder()
         else:
-            print(f"[REMINDER] {label}: 主人已离开（在场率 {ratio:.0%}），不催促")
+            print(f"[Presence] Window complete: {detected}/{total} = {ratio:.0%}{timeout_note} — "
+                  f"below threshold, skipping angry")
+            print(f"[REMINDER] {label}: 主人中途离开过（在场率 {ratio:.0%}），不催促")
 
     def _angry_double_tap_check(self, baseline):
         """发一次 get_touch()，返回 (新的 double_tap baseline, 这次是否比
@@ -4388,12 +4490,13 @@ class PuppyEngine:
             pass
 
         # --- 定时提醒 + 生气催促（最低优先级）---
-        # 复查采样（_reminder_recheck_tick()）跟当前具体状态无关（除了
-        # PRIVACY 不拍照，见该方法说明），提醒一旦发出就要不间断采样，不能
-        # 因为小狗恰好不在 IDLE/HAPPY 就漏掉采样点，导致复查时样本不足被
-        # 误判成"人不在"。只有"要不要发一条新提醒"（_check_reminders()）
-        # 才限定在 IDLE/HAPPY——困倦/隐私/游戏/对话进行中不应该被新提醒打断。
-        self._reminder_recheck_tick()
+        # 在场监测采样（_check_presence_monitoring()）跟当前具体状态无关
+        # （除了 PRIVACY 不拍照，见该方法说明），提醒一旦发出就要不间断
+        # 采样，不能因为小狗恰好不在 IDLE/HAPPY 就漏掉采样点，导致窗口结束
+        # 时样本不足被误判成"人不在"。只有"要不要发一条新提醒"
+        # （_check_reminders()）才限定在 IDLE/HAPPY——困倦/隐私/游戏/对话
+        # 进行中不应该被新提醒打断。
+        self._check_presence_monitoring()
         if self.state in (State.IDLE, State.HAPPY):
             self._check_reminders()
             self._check_dynamic_reminder()
