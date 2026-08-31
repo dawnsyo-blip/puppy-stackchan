@@ -37,14 +37,14 @@
 <tr>
 <td width="50%">
 
-<video src="https://github.com/dawnsyo-blip/puppy-stackchan/releases/download/demo-videos/IMG_2890.MOV" controls width="100%"></video>
+https://github.com/user-attachments/assets/eae52002-e6ad-4e85-b8a6-3ef63f604e24
 
 语音对话演示：小狗用 animalese 拟声词回应
 
 </td>
 <td width="50%">
 
-<video src="https://github.com/dawnsyo-blip/puppy-stackchan/releases/download/demo-videos/IMG_2885.MOV" controls width="100%"></video>
+https://github.com/user-attachments/assets/bad6f06d-566c-4c22-829f-9d35b4a11e76
 
 手指枪手势触发"装死"状态
 
