@@ -33,6 +33,27 @@ Two of the more fun behaviors:
 1. **Hide-and-seek**: triggered by saying (in Chinese) "let's play hide and seek." Hold the object you want to hide in front of the puppy's camera so it can take a "look" — it reports back what it thinks the object is; if it got it wrong, there's a short window to say "not this one" and it'll take another look. Once confirmed, it "closes its eyes" and counts down, then sweeps the servos around the room to search for the object.
 2. **Play dead**: touching the screen triggers a brief "nuzzle" reaction, which opens a roughly 15-second gesture-recognition window. Making a "finger gun" gesture about 5 cm in front of the device's camera during that window triggers the puppy's "play dead" state; double-tapping the top of its head wakes it back up.
 
+### Demo videos
+
+<table>
+<tr>
+<td width="50%">
+
+<video src="https://github.com/dawnsyo-blip/puppy-stackchan/releases/download/demo-videos/IMG_2890.MOV" controls width="100%"></video>
+
+Voice conversation demo: the puppy replies with animalese sounds
+
+</td>
+<td width="50%">
+
+<video src="https://github.com/dawnsyo-blip/puppy-stackchan/releases/download/demo-videos/IMG_2885.MOV" controls width="100%"></video>
+
+Finger-gun gesture triggering "play dead"
+
+</td>
+</tr>
+</table>
+
 ### Notes on setup
 
 - **Voice conversation depends on a large language model you bring yourself** (either a reasoning or non-reasoning model works — DeepSeek or any compatible API). Without one configured, face tracking, touch reactions, and everything else still work fine — the puppy just won't understand what you're saying. Giving the "drink water / go outside" reminders weather-flavored keywords also needs a weather API (currently QWeather). Both are optional enhancements: missing either just falls back to fixed text, without affecting anything else.

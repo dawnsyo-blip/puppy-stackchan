@@ -31,6 +31,27 @@
 1. **捉迷藏**：通过语音说"我们来玩捉迷藏吧"触发。流程是：把要藏起来的物品放在小狗摄像头前让它"看一眼"→ 小狗报告识别到的物品名称；如果识别错了，有一小段窗口期可以说"不是这个"，它会重新看一次 → 确认无误后小狗"闭眼"并倒数 → 倒数结束后转动舵机在房间里扫描寻找目标。
 2. **装死**：摸一下屏幕触发"贴贴"反应之后，会进入约 15 秒的手势识别窗口期。在这段时间内，在设备摄像头前方约 5 厘米处比出"手指枪"的手势，即可触发小狗的"装死"状态；双击头顶可以把它唤醒。
 
+### 演示视频
+
+<table>
+<tr>
+<td width="50%">
+
+<video src="https://github.com/dawnsyo-blip/puppy-stackchan/releases/download/demo-videos/IMG_2890.MOV" controls width="100%"></video>
+
+语音对话演示：小狗用 animalese 拟声词回应
+
+</td>
+<td width="50%">
+
+<video src="https://github.com/dawnsyo-blip/puppy-stackchan/releases/download/demo-videos/IMG_2885.MOV" controls width="100%"></video>
+
+手指枪手势触发"装死"状态
+
+</td>
+</tr>
+</table>
+
 ### 使用须知
 
 - **语音对话依赖你自己接入的大语言模型**（推理模型或非推理模型均可，DeepSeek、其他兼容 API 都行）——没有配置的话，人脸追踪、触摸反应等其它功能不受影响，但小狗听不懂你在说什么。想让"喝水/出去玩"提醒带上天气相关的关键词，还需要接入一个天气 API（当前用的是和风天气）；这两者都是可选增强，未配置时会自动降级成固定文案，不影响其它功能运行。

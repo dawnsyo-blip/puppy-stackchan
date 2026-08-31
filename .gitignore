@@ -5,6 +5,11 @@ firmware/config.h
 __pycache__/
 .DS_Store
 
+# README 演示视频源文件——体积大（几十MB），实际托管在 GitHub Release
+# （demo-videos tag）里，不进仓库历史，见 README.md "演示视频" 一节
+*.MOV
+*.mov
+
 # API keys / secrets — see .env.example for the required variable names
 .env
 
