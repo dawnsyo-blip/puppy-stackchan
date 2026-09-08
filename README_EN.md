@@ -25,11 +25,11 @@ Most dog breeds you commonly see around here have prick (upright) ears, but I fo
 
 That said, going by uncanny valley theory, adding ears with clearly animal-like features to a robot that has no skin should, in theory, push the degree of zoomorphism toward a middle value — which should, in theory, make it *more* likely to trigger the uncanny valley effect, not less.
 
-So why does adding ears — floppy ones specifically — actually look better? It might come down to two factors: design ambiguity and design atypicality [(MK Strait, 2017)](https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2017.01366/full).
+So why does adding ears — especially floppy ones — actually look better? It might come down to two factors in machine design: design ambiguity and design atypicality [(MK Strait, 2017)](https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2017.01366/full).
 
-In short, ambiguity is about what category an observer's first glance sorts an object into: is this a person, or a machine?
+In short, "design ambiguity" is about what category an observer's first glance sorts an object into: is this a person, or a machine?
 
-Atypicality is about the gap an observer perceives between a design and the category they've sorted it into: does this "person" have features a person shouldn't have? Take the much-discussed AI template face as an example — at a glance it clearly reads as a human face, but look closer and it has no catchlights in the eyes, no pores, no variation in expression — features a real person should have. That's high atypicality.
+"Design atypicality" is about the gap an observer perceives between a design and the category they've sorted it into: does this "person" have features a person shouldn't have? Take the much-discussed AI template face as an example — at a glance it clearly reads as a human face, but look closer and it has no catchlights in the eyes, no pores, no variation in expression — features a real person should have. That's high atypicality.
 
 In that paper, atypicality was the strongest driver of negative reactions to robots. Based on that, my guess is that adding puppy ears to StackChan doesn't improve ambiguity, but it does reduce atypicality — the floppy-ear feature makes the "dog" categorization more definite. So the overall unease goes down too.
 
