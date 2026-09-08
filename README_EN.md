@@ -2,9 +2,56 @@
 
 A **dog-behavior-inspired emotional expression system** built on the [M5Stack StackChan](https://github.com/stack-chan/stack-chan) desktop robot. The puppy tracks your face, gives a little "nuzzle" reaction when you touch its screen, understands what you say and answers back with on-screen button animations, recognizes hand gestures, plays hide-and-seek with you, and reminds you to drink water or eat on schedule.
 
+(What follows is a bit of a ramble — skip ahead to the architecture and state machine if you just want the technical bits.)
+
+## Why a dog, instead of just wiring up an LLM?
+
+1. The stock Xiaozhi framework has no way to plug in Claude.
+2. If what I wanted was a service-style tool agent, talking to it in text is more precise and direct anyway.
+3. I picked a desktop robot over an on-screen desktop pet because I didn't want something moving around on my screen breaking my flow while I work or study, and because I wanted my downtime to involve light physical/voice interaction instead of more typing.
+4. I just like dogs.
+
+So the conclusion is: as long as it's a bit dumb, that's fine ^_^
+
+If you like the idea too, come raise a puppy with me~
+
+## Interaction design notes
+
+### Expression
+
+M5Stack's own Avatar library actually ships a dog template expression, but the stock version has no ears, so it ends up looking like a dog's face stuck onto a square head. So I designed my own puppy face with ears.
+
+Most dog breeds you commonly see around here have prick (upright) ears, but I found that prick ears look oddly sharp on this small screen — probably because StackChan's overall design leans rounded. So I went with a beagle's floppy ears instead. Floppy ears have a larger surface area and a softer outline, which visually seems to act as a "transition element," blurring the break between the square shell and the animal face.
+
+That said, going by uncanny valley theory, adding ears with clearly animal-like features to a robot that has no skin should, in theory, push the degree of zoomorphism toward a middle value — which should, in theory, make it *more* likely to trigger the uncanny valley effect, not less.
+
+So why does adding ears — floppy ones specifically — actually look better? It might come down to two factors: design ambiguity and design atypicality [(MK Strait, 2017)](https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2017.01366/full).
+
+In short, ambiguity is about what category an observer's first glance sorts an object into: is this a person, or a machine?
+
+Atypicality is about the gap an observer perceives between a design and the category they've sorted it into: does this "person" have features a person shouldn't have? Take the much-discussed AI template face as an example — at a glance it clearly reads as a human face, but look closer and it has no catchlights in the eyes, no pores, no variation in expression — features a real person should have. That's high atypicality.
+
+In that paper, atypicality was the strongest driver of negative reactions to robots. Based on that, my guess is that adding puppy ears to StackChan doesn't improve ambiguity, but it does reduce atypicality — the floppy-ear feature makes the "dog" categorization more definite. So the overall unease goes down too.
+
+### Sound
+
+A similar issue came up in the sound design. The first version of the TTS used a female human voice, and kept full sentences intact.
+
+Maybe it's because I'd already mentally filed it as a puppy — so a human voice coming out of it felt like a sharply atypical noise to me. But if it didn't speak at all and communicated purely through subtitles, it felt like it was missing interactivity.
+
+So the second version swapped full sentences for keywords instead, mimicking a dog "talking" via AAC-style sound buttons. That cut down a lot of the friction between the voice and the animal-robot form factor. Along the way I also considered switching to a mechanical-sounding child's voice, thinking it might suit the small, cute form better. But I realized that since a desktop robot can't really shed its "tool" identity, and StackChan's shape still has obvious robotic features, giving it a child's voice would end up feeling like objectifying a child. So I dropped that idea.
+
+So what voice should it actually have? Film and games have surely run into this question before, so I thought of the Minions and [Animalese](https://github.com/Acedio/animalese.js). Both effects work by speeding up speech and applying some fixed mapping rules to turn language into unintelligible sound, while still preserving intonation — keeping a sense that this is a non-human-but-somewhat-human-like character actually talking.
+
+So my final approach was: replace the original full-sentence delivery and the gendered, aged human voice with keywords and a neutral, humanlike voice, to loosen the association between the animal-robot and a human.
+
+Working through this sound design also got me thinking that zoomorphic robots probably sit on two separate continuums of realism. On one hand, the uncanny valley effect may come from resemblance to an animal; on the other, it may also come from the design atypicality introduced once a zoomorphic robot is given human traits in service of human-robot interaction. And a voice with linguistic meaning is one important factor in that second continuum.
+
+## Technical Approach
+
 It's built on top of [zziying/stackchan-openapi](https://github.com/zziying/stackchan-openapi)'s HTTP API architecture: the ESP32 only handles hardware execution, while all the AI/behavior decisions run on a host computer.
 
-## Architecture
+### Architecture
 
 ```
 Computer (the brain)                            StackChan (the body, ESP32-S3)
@@ -20,7 +67,7 @@ Computer (the brain)                            StackChan (the body, ESP32-S3)
 
 The computer and StackChan talk over the same WiFi hotspot; StackChan exposes a set of HTTP endpoints (`/face`, `/servo`, `/touch`, `/camera`, `/play`, `/stream`, `/led`, `/status`, etc.). The host-side state machine decides *what* to do, and the ESP32 only handles *how* to execute it.
 
-## State Machine Overview
+### State Machine Overview
 
 The behavior engine is built around a dozen or so states — **Idle, Happy, Excited, Sleepy, Privacy, Curious, Thinking, Sorry, Dizzy, Play Dead, Angry, Hide-and-Seek** — each triggered by a different kind of input (face tracking, voice conversation, touch gestures, shake detection, scheduled reminders, ...), and each with its own expression, servo motion, and LED pattern.
 
@@ -32,6 +79,8 @@ Two of the more fun behaviors:
 
 1. **Hide-and-seek**: triggered by saying (in Chinese) "let's play hide and seek." Hold the object you want to hide in front of the puppy's camera so it can take a "look" — it reports back what it thinks the object is; if it got it wrong, there's a short window to say "not this one" and it'll take another look. Once confirmed, it "closes its eyes" and counts down, then sweeps the servos around the room to search for the object.
 2. **Play dead**: touching the screen triggers a brief "nuzzle" reaction, which opens a roughly 15-second gesture-recognition window. Making a "finger gun" gesture about 5 cm in front of the device's camera during that window triggers the puppy's "play dead" state; double-tapping the top of its head wakes it back up.
+
+More features (like a mood log) are planned — updates will come slowly.
 
 ### Demo videos
 
