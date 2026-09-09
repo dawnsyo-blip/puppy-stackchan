@@ -6,12 +6,11 @@ A **dog-behavior-inspired emotional expression system** built on the [M5Stack St
 
 ## Why a dog, instead of just wiring up an LLM?
 
-1. The stock Xiaozhi framework has no way to plug in Claude.
-2. If what I wanted was a service-style tool agent, talking to it in text is more precise and direct anyway.
-3. I picked a desktop robot over an on-screen desktop pet because I didn't want something moving around on my screen breaking my flow while I work or study, and because I wanted my downtime to involve light physical/voice interaction instead of more typing.
-4. I just like dogs.
-
-So the conclusion is: as long as it's a bit dumb, that's fine ^_^
+1. **Observation**: a desktop robot's advantage over an on-screen desktop pet is a richer kind of interaction — it lets downtime shift from typing into light physical/voice interaction, which lets you relax for a bit without pulling you completely out of flow.
+2. **A better alternative, considered and rejected**: if what I actually wanted was a service-style tool agent, talking to it in text is more precise and direct anyway. A desktop robot can only give low-frequency, vague feedback through voice and a small screen, and it's hard to build trust in a "reliable tool" on feedback that imprecise.
+3. **The dog as a symbol**: since a desktop robot is mostly there for emotional companionship anyway, that role is a lot like a dog's place in human society — it's fine for it to be a bit dumb ^_^
+4. **Technical constraints**: the stock Xiaozhi framework has no way to plug in Claude, and even if it did, there'd be network latency.
+5. **Personal preference**: I just like dogs.
 
 If you like the idea too, come raise a puppy with me~
 
